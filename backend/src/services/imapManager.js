@@ -5,7 +5,7 @@ import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeader
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
-import { refreshMicrosoftToken } from '../routes/oauth.js';
+import { refreshMicrosoftToken, refreshGoogleToken } from '../routes/oauth.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { logger } from './logger.js';
 import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsRing.js';
@@ -1073,15 +1073,17 @@ async function computeThreadId(accountId, messageId, inReplyTo, references, subj
 
 // Ensure OAuth token is fresh before connecting
 async function ensureFreshToken(account) {
-  if (account.oauth_provider !== 'microsoft') return account;
+  const refreshers = { microsoft: refreshMicrosoftToken, google: refreshGoogleToken };
+  const refresh = refreshers[account.oauth_provider];
+  if (!refresh) return account;
   if (!account.oauth_token_expiry) return account;
   const expiry = new Date(account.oauth_token_expiry);
   const now = new Date();
   // Refresh if token expires within 5 minutes
   if (expiry - now < 5 * 60 * 1000) {
-    console.log(`Refreshing Microsoft token for ${logAccount(account)}`);
+    console.log(`Refreshing ${account.oauth_provider} token for ${logAccount(account)}`);
     try {
-      account = await refreshMicrosoftToken(account);
+      account = await refresh(account);
     } catch (err) {
       console.error(`Token refresh failed for ${logAccount(account)}:`, err.message);
     }
