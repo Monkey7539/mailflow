@@ -179,6 +179,15 @@
     }
   },
   "message": {
+    "find": {
+      "title": "Rechercher",
+      "close": "Fermer la recherche",
+      "label": "Rechercher :",
+      "matchCase": "Respecter la casse",
+      "previous": "Précédent",
+      "next": "Suivant",
+      "closeButton": "Fermer"
+    },
     "selectToRead": "Sélectionnez un message à lire",
     "noSubject": "(sans objet)",
     "to": "À :",
@@ -403,7 +412,9 @@
     "updateAvailable": "Mise à jour disponible : v{{version}}"
   },
   "contextMenu": {
+    "find": "Rechercher",
     "open": "Ouvrir",
+    "openInNewWindow": "Ouvrir dans une nouvelle fenêtre",
     "markRead": "Marquer comme lu",
     "markUnread": "Marquer comme non lu",
     "star": "Ajouter une étoile",
@@ -428,6 +439,7 @@
     "markAsHam": "Marquer comme non Spam",
     "copySubject": "Copier l'objet",
     "copySender": "Copier l'adresse de l'expéditeur",
+    "copyLink": "Copier le lien",
     "viewHeaders": "Voir les en-têtes complets",
     "delete": "Supprimer",
     "headers": {
@@ -611,7 +623,8 @@
       "groupAccountMail": "Compte et courrier",
       "groupDisplay": "Affichage",
       "groupSecurityIntegrations": "Sécurité et intégrations",
-      "groupAdmin": "Administration"
+      "groupAdmin": "Administration",
+      "plugins": "Extensions"
     },
     "rules": {
       "title": "Règles de boîte de réception",
@@ -650,6 +663,8 @@
       "actionArchive": "Archiver",
       "actionDelete": "Déplacer vers la corbeille",
       "actionMove": "Déplacer vers le dossier",
+      "actionForward": "Transférer à",
+      "actionForwardPlaceholder": "destinataire@example.com",
       "actionMovePlaceholder": "Nom du dossier",
       "stopProcessing": "Arrêter le traitement des règles suivantes si celle-ci correspond",
       "stopProcessingHint": "Si cette règle correspond, les règles suivantes ne s'exécuteront pas pour le même message.",
@@ -657,6 +672,7 @@
       "saving": "Enregistrement…",
       "errorRequired": "Nom, au moins une condition et une action sont requis.",
       "errorMoveFolder": "Veuillez entrer un dossier de destination pour l'action Déplacer.",
+      "errorForwardEmail": "Saisissez une adresse de transfert valide.",
       "errorSave": "Impossible d'enregistrer la règle.",
       "runButton": "Appliquer les règles à la boîte de réception",
       "running": "En cours…",
@@ -710,6 +726,10 @@
       "smtpHost": "Serveur SMTP",
       "smtpHostPh": "smtp.gmail.com",
       "smtpPort": "Port",
+      "smtpAuthNote": "Nécessaire uniquement si votre serveur d'envoi (SMTP) utilise un nom d'utilisateur et un mot de passe différents de l'identifiant ci-dessus. Laissez vide pour les réutiliser.",
+      "smtpAuthUser": "Nom d'utilisateur SMTP",
+      "smtpAuthUserPh": "Identique au nom d'utilisateur ci-dessus",
+      "smtpAuthPass": "Mot de passe SMTP",
       "signatureSection": "Signature",
       "saveChanges": "Enregistrer les modifications",
       "addAccount": "Ajouter un compte",
@@ -730,6 +750,9 @@
       "syncFoldersError": "Échec de la synchronisation des dossiers",
       "senderNamePh": "ex. Alice Smith",
       "senderName": "Nom de l'expéditeur",
+      "unifiedInboxSection": "Boîte de réception unifiée",
+      "unifiedInboxEnabled": "Inclure dans la boîte unifiée",
+      "unifiedInboxEnabledDesc": "Afficher les messages de ce compte dans Toutes les boîtes, la recherche unifiée et les compteurs de catégories.",
       "categorizationSection": "Catégorisation des e-mails",
       "categorizationEnabled": "Activer la catégorisation",
       "categorizationEnabledDesc": "Classe les e-mails entrants dans des onglets de catégories. Désactivé par défaut.",
@@ -796,6 +819,9 @@
     },
     "messageList": {
       "title": "Liste des messages",
+      "senderFavicons": "Favicons des expéditeurs",
+      "senderFaviconsDesc": "Afficher les icônes de site web pour les expéditeurs sans photo de contact. Seul le domaine de l'expéditeur, jamais son adresse e-mail complète, est envoyé à Twenty Icons.",
+      "senderFaviconsSaveError": "Impossible d'enregistrer le réglage des favicons des expéditeurs.",
       "scrollingMode": "Mode de défilement",
       "infiniteScroll": "Défilement infini",
       "infiniteScrollDesc": "Se charge automatiquement en faisant défiler",
@@ -839,6 +865,11 @@
       "hoverQuickActionsOffDesc": "Garder les actions rapides masquées jusqu'à l'utilisation du menu contextuel ou des raccourcis.",
       "hoverQuickActionsOn": "Activé",
       "hoverQuickActionsOnDesc": "Afficher les icônes d'action rapide dans les lignes de messages lorsque le pointeur les survole.",
+      "showMessagePreviews": "Aperçu des messages",
+      "previewOff": "Désactivé",
+      "previewOffDesc": "Masquer la ligne d’aperçu sous chaque objet.",
+      "previewOn": "Activé",
+      "previewOnDesc": "Afficher la ligne d’aperçu sous chaque objet.",
       "mobileAvatarsMode": "Avatars de l'expéditeur (mobile)",
       "mobileAvatarsOff": "Désactivé",
       "mobileAvatarsOffDesc": "Pas d'avatar — espace maximal pour l'expéditeur et l'objet.",
@@ -962,7 +993,7 @@
       "mailPolicyTitle": "Politique de connexion au serveur de messagerie",
       "mailPolicyDesc": "Contrôle les types de connexion que les utilisateurs peuvent configurer. Désactiver pour les déploiements exposés à Internet.",
       "allowPrivateHosts": "Autoriser les hôtes privés / locaux",
-      "allowPrivateHostsDesc": "Permet de se connecter à des serveurs IMAP et SMTP sur des adresses privées ou locales (p. ex. 127.0.0.1, 192.168.x.x). Nécessaire pour protonmail-bridge et les passerelles de messagerie locales similaires.",
+      "allowPrivateHostsDesc": "Permet de se connecter aux serveurs de messagerie IMAP/SMTP, aux serveurs CardDAV et aux fournisseurs d'IA sur des adresses privées ou locales (p. ex. 127.0.0.1, 192.168.x.x). Nécessaire pour protonmail-bridge, un serveur CardDAV/Nextcloud auto-hébergé ou un modèle d'IA local.",
       "allowInsecureTls": "Autoriser le TLS non sécurisé",
       "allowInsecureTlsDesc": "Permet aux utilisateurs de désactiver la vérification du certificat TLS par compte. Nécessaire pour les serveurs avec des certificats auto-signés.",
       "allowNonstandardPorts": "Autoriser les ports non standard",
@@ -1059,13 +1090,40 @@
       "featureCompose": "Aide à la rédaction (brouillon et amélioration)",
       "featureSummarize": "Résumé des e-mails",
       "saved": "Configuration IA enregistrée.",
-      "removed": "Configuration IA supprimée.",
       "testOk": "Connexion réussie.",
       "testFail": "Connexion échouée",
       "test": "Tester la connexion",
       "testing": "Test en cours…",
       "notConfigured": "Aucun fournisseur IA configuré.",
-      "remove": "Supprimer la configuration"
+      "connectionMethod": "Méthode de connexion",
+      "connectionMethodPlaceholder": "Choisissez une méthode de connexion",
+      "connectionMethodApi": "Utiliser une clé API",
+      "connectionMethodAccount": "Utiliser un abonnement",
+      "subscriptionProvider": "Fournisseur d’abonnement",
+      "subscriptionProviderChatgpt": "ChatGPT Plus/Pro (Codex Subscription)",
+      "chatgptModel": "Modèle ChatGPT",
+      "chatgptModelPh": "gpt-5.6-luna",
+      "chatgptModelDocs": "Voir les modèles disponibles",
+      "connectionStatus": "Connexion ChatGPT",
+      "connectedAs": "Connecté en tant que {{account}}",
+      "statusConnected": "Connecté",
+      "statusDisconnected": "Non connecté",
+      "statusPending": "Autorisation en attente",
+      "statusReconnect": "Reconnexion requise",
+      "statusExpired": "Autorisation expirée",
+      "statusCancelled": "Autorisation annulée",
+      "connect": "Connecter ChatGPT",
+      "connecting": "Démarrage…",
+      "reconnect": "Reconnecter",
+      "disconnect": "Déconnecter",
+      "disconnecting": "Déconnexion…",
+      "cancelling": "Annulation…",
+      "deviceInstructions": "Ouvrez la page d’autorisation et saisissez ce code à usage unique.",
+      "copyCode": "Copier le code",
+      "copied": "Copié",
+      "copyFailed": "Impossible de copier le code.",
+      "openAuthorization": "Ouvrir la page d’autorisation",
+      "deviceExpires": "Le code expire à {{time}}."
     },
     "aiActions": {
       "description": "Créez vos propres actions IA. Elles apparaissent dans le menu IA lors de la lecture d'un message, à côté de Résumer. Le prompt de chaque action est appliqué au contenu du message.",
@@ -1203,6 +1261,8 @@
       "errorSecretRequired": "Le secret client est requis.",
       "allowInsecure": "Autoriser les connexions locales / auto-signées",
       "allowInsecureDesc": "Contourne la validation de l'hôte et les vérifications du certificat TLS. À utiliser uniquement pour les fournisseurs en réseau local (ex. pocketid.internal). Déconseillé pour les déploiements accessibles depuis Internet.",
+      "rpLogout": "Déconnexion SSO (RP-initiated)",
+      "rpLogoutDesc": "À la déconnexion, met aussi fin à la session chez ce fournisseur en redirigeant vers son end-session endpoint, et pas seulement le cookie MailFlow. Nécessite que le fournisseur expose un end_session_endpoint et que l’URL de connexion MailFlow (…/login) soit enregistrée comme post-logout redirect URI.",
       "adminGroupClaim": "Claim de groupe administrateur",
       "adminGroupClaimPh": "groups",
       "adminGroupClaimDesc": "Nom du claim JWT contenant les groupes de l'utilisateur (ex. groups). Laisser vide pour désactiver l'attribution du rôle admin par groupe.",
@@ -1250,6 +1310,8 @@
         "save": "Enregistrer la configuration",
         "savedNote": "Configuration enregistrée. Cliquez sur « Connecter un compte » pour autoriser.",
         "connectedNote": "Compte Microsoft 365 connecté avec succès ! Vérifiez l'onglet Comptes.",
+        "userNoteConfigured": "Votre administrateur a configuré la connexion Microsoft 365. Connectez votre compte Outlook.com, Hotmail ou Microsoft 365 ci-dessous.",
+        "userNoteNotConfigured": "La connexion Microsoft 365 n'a pas encore été configurée par un administrateur. Veuillez demander à votre administrateur de la configurer.",
         "remove": "Supprimer",
         "deviceCodeTitle": "Connexion par code d'appareil",
         "deviceCodeNote": "Aucun URI de redirection ni secret client requis. Dans Azure, allez dans Authentification et activez 'Autoriser les flux de clients publics'. Idéal pour les comptes Outlook.com / Hotmail personnels.",
@@ -1347,6 +1409,15 @@
       "autoLockNeedsPin": "Définissez un PIN pour activer le verrouillage automatique",
       "autoLockOff": "Désactivé",
       "autoLockMin": "{{n}} min"
+    },
+    "plugins": {
+      "title": "Extensions",
+      "description": "Activez ou désactivez des fonctionnalités optionnelles pour votre compte. Une extension activée ajoute ses propres réglages et son interface.",
+      "activated": "Activée",
+      "deactivated": "Non activée",
+      "empty": "Aucune extension n'est disponible dans cette version.",
+      "error": "Impossible de mettre à jour l'extension. Veuillez réessayer.",
+      "configureIn": "Configurer les options dans {{location}}"
     }
   },
   "blockList": {
@@ -1455,5 +1526,9 @@
       "someday": "Un jour",
       "reference": "Référence"
     }
+  },
+  "window": {
+    "minimize": "Réduire",
+    "close": "Fermer"
   }
 }

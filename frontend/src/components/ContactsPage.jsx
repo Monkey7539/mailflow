@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
+import SenderAvatarImage from './SenderAvatarImage.jsx';
 
 // Deterministic avatar color from a string
 function avatarColor(str) {
@@ -16,7 +17,7 @@ function avatarColor(str) {
   return colors[h % colors.length];
 }
 
-function Avatar({ name, email, size = 36 }) {
+function Avatar({ name, email, size = 36, hasContactPhoto }) {
   const label = (name || email || '?').charAt(0).toUpperCase();
   const color  = avatarColor(name || email || '');
   return (
@@ -26,8 +27,10 @@ function Avatar({ name, email, size = 36 }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.44, fontWeight: 600, color,
       flexShrink: 0, userSelect: 'none',
+      position: 'relative', overflow: 'hidden',
     }}>
       {label}
+      <SenderAvatarImage email={email} hasContactPhoto={hasContactPhoto} />
     </div>
   );
 }
@@ -295,7 +298,12 @@ export default function ContactsPage() {
             onMouseEnter={e => { if (selected?.id !== c.id) e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
             onMouseLeave={e => { if (selected?.id !== c.id) e.currentTarget.style.background = 'transparent'; }}
           >
-            <Avatar name={c.display_name} email={c.primary_email} size={34} />
+            <Avatar
+              name={c.display_name}
+              email={c.primary_email}
+              size={34}
+              hasContactPhoto={c.has_contact_photo}
+            />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{
                 fontSize: 13, fontWeight: 500, color: 'var(--text-primary)',
@@ -346,17 +354,27 @@ export default function ContactsPage() {
     <>
       {!selected && !showNew && !isMobile && (
         <div style={{
-          height: '100%', display: 'flex', flexDirection: 'column',
+          display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
-          color: 'var(--text-tertiary)',
+          color: 'var(--text-tertiary)', textAlign: 'center', gap: 14, padding: 24,
         }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" style={{ opacity: 0.3, marginBottom: 12 }}>
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" style={{ opacity: 0.25 }}>
             <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
             <circle cx="9" cy="7" r="4"/>
             <path d="M23 21v-2a4 4 0 00-3-3.87"/>
             <path d="M16 3.13a4 4 0 010 7.75"/>
           </svg>
-          <div style={{ fontSize: 14 }}>{t('contacts.selectHint')}</div>
+          <div style={{ fontSize: 15, color: 'var(--text-secondary)' }}>{t('contacts.selectHint')}</div>
+          <button
+            onClick={startNew}
+            style={{
+              marginTop: 4, background: 'var(--accent)', border: 'none', borderRadius: 7,
+              color: 'var(--accent-text)', fontSize: 13, fontWeight: 500,
+              padding: '7px 14px', cursor: 'pointer',
+            }}
+          >
+            + {t('contacts.new')}
+          </button>
         </div>
       )}
       {inForm && (
@@ -484,7 +502,7 @@ export default function ContactsPage() {
 
   // ── Desktop layout ────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', height: '100%', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+    <div style={{ display: 'flex', flex: 1, minWidth: 0, height: '100%', overflow: 'hidden', background: 'var(--bg-primary)' }}>
 
       {/* Contact list panel */}
       <div style={{
@@ -527,8 +545,13 @@ export default function ContactsPage() {
         {listPanel}
       </div>
 
-      {/* Detail / form panel — keyed by contact id so scroll resets when switching contacts */}
-      <div key={selected?.id ?? (showNew ? 'new' : 'empty')} style={{ flex: 1, overflow: 'hidden auto', padding: 32, minWidth: 0 }}>
+      {/* Detail / form panel — keyed by contact id so scroll resets when switching contacts.
+          When nothing is selected, center the empty-state placeholder in the full pane. */}
+      <div key={selected?.id ?? (showNew ? 'new' : 'empty')} style={{
+        flex: 1, overflow: 'hidden auto', minWidth: 0,
+        padding: (!selected && !showNew) ? 0 : 32,
+        ...((!selected && !showNew) && { display: 'flex', alignItems: 'center', justifyContent: 'center' }),
+      }}>
         {detailPanel}
       </div>
     </div>
@@ -546,7 +569,12 @@ function ContactDetail({ contact: c, confirmDelete, saving, error, onEdit, onDel
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 18, marginBottom: 28, paddingRight: c.read_only ? 0 : 128 }}>
-        <Avatar name={c.display_name} email={c.primary_email} size={60} />
+        <Avatar
+          name={c.display_name}
+          email={c.primary_email}
+          size={60}
+          hasContactPhoto={Boolean(c.photo_data)}
+        />
         <div style={{ flex: 1, minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {c.display_name || c.primary_email}

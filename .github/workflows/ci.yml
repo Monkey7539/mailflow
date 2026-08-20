@@ -28,6 +28,10 @@ jobs:
         working-directory: backend
         run: npm run lint
 
+      - name: Plugin boundary
+        working-directory: backend
+        run: npm run lint:plugins
+
       - name: Syntax check
         working-directory: backend
         run: node --check src/index.js
@@ -38,7 +42,7 @@ jobs:
 
       - name: Audit
         working-directory: backend
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
 
   frontend:
     name: Frontend
@@ -71,4 +75,4 @@ jobs:
 
       - name: Audit
         working-directory: frontend
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high

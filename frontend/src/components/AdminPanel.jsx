@@ -1,18 +1,34 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import { useCallback, useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
+import { getPluginMeta } from '../plugins/registry.js';
+import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import { newAiAction, AI_ACTION_LIMITS } from '../aiActions.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
+import {
+  AI_ACCOUNT_PROVIDER_OPTIONS,
+  AI_CONNECTION_METHOD_ACCOUNT,
+  AI_CONNECTION_METHOD_API,
+  AI_CONNECTION_METHOD_OPTIONS,
+  AI_PROVIDER_API_KEY,
+  AI_PROVIDER_CHATGPT,
+  OPENAI_MODELS_URL,
+  buildAiSavePayload,
+  createCodexDevicePoller,
+  isAiFormValid,
+  normalizeAiForm,
+  selectAiConnectionMethod,
+} from '../utils/aiConfig.js';
 import { THEMES, applyTheme, applyCustomCss } from '../themes.js';
-import { FONT_SETS, loadFontSet } from '../fonts.js';
+import { FONT_SETS, loadFontSet, isRetroFont } from '../fonts.js';
 import { LAYOUTS, applyLayout } from '../layouts.js';
 import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudioContext } from '../utils/notificationSounds.js';
 import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
-import GtdZeroPet from './GtdZeroPet.jsx';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
-import { DEFAULT_GTD_FOLDERS, GTD_STATES, resolveAccountGtdFolders, diffGtdFolders, findGtdFolderCollisions } from '../utils/gtd.js';
+import { unifiedUnreadTotal } from '../utils/unifiedInbox.js';
+import { isValidForwardAddress } from '../utils/ruleActions.js';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -32,6 +48,8 @@ const inputStyle = {
   borderRadius: 7, color: 'var(--text-primary)', fontSize: 13,
   outline: 'none', transition: 'border-color 0.15s', boxSizing: 'border-box',
 };
+
+const TOGGLE_OFF_BACKGROUND = 'var(--border)';
 
 // ─── Color picker ─────────────────────────────────────────────────────────────
 const COLORS = [
@@ -62,11 +80,13 @@ function AccountForm({ initial, onSave, onCancel }) {
     name: '', email_address: '', color: '#6366f1', protocol: 'imap',
     imap_host: '', imap_port: 993, imap_skip_tls_verify: false,
     smtp_host: '', smtp_port: 587, smtp_tls: 'STARTTLS',
+    smtp_auth_user: '', smtp_auth_pass: '',
     auth_user: '', auth_pass: '', categorization_enabled: false,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [showPass, setShowPass] = useState(false);
+  const [showSmtpPass, setShowSmtpPass] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState(null);
   const [mailPolicy, setMailPolicy] = useState({ allowPrivateHosts: false, allowInsecureTls: false, allowNonstandardPorts: false });
 
@@ -167,6 +187,29 @@ function AccountForm({ initial, onSave, onCancel }) {
         </Field>
       )}
 
+      <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+        {t('admin.accounts.imapSection')}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px', gap: 10 }}>
+        <Field label={t('admin.accounts.imapHost')} required>
+          <input value={form.imap_host || ''} onChange={e => set('imap_host', e.target.value)}
+            placeholder={t('admin.accounts.imapHostPh')} style={inputStyle}
+            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+        </Field>
+        <Field label={t('admin.accounts.imapPort')}>
+          <input
+            type={mailPolicy.allowNonstandardPorts ? 'text' : 'number'}
+            value={form.imap_port || 993}
+            onChange={e => set('imap_port', mailPolicy.allowNonstandardPorts ? e.target.value : parseInt(e.target.value))}
+            style={inputStyle}
+            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+        </Field>
+      </div>
+
       <Field label={t('admin.accounts.authUser')} required>
         <input value={form.auth_user || ''} onChange={e => set('auth_user', e.target.value)}
           placeholder={t('admin.accounts.authUserPh')} style={inputStyle}
@@ -197,29 +240,6 @@ function AccountForm({ initial, onSave, onCancel }) {
         </div>
       </Field>
 
-      <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
-      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-        {t('admin.accounts.imapSection')}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px', gap: 10 }}>
-        <Field label={t('admin.accounts.imapHost')} required>
-          <input value={form.imap_host || ''} onChange={e => set('imap_host', e.target.value)}
-            placeholder={t('admin.accounts.imapHostPh')} style={inputStyle}
-            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-        </Field>
-        <Field label={t('admin.accounts.imapPort')}>
-          <input
-            type={mailPolicy.allowNonstandardPorts ? 'text' : 'number'}
-            value={form.imap_port || 993}
-            onChange={e => set('imap_port', mailPolicy.allowNonstandardPorts ? e.target.value : parseInt(e.target.value))}
-            style={inputStyle}
-            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-        </Field>
-      </div>
-
       {mailPolicy.allowInsecureTls && (
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 10 }}>
           <button
@@ -227,7 +247,7 @@ function AccountForm({ initial, onSave, onCancel }) {
             onClick={() => set('imap_skip_tls_verify', !form.imap_skip_tls_verify)}
             style={{
               width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-              background: form.imap_skip_tls_verify ? 'var(--amber)' : 'var(--bg-elevated)',
+              background: form.imap_skip_tls_verify ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
               position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
             }}
           >
@@ -284,6 +304,38 @@ function AccountForm({ initial, onSave, onCancel }) {
         </Field>
       </div>
 
+      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 12, marginBottom: 4, lineHeight: 1.5 }}>
+        {t('admin.accounts.smtpAuthNote')}
+      </div>
+      <Field label={t('admin.accounts.smtpAuthUser')}>
+        <input value={form.smtp_auth_user || ''} onChange={e => set('smtp_auth_user', e.target.value)}
+          placeholder={t('admin.accounts.smtpAuthUserPh')} style={inputStyle}
+          onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+          onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+      </Field>
+      <Field label={t('admin.accounts.smtpAuthPass')}>
+        <div style={{ position: 'relative' }}>
+          <input type={showSmtpPass ? 'text' : 'password'}
+            value={form.smtp_auth_pass || ''} onChange={e => set('smtp_auth_pass', e.target.value)}
+            placeholder={isEdit ? '••••••••' : ''}
+            style={{ ...inputStyle, paddingRight: 36 }}
+            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+          <button type="button" onClick={() => setShowSmtpPass(!showSmtpPass)} style={{
+            position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer',
+            display: 'flex', padding: 2,
+          }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              {showSmtpPass
+                ? <><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></>
+                : <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>
+              }
+            </svg>
+          </button>
+        </div>
+      </Field>
+
       <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
         {t('admin.accounts.signatureSection')}
@@ -297,6 +349,37 @@ function AccountForm({ initial, onSave, onCancel }) {
         <>
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            {t('admin.accounts.unifiedInboxSection')}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <button
+              type="button"
+              aria-pressed={form.include_in_unified_inbox !== false}
+              onClick={() => set('include_in_unified_inbox', form.include_in_unified_inbox === false)}
+              style={{
+                width: 36, height: 20, borderRadius: 10, border: 'none',
+                cursor: 'pointer', padding: 0,
+                background: form.include_in_unified_inbox !== false ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
+                position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 2,
+                left: form.include_in_unified_inbox !== false ? 18 : 2,
+                width: 16, height: 16,
+                borderRadius: '50%', background: 'white', transition: 'left 0.2s',
+              }} />
+            </button>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.accounts.unifiedInboxEnabled')}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                {t('admin.accounts.unifiedInboxEnabledDesc')}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
             {t('admin.accounts.categorizationSection')}
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, opacity: categorizationEnabled ? 0.5 : 1 }}>
@@ -307,7 +390,7 @@ function AccountForm({ initial, onSave, onCancel }) {
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none',
                 cursor: categorizationEnabled ? 'not-allowed' : 'pointer', padding: 0,
-                background: (categorizationEnabled || form.categorization_enabled) ? 'var(--accent)' : 'var(--bg-elevated)',
+                background: (categorizationEnabled || form.categorization_enabled) ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
                 position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
               }}
             >
@@ -363,7 +446,7 @@ function AccountForm({ initial, onSave, onCancel }) {
 // ─── Accounts Tab ─────────────────────────────────────────────────────────────
 function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, addNotification, backfillProgress } = useStore();
+  const { accounts, setAccounts, updateAccount, unreadCounts, setUnreadCounts, addNotification, backfillProgress } = useStore();
   const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
   const [folderMappings, setFolderMappings] = useState({});
@@ -386,11 +469,28 @@ function AccountsTab() {
   };
 
   const handleEdit = async (form) => {
-    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled };
+    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled, include_in_unified_inbox: form.include_in_unified_inbox !== false };
     if (form.auth_pass) updates.auth_pass = form.auth_pass;
     if (form.auth_user) updates.auth_user = form.auth_user;
-    await api.updateAccount(editTarget.id, updates);
-    updateAccount(editTarget.id, updates);
+    // Separate SMTP credentials (optional). A username sends both (a blank password on
+    // edit keeps the stored one); a blank username clears both back to the IMAP login.
+    if (form.smtp_auth_user) {
+      updates.smtp_auth_user = form.smtp_auth_user;
+      if (form.smtp_auth_pass) updates.smtp_auth_pass = form.smtp_auth_pass;
+    } else {
+      updates.smtp_auth_user = null;
+      updates.smtp_auth_pass = null;
+    }
+    const updated = await api.updateAccount(editTarget.id, updates);
+    const nextAccounts = accounts.map(account => account.id === editTarget.id
+      ? { ...account, ...updated }
+      : account);
+    updateAccount(editTarget.id, updated);
+    setUnreadCounts({
+      total: unifiedUnreadTotal(unreadCounts.byAccount, nextAccounts),
+      byAccount: unreadCounts.byAccount,
+    });
+    api.getUnreadCounts().then(setUnreadCounts).catch(console.error);
     setSubview('list');
     setEditTarget(null);
   };
@@ -807,7 +907,7 @@ function AccountsTab() {
                   <option value="" style={{ background: 'var(--bg-tertiary)' }}>
                     {autoFolder ? `${t('admin.folderMappings.autoDetect')} (${autoFolder.path})` : t('admin.folderMappings.autoDetectNone')}
                   </option>
-                  {availableFolders.map(f => (
+                  {availableFolders.filter(f => !f.no_select).map(f => (
                     <option key={f.path} value={f.path} style={{ background: 'var(--bg-tertiary)' }}>
                       {f.path}
                     </option>
@@ -864,7 +964,7 @@ function AccountsTab() {
           border: '1px solid var(--border-subtle)', borderRadius: 10,
           background: 'var(--bg-tertiary)', marginBottom: 10, overflow: 'hidden',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', flexWrap: 'wrap' }}>
             <div style={{
               width: 38, height: 38, borderRadius: '50%', flexShrink: 0,
               background: account.color, display: 'flex', alignItems: 'center',
@@ -872,14 +972,14 @@ function AccountsTab() {
             }}>
               {account.name?.[0]?.toUpperCase() || '?'}
             </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
+            <div style={{ flex: '1 1 150px', minWidth: 140 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {account.name}
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {account.email_address}
               </div>
-              <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 11, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {account.sync_error ? (
                   <span style={{
                     color: 'var(--red)',
@@ -895,7 +995,7 @@ function AccountsTab() {
                 )}
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 'auto' }}>
               {account.sync_error && (
                 <IconBtn onClick={() => handleReconnect(account.id)} title={t('sidebar.accountMenu.reconnect')}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1226,7 +1326,7 @@ function FontsTab() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {Object.entries(FONT_SETS).map(([key, set]) => {
+        {Object.entries(FONT_SETS).filter(([key]) => !isRetroFont(key)).map(([key, set]) => {
           const isActive = fontSet === key;
           return (
             <button
@@ -1417,7 +1517,8 @@ function SwipeActionIcon({ action, size = 17 }) {
 function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, syncInterval, setSyncInterval, folderSyncInterval, setFolderSyncInterval, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, syncInterval, setSyncInterval, folderSyncInterval, setFolderSyncInterval, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews } = useStore();
+  const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailFlow as your default email app": registerProtocolHandler is the
   // cross-browser path (works in Firefox and non-installed Chromium) and must be
@@ -1641,6 +1742,37 @@ function LayoutsTab() {
 
         <div style={{ marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border-subtle)' }}>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            {t('admin.messageList.showMessagePreviews')}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[
+              { id: false, label: t('admin.messageList.previewOff'), desc: t('admin.messageList.previewOffDesc') },
+              { id: true, label: t('admin.messageList.previewOn'), desc: t('admin.messageList.previewOnDesc') },
+            ].map(({ id, label, desc }) => {
+              const active = showMessagePreviews === id;
+              return (
+                <button
+                  key={String(id)}
+                  onClick={() => setShowMessagePreviews(id)}
+                  style={{
+                    flex: 1, padding: '10px 12px', textAlign: 'left',
+                    background: active ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
+                    border: `2px solid ${active ? 'var(--accent)' : 'var(--border-subtle)'}`,
+                    borderRadius: 8, cursor: 'pointer', transition: 'all 0.15s', outline: 'none',
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border)'; }}
+                  onMouseLeave={e => { if (!active) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 2 }}>{label}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{desc}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border-subtle)' }}>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
             {t('admin.messageList.gravatarMode')}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -1702,6 +1834,54 @@ function LayoutsTab() {
             </div>
           </div>
         )}
+
+        <div style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid var(--border-subtle)' }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+            padding: '12px 14px', borderRadius: 8,
+            background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)',
+          }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
+                {t('admin.messageList.senderFavicons')}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                {t('admin.messageList.senderFaviconsDesc')}
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={senderFavicons}
+              aria-label={t('admin.messageList.senderFavicons')}
+              disabled={senderFaviconsSaving}
+              onClick={async () => {
+                setSenderFaviconsError('');
+                try { await setSenderFavicons(!senderFavicons); }
+                catch { setSenderFaviconsError(t('admin.messageList.senderFaviconsSaveError')); }
+              }}
+              style={{
+                width: 44, height: 24, borderRadius: 12,
+                background: senderFavicons ? 'var(--accent)' : 'var(--bg-elevated)',
+                border: `1px solid ${senderFavicons ? 'var(--accent)' : 'var(--border)'}`,
+                cursor: senderFaviconsSaving ? 'not-allowed' : 'pointer',
+                position: 'relative', transition: 'all 0.2s', flexShrink: 0,
+                opacity: senderFaviconsSaving ? 0.6 : 1,
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 3, left: senderFavicons ? 22 : 3,
+                width: 16, height: 16, borderRadius: '50%', background: 'white',
+                transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+              }} />
+            </button>
+          </div>
+          {senderFaviconsError && (
+            <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 8 }}>
+              {senderFaviconsError}
+            </div>
+          )}
+        </div>
 
         {isMobile && (
           <div style={{ marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border-subtle)' }}>
@@ -2119,9 +2299,13 @@ function CardDavCard() {
 
 function IntegrationsTab() {
   const { t } = useTranslation();
-  const { setAccounts, setTodoistConnected } = useStore();
+  const { setAccounts, setTodoistConnected, user } = useStore();
+  const isAdmin = !!user?.isAdmin;
   const [subTab, setSubTab] = useState('emailProviders');
   const [configs, setConfigs] = useState({});
+  // Non-admins can't read the full config (admin-only), but need to know whether
+  // Microsoft OAuth is configured so the connect buttons enable. (#315)
+  const [msStatus, setMsStatus] = useState(null); // { configured } for non-admins
   const [loading, setLoading] = useState(true);
   const [msForm, setMsForm] = useState({ clientId: '', clientSecret: '', tenantId: '', redirectUri: '' });
   const [msExpanded, setMsExpanded] = useState(false);
@@ -2142,21 +2326,32 @@ function IntegrationsTab() {
   const [tdError, setTdError] = useState('');
 
   useEffect(() => {
-    api.getIntegrations()
-      .then(data => {
-        setConfigs(data);
-        if (data.microsoft) {
-          setMsForm({
-            clientId: data.microsoft.clientId || '',
-            clientSecret: data.microsoft.clientSecret || '',
-            tenantId: data.microsoft.tenantId || '',
-            redirectUri: data.microsoft.redirectUri || '',
-          });
-          setMsExpanded(true);
-        }
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    if (isAdmin) {
+      api.getIntegrations()
+        .then(data => {
+          setConfigs(data);
+          if (data.microsoft) {
+            setMsForm({
+              clientId: data.microsoft.clientId || '',
+              clientSecret: data.microsoft.clientSecret || '',
+              tenantId: data.microsoft.tenantId || '',
+              redirectUri: data.microsoft.redirectUri || '',
+            });
+            setMsExpanded(true);
+          }
+        })
+        .catch(console.error)
+        .finally(() => setLoading(false));
+    } else {
+      // Non-admins can only read the capability status, not the config itself.
+      api.getIntegrationsStatus()
+        .then(data => {
+          setMsStatus(data.microsoft || null);
+          if (data.microsoft?.configured) setMsExpanded(true);
+        })
+        .catch(console.error)
+        .finally(() => setLoading(false));
+    }
 
     api.todoist.status()
       .then(({ connected }) => {
@@ -2175,8 +2370,9 @@ function IntegrationsTab() {
       if (e.data?.type === 'oauth_success' && e.data?.provider === 'microsoft') {
         setSaveMsg(t('admin.integrations.microsoft.connectedNote'));
         setConnectingMs(false);
-        // Reload both so the new account appears in the sidebar immediately
-        api.getIntegrations().then(setConfigs).catch(console.error);
+        // Reload both so the new account appears in the sidebar immediately.
+        // getIntegrations is admin-only; non-admins already have the capability status.
+        if (isAdmin) api.getIntegrations().then(setConfigs).catch(console.error);
         api.getAccounts().then(setAccounts).catch(console.error);
       } else if (e.data?.type === 'oauth_error') {
         setSaveMsg('Error: ' + e.data.error);
@@ -2295,7 +2491,7 @@ function IntegrationsTab() {
     }
   };
 
-  const msConfigured = configs.microsoft?.clientId;
+  const msConfigured = isAdmin ? configs.microsoft?.clientId : msStatus?.configured;
 
   const subTabStyle = (key) => ({
     padding: '7px 14px',
@@ -2393,6 +2589,10 @@ function IntegrationsTab() {
             {/* Expanded form */}
             {msExpanded && (
               <div style={{ padding: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+                {/* Admin-only: setup instructions + credential form. Non-admins can't
+                    read or write the global config, so they see only the note + connect
+                    buttons below. (#315) */}
+                {isAdmin && (<>
                 {/* Setup instructions */}
                 <div style={{
                   padding: '12px 14px', borderRadius: 8, marginBottom: 16,
@@ -2453,6 +2653,21 @@ function IntegrationsTab() {
                     {t('admin.integrations.microsoft.redirectUriNote', { uri: `${window.location.protocol}//${window.location.hostname}${window.location.port ? ':' + window.location.port : ''}/oauth/microsoft/callback` })}
                   </div>
                 </Field>
+                </>)}
+
+                {/* Non-admin: no config form; just a short note about connecting */}
+                {!isAdmin && (
+                  <div style={{
+                    padding: '12px 14px', borderRadius: 8, marginBottom: 16,
+                    background: 'rgba(124,106,247,0.06)',
+                    border: '1px solid rgba(124,106,247,0.15)',
+                    fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6,
+                  }}>
+                    {msConfigured
+                      ? t('admin.integrations.microsoft.userNoteConfigured')
+                      : t('admin.integrations.microsoft.userNoteNotConfigured')}
+                  </div>
+                )}
 
                 {saveMsg && (
                   <div style={{
@@ -2466,6 +2681,7 @@ function IntegrationsTab() {
                 )}
 
                 <div style={{ display: 'flex', gap: 8 }}>
+                  {isAdmin && (
                   <button onClick={handleSaveMs} disabled={saving} style={{
                     padding: '9px 16px', background: 'var(--bg-elevated)',
                     border: '1px solid var(--border)', borderRadius: 8,
@@ -2474,6 +2690,7 @@ function IntegrationsTab() {
                   }}>
                     {saving ? t('common.saving') : t('admin.integrations.microsoft.save')}
                   </button>
+                  )}
 
                   <button
                     onClick={handleConnectMs}
@@ -2498,7 +2715,7 @@ function IntegrationsTab() {
                     {connectingMs ? t('admin.integrations.microsoft.redirecting') : t('admin.integrations.microsoft.connect')}
                   </button>
 
-                  {msConfigured && (
+                  {isAdmin && msConfigured && (
                     <button onClick={async () => {
                       stopDeviceFlow();
                       await api.deleteIntegration('microsoft');
@@ -2885,7 +3102,7 @@ const emptyProvider = {
   name: '', slug: '', issuer_url: '', client_id: '', client_secret: '',
   scopes: 'openid email profile', provisioning_mode: 'login_existing_only',
   allowed_domains: '', enabled: true, require_email_verified: true, allow_insecure: false,
-  admin_group_claim: '', admin_group_value: '',
+  admin_group_claim: '', admin_group_value: '', rp_initiated_logout: false,
 };
 
 function SSOTab() {
@@ -2955,7 +3172,7 @@ function SSOTab() {
     setError('');
   };
   const openEdit = (p) => {
-    setForm({ ...p, client_secret: '••••••••', allowed_domains: p.allowed_domains || '', require_email_verified: p.require_email_verified !== false, allow_insecure: p.allow_insecure === true, admin_group_claim: p.admin_group_claim || '', admin_group_value: p.admin_group_value || '' });
+    setForm({ ...p, client_secret: '••••••••', allowed_domains: p.allowed_domains || '', require_email_verified: p.require_email_verified !== false, allow_insecure: p.allow_insecure === true, admin_group_claim: p.admin_group_claim || '', admin_group_value: p.admin_group_value || '', rp_initiated_logout: p.rp_initiated_logout === true });
     setTemplateNote('');
     setEditing(p);
     setError('');
@@ -2985,6 +3202,7 @@ function SSOTab() {
         allow_insecure: !!form.allow_insecure,
         admin_group_claim: form.admin_group_claim.trim() || null,
         admin_group_value: form.admin_group_value.trim() || null,
+        rp_initiated_logout: !!form.rp_initiated_logout,
         ...(form.client_secret && form.client_secret !== '••••••••' ? { client_secret: form.client_secret } : {}),
       };
       if (editing === 'new') {
@@ -3058,7 +3276,7 @@ function SSOTab() {
             disabled={internalAuthSaving}
             style={{
               width: 44, height: 24, borderRadius: 12,
-              background: internalAuthDisabled ? 'var(--bg-elevated)' : 'var(--accent)',
+              background: internalAuthDisabled ? TOGGLE_OFF_BACKGROUND : 'var(--accent)',
               border: `1px solid ${internalAuthDisabled ? 'var(--border)' : 'var(--accent)'}`,
               cursor: internalAuthSaving ? 'not-allowed' : 'pointer',
               position: 'relative', transition: 'all 0.2s', flexShrink: 0,
@@ -3307,7 +3525,7 @@ function SSOTab() {
               onClick={() => setForm(f => ({ ...f, enabled: !f.enabled }))}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-                background: form.enabled ? 'var(--accent)' : 'var(--bg-elevated)',
+                background: form.enabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
                 position: 'relative', transition: 'background 0.2s',
               }}
             >
@@ -3325,7 +3543,7 @@ function SSOTab() {
               onClick={() => setForm(f => ({ ...f, require_email_verified: !f.require_email_verified }))}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-                background: form.require_email_verified ? 'var(--accent)' : 'var(--bg-elevated)',
+                background: form.require_email_verified ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
                 position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
               }}
             >
@@ -3346,7 +3564,7 @@ function SSOTab() {
               onClick={() => setForm(f => ({ ...f, allow_insecure: !f.allow_insecure }))}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-                background: form.allow_insecure ? 'var(--amber)' : 'var(--bg-elevated)',
+                background: form.allow_insecure ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
                 position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
               }}
             >
@@ -3358,6 +3576,27 @@ function SSOTab() {
             <div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.sso.allowInsecure')}</div>
               <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.sso.allowInsecureDesc')}</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 16 }}>
+            <button
+              type="button"
+              onClick={() => setForm(f => ({ ...f, rp_initiated_logout: !f.rp_initiated_logout }))}
+              style={{
+                width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
+                background: form.rp_initiated_logout ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
+                position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 2, left: form.rp_initiated_logout ? 18 : 2, width: 16, height: 16,
+                borderRadius: '50%', background: 'white', transition: 'left 0.2s',
+              }} />
+            </button>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.sso.rpLogout')}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.sso.rpLogoutDesc')}</div>
             </div>
           </div>
 
@@ -3398,31 +3637,104 @@ function SSOTab() {
 // ─── AI Section ───────────────────────────────────────────────────────────────
 function AISection() {
   const { t } = useTranslation();
+  const isMobile = useMobile();
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ enabled: true, baseUrl: '', apiKey: '', model: '', features: { compose: true, summarize: true } });
+  const [form, setForm] = useState(() => normalizeAiForm());
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [codexStatus, setCodexStatus] = useState({ connected: false, state: 'disconnected', reconnectRequired: false });
+  const [deviceState, setDeviceState] = useState(null);
+  const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState(null);
+  const pollerRef = useRef(null);
+  const formRef = useRef(form);
+  const tRef = useRef(t);
+
+  const persistForm = useCallback(async (nextForm) => {
+    const payload = buildAiSavePayload(nextForm);
+    const result = await api.ai.saveConfig(payload);
+    const saved = result.config || payload;
+    const normalized = normalizeAiForm(saved);
+    setConfig(saved);
+    formRef.current = normalized;
+    setForm(normalized);
+  }, []);
+
+  formRef.current = form;
+  tRef.current = t;
 
   useEffect(() => {
-    api.ai.getConfig()
-      .then(({ config: cfg }) => {
-        if (cfg) {
-          setConfig(cfg);
-          setForm({ enabled: cfg.enabled !== false, baseUrl: cfg.baseUrl || '', apiKey: cfg.apiKey || '', model: cfg.model || '', features: { compose: cfg.features?.compose !== false, summarize: cfg.features?.summarize !== false } });
+    let active = true;
+    const refreshCodexStatus = () => api.ai.codex.status()
+      .then((status) => {
+        if (!active) return;
+        setCodexStatus(status);
+        if (status.state === 'pending' && status.device) {
+          pollerRef.current?.start(status.device).catch(() => {});
         }
+      });
+    pollerRef.current = createCodexDevicePoller({
+      startDevice: api.ai.codex.start,
+      pollDevice: api.ai.codex.poll,
+      cancelDevice: api.ai.codex.cancel,
+      onState: (state) => {
+        if (!active) return;
+        setDeviceState(state);
+        setCopied(false);
+        if (state.phase === 'connected') {
+          const connectedForm = selectAiConnectionMethod({
+            ...formRef.current,
+            accountProvider: AI_PROVIDER_CHATGPT,
+          }, AI_CONNECTION_METHOD_ACCOUNT);
+          persistForm(connectedForm)
+            .then(() => {
+              if (active) setMsg({ type: 'ok', text: tRef.current('admin.ai.saved') });
+            })
+            .catch((error) => {
+              if (active) setMsg({ type: 'error', text: error.message });
+            });
+          refreshCodexStatus().catch(() => {
+            if (active) setCodexStatus({ connected: true, state: 'connected' });
+          });
+        } else if (state.phase === 'failed') {
+          setCodexStatus({ connected: false, state: 'reconnect_required', reconnectRequired: true, reason: state.reason });
+        } else if (['cancelled', 'expired'].includes(state.phase)) {
+          setCodexStatus({ connected: false, state: 'disconnected', reconnectRequired: false });
+        }
+      },
+    });
+
+    Promise.all([
+      api.ai.getConfig().then(({ config: cfg }) => {
+        if (!active) return;
+        const normalized = normalizeAiForm(cfg || {});
+        setConfig(cfg);
+        formRef.current = normalized;
+        setForm(normalized);
+      }),
+      refreshCodexStatus(),
+    ])
+      .catch((error) => {
+        if (active) setMsg({ type: 'error', text: error.message });
       })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
+      .finally(() => { if (active) setLoading(false); });
+
+    return () => {
+      active = false;
+      pollerRef.current?.dispose();
+      pollerRef.current = null;
+    };
+  }, [persistForm]);
 
   const handleSave = async (e) => {
     e.preventDefault();
     setSaving(true); setMsg(null);
     try {
-      await api.ai.saveConfig(form);
-      setConfig({ ...form });
+      await persistForm(form);
       setMsg({ type: 'ok', text: t('admin.ai.saved') });
     } catch (err) {
       setMsg({ type: 'error', text: err.message });
@@ -3439,20 +3751,62 @@ function AISection() {
     } finally { setTesting(false); }
   };
 
-  const handleRemove = async () => {
-    await api.ai.deleteConfig();
-    setConfig(null);
-    setForm({ enabled: true, baseUrl: '', apiKey: '', model: '', features: { compose: true, summarize: true } });
-    setMsg({ type: 'ok', text: t('admin.ai.removed') });
+  const handleConnect = async () => {
+    setConnecting(true); setMsg(null); setDeviceState(null); setCopied(false);
+    try {
+      await pollerRef.current?.start();
+      setCodexStatus({ connected: false, state: 'pending', reconnectRequired: false });
+    } catch (error) {
+      setMsg({ type: 'error', text: error.message });
+    } finally {
+      setConnecting(false);
+    }
   };
 
-  const field = (label, key, type = 'text', placeholder = '') => (
+  const handleCancel = async () => {
+    setCancelling(true); setMsg(null);
+    try {
+      await pollerRef.current?.cancel();
+      setCodexStatus({ connected: false, state: 'disconnected', reconnectRequired: false });
+    } catch (error) {
+      setMsg({ type: 'error', text: error.message });
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setDisconnecting(true); setMsg(null);
+    try {
+      await api.ai.codex.disconnect();
+      setDeviceState(null);
+      setCodexStatus({ connected: false, state: 'disconnected', reconnectRequired: false });
+    } catch (error) {
+      setMsg({ type: 'error', text: error.message });
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(deviceState.userCode);
+      setCopied(true);
+    } catch {
+      setMsg({ type: 'error', text: t('admin.ai.copyFailed') });
+    }
+  };
+
+  const field = (label, value, onChange, type = 'text', placeholder = '', help = null) => (
     <div style={{ marginBottom: 14 }}>
-      <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>{label}</label>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 5 }}>
+        <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</label>
+        {help && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{help}</span>}
+      </div>
       <input
         type={type}
-        value={form[key]}
-        onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+        value={value}
+        onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
         autoComplete={type === 'password' ? 'new-password' : 'off'}
         style={{ width: '100%', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text-primary)', fontSize: 13 }}
@@ -3479,7 +3833,7 @@ function AISection() {
   );
 
   const msgBox = msg && (
-    <div style={{ padding: '8px 12px', borderRadius: 6, marginBottom: 14, fontSize: 13,
+    <div role="status" aria-live="polite" style={{ padding: '8px 12px', borderRadius: 6, marginBottom: 14, fontSize: 13,
       background: msg.type === 'ok' ? 'rgba(74,222,128,0.1)' : 'rgba(248,113,113,0.1)',
       color: msg.type === 'ok' ? 'var(--green)' : 'var(--red)',
       border: `1px solid ${msg.type === 'ok' ? 'rgba(74,222,128,0.2)' : 'rgba(248,113,113,0.2)'}`,
@@ -3487,6 +3841,25 @@ function AISection() {
   );
 
   if (loading) return <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('common.loading')}</div>;
+
+  const apiSelected = form.connectionMethod === AI_CONNECTION_METHOD_API;
+  const accountSelected = form.connectionMethod === AI_CONNECTION_METHOD_ACCOUNT;
+  const chatgptSelected = accountSelected && form.accountProvider === AI_PROVIDER_CHATGPT;
+  const chatgptConnected = codexStatus.connected === true || deviceState?.phase === 'connected';
+  const reconnectRequired = codexStatus.reconnectRequired === true || codexStatus.state === 'reconnect_required' || deviceState?.phase === 'failed';
+  const pendingDevice = deviceState?.phase === 'pending' ? deviceState : null;
+  const formValid = isAiFormValid(form);
+  const statusLabel = chatgptConnected
+    ? t('admin.ai.statusConnected')
+    : pendingDevice
+      ? t('admin.ai.statusPending')
+      : reconnectRequired
+        ? t('admin.ai.statusReconnect')
+        : deviceState?.phase === 'expired'
+          ? t('admin.ai.statusExpired')
+          : deviceState?.phase === 'cancelled'
+            ? t('admin.ai.statusCancelled')
+            : t('admin.ai.statusDisconnected');
 
   return (
     <div>
@@ -3503,39 +3876,126 @@ function AISection() {
       <form onSubmit={handleSave}>
         {toggle(t('admin.ai.enabled'), form.enabled, () => setForm(f => ({ ...f, enabled: !f.enabled })))}
 
-        {config && (
-          <div style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', margin: '14px 0', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{config.model}</div>
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{config.baseUrl}</div>
-            </div>
-            {/* type="button" is required: these live inside the form now, so without it they
-                would default to submit and trigger handleSave on click. */}
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button type="button" onClick={handleTest} disabled={testing} style={{ fontSize: 12, padding: '5px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', cursor: testing ? 'default' : 'pointer', opacity: testing ? 0.6 : 1 }}>
-                {testing ? t('admin.ai.testing') : t('admin.ai.test')}
-              </button>
-              <button type="button" onClick={handleRemove} style={{ fontSize: 12, padding: '5px 12px', background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', borderRadius: 6, color: 'var(--red)', cursor: 'pointer' }}>
-                {t('admin.ai.remove')}
-              </button>
-            </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>{t('admin.ai.connectionMethod')}</label>
+          <select
+            value={form.connectionMethod}
+            onChange={e => setForm(f => selectAiConnectionMethod(f, e.target.value))}
+            style={{ ...inputStyle, cursor: 'pointer' }}
+          >
+            <option value="" disabled>{t('admin.ai.connectionMethodPlaceholder')}</option>
+            {AI_CONNECTION_METHOD_OPTIONS.map(({ value, labelKey }) => (
+              <option key={value} value={value}>{t(labelKey)}</option>
+            ))}
+          </select>
+        </div>
+
+        {accountSelected && (
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>{t('admin.ai.subscriptionProvider')}</label>
+            <select
+              value={form.accountProvider}
+              onChange={e => setForm(f => normalizeAiForm({ ...f, accountProvider: e.target.value }))}
+              style={{ ...inputStyle, cursor: 'pointer' }}
+            >
+              {AI_ACCOUNT_PROVIDER_OPTIONS.map(({ value, labelKey }) => (
+                <option key={value} value={value}>{t(labelKey)}</option>
+              ))}
+            </select>
           </div>
         )}
 
-        {field(t('admin.ai.baseUrl'), 'baseUrl', 'text', t('admin.ai.baseUrlPh'))}
-        {field(t('admin.ai.apiKey'), 'apiKey', 'password', t('admin.ai.apiKeyPh'))}
-        {field(t('admin.ai.model'), 'model', 'text', t('admin.ai.modelPh'))}
+        {!chatgptSelected && msgBox}
 
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{t('admin.ai.features')}</div>
-          {toggle(t('admin.ai.featureCompose'), form.features.compose, () => setForm(f => ({ ...f, features: { ...f.features, compose: !f.features.compose } })))}
-          {toggle(t('admin.ai.featureSummarize'), form.features.summarize, () => setForm(f => ({ ...f, features: { ...f.features, summarize: !f.features.summarize } })))}
-        </div>
+        {apiSelected && (
+          <>
+            {field(t('admin.ai.baseUrl'), form.apiKeyConfig.baseUrl, value => setForm(f => ({ ...f, apiKeyConfig: { ...f.apiKeyConfig, baseUrl: value } })), 'text', t('admin.ai.baseUrlPh'))}
+            {field(t('admin.ai.apiKey'), form.apiKeyConfig.apiKey, value => setForm(f => ({ ...f, apiKeyConfig: { ...f.apiKeyConfig, apiKey: value } })), 'password', t('admin.ai.apiKeyPh'))}
+            {field(t('admin.ai.model'), form.apiKeyConfig.model, value => setForm(f => ({ ...f, apiKeyConfig: { ...f.apiKeyConfig, model: value } })), 'text', t('admin.ai.modelPh'))}
+            {config?.provider === AI_PROVIDER_API_KEY && (
+              <button type="button" onClick={handleTest} disabled={testing} style={{ fontSize: 12, padding: '6px 12px', marginBottom: 14, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', cursor: testing ? 'default' : 'pointer', opacity: testing ? 0.6 : 1 }}>
+                {testing ? t('admin.ai.testing') : t('admin.ai.test')}
+              </button>
+            )}
+          </>
+        )}
 
-        {msgBox}
+        {chatgptSelected && (
+          <>
+            {field(
+              t('admin.ai.chatgptModel'),
+              form.chatgptConfig.model,
+              value => setForm(f => ({ ...f, chatgptConfig: { ...f.chatgptConfig, model: value } })),
+              'text',
+              t('admin.ai.chatgptModelPh'),
+              <>
+                <a href={OPENAI_MODELS_URL} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
+                  {t('admin.ai.chatgptModelDocs')}
+                </a>
+              </>,
+            )}
 
-        <button type="submit" disabled={saving || !form.baseUrl || !form.model}
-          style={{ padding: '8px 18px', background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: (saving || !form.baseUrl || !form.model) ? 0.5 : 1 }}>
+            <div style={{ marginBottom: 14, padding: '12px 14px', borderRadius: 8, background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 12, marginBottom: (pendingDevice || msg) ? 12 : 0 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('admin.ai.connectionStatus')}</div>
+                  <div style={{ fontSize: 13, color: chatgptConnected ? 'var(--green)' : reconnectRequired ? 'var(--red)' : 'var(--text-primary)', marginTop: 2 }}>{statusLabel}</div>
+                  {chatgptConnected && codexStatus.accountLabel && (
+                    <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.ai.connectedAs', { account: codexStatus.accountLabel })}</div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 8 }}>
+                  {chatgptConnected && (
+                    <button type="button" onClick={handleTest} disabled={testing} style={{ fontSize: 12, padding: '6px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', cursor: testing ? 'default' : 'pointer', opacity: testing ? 0.6 : 1 }}>
+                      {testing ? t('admin.ai.testing') : t('admin.ai.test')}
+                    </button>
+                  )}
+                  {chatgptConnected ? (
+                    <button type="button" onClick={handleDisconnect} disabled={disconnecting} style={{ fontSize: 12, padding: '6px 12px', background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', borderRadius: 6, color: 'var(--red)', cursor: disconnecting ? 'default' : 'pointer', opacity: disconnecting ? 0.6 : 1 }}>
+                      {disconnecting ? t('admin.ai.disconnecting') : t('admin.ai.disconnect')}
+                    </button>
+                  ) : !pendingDevice && (
+                    <button type="button" onClick={handleConnect} disabled={connecting} style={{ fontSize: 12, padding: '6px 12px', background: 'var(--accent)', border: 'none', borderRadius: 6, color: 'var(--accent-text)', cursor: connecting ? 'default' : 'pointer', opacity: connecting ? 0.6 : 1 }}>
+                      {connecting ? t('admin.ai.connecting') : reconnectRequired ? t('admin.ai.reconnect') : t('admin.ai.connect')}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {msgBox}
+
+              {pendingDevice && (
+                <div style={{ paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{t('admin.ai.deviceInstructions')}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <code style={{ padding: '8px 12px', borderRadius: 6, background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 18, letterSpacing: 1.5, fontWeight: 600 }}>{pendingDevice.userCode}</code>
+                    <button type="button" onClick={handleCopyCode} style={{ fontSize: 12, padding: '6px 10px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                      {copied ? t('admin.ai.copied') : t('admin.ai.copyCode')}
+                    </button>
+                    <a href={pendingDevice.verificationUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, padding: '6px 10px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--accent)', textDecoration: 'none' }}>
+                      {t('admin.ai.openAuthorization')}
+                    </a>
+                    <button type="button" onClick={handleCancel} disabled={cancelling} style={{ fontSize: 12, padding: '6px 10px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-secondary)', cursor: cancelling ? 'default' : 'pointer' }}>
+                      {cancelling ? t('admin.ai.cancelling') : t('common.cancel')}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.ai.deviceExpires', { time: new Date(pendingDevice.expiresAt).toLocaleTimeString() })}</div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {(apiSelected || chatgptSelected) && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{t('admin.ai.features')}</div>
+            {toggle(t('admin.ai.featureCompose'), form.features.compose, () => setForm(f => ({ ...f, features: { ...f.features, compose: !f.features.compose } })))}
+            {toggle(t('admin.ai.featureSummarize'), form.features.summarize, () => setForm(f => ({ ...f, features: { ...f.features, summarize: !f.features.summarize } })))}
+          </div>
+        )}
+
+        <button type="submit" disabled={saving || !formValid}
+          style={{ padding: '8px 18px', background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: 'pointer', opacity: (saving || !formValid) ? 0.5 : 1 }}>
           {saving ? t('common.saving') : t('common.save')}
         </button>
       </form>
@@ -3638,19 +4098,6 @@ function AiActionsTab() {
 function CategoriesSection({ initialSubTab }) {
   const { t } = useTranslation();
   const { accounts, categorizationEnabled, setCategorizationEnabled } = useStore();
-  // GTD settings live under Categories now, behind a local disclosure toggle.
-  // This toggle never writes to the backend — the per-account toggles inside
-  // GtdSection stay the real gates. Default open if any account already has GTD
-  // on; a manual choice is remembered in localStorage so it sticks across reopens.
-  const [gtdRevealed, setGtdRevealed] = useState(() => {
-    const stored = localStorage.getItem('mailflow_gtd_settings_reveal');
-    if (stored === '1') return true;
-    if (stored === '0') return false;
-    return accounts.some(a => a.gtd_enabled);
-  });
-  // True once the reveal was set by an explicit choice this session (manual toggle or the
-  // settings-search deep-link) — the accounts-arrived recompute below then stands down.
-  const gtdRevealTouched = useRef(false);
   const [sources, setSources] = useState([]);
   const [builtinSets, setBuiltinSets] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3668,30 +4115,6 @@ function CategoriesSection({ initialSubTab }) {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
-
-  // Arriving from the settings-search "GTD" result lands here and reveals the block.
-  useEffect(() => {
-    if (initialSubTab === 'gtd') { gtdRevealTouched.current = true; setGtdRevealed(true); }
-  }, [initialSubTab]);
-
-  // If the panel mounted before accounts resolved, gtdRevealed defaulted to collapsed even
-  // for a GTD user. Once accounts arrive, recompute the default — but only when the user has
-  // neither persisted a manual choice nor revealed/collapsed the block this session.
-  useEffect(() => {
-    if (gtdRevealTouched.current) return;
-    if (localStorage.getItem('mailflow_gtd_settings_reveal') != null) return;
-    if (accounts.length === 0) return;
-    setGtdRevealed(accounts.some(a => a.gtd_enabled));
-  }, [accounts]);
-
-  const handleToggleGtd = () => {
-    gtdRevealTouched.current = true;
-    setGtdRevealed(prev => {
-      const next = !prev;
-      localStorage.setItem('mailflow_gtd_settings_reveal', next ? '1' : '0');
-      return next;
-    });
-  };
 
   const enabledAccounts = categorizationEnabled ? accounts : accounts.filter(a => a.categorization_enabled);
   const addedBuiltins = new Set(sources.filter(s => s.source_type === 'builtin').map(s => s.value));
@@ -3787,7 +4210,7 @@ function CategoriesSection({ initialSubTab }) {
           onClick={() => setCategorizationEnabled(!categorizationEnabled)}
           style={{
             width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-            background: categorizationEnabled ? 'var(--accent)' : 'var(--bg-elevated)',
+            background: categorizationEnabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
             position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
           }}
         >
@@ -3833,7 +4256,7 @@ function CategoriesSection({ initialSubTab }) {
               )}
               <button onClick={() => handleToggle(s.id, !s.enabled)} style={{
                 width: 32, height: 18, borderRadius: 9, border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0,
-                background: s.enabled ? 'var(--accent)' : 'var(--bg-elevated)', position: 'relative', transition: 'background 0.2s',
+                background: s.enabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND, position: 'relative', transition: 'background 0.2s',
               }}>
                 <span style={{ position: 'absolute', top: 1, left: s.enabled ? 15 : 1, width: 16, height: 16, borderRadius: '50%', background: 'white', transition: 'left 0.2s' }} />
               </button>
@@ -3923,349 +4346,105 @@ function CategoriesSection({ initialSubTab }) {
         </>
       )}
 
-      <div style={{ height: 1, background: 'var(--border-subtle)', margin: '24px 0 20px' }} />
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: gtdRevealed ? 20 : 0 }}>
-        <button
-          type="button"
-          onClick={handleToggleGtd}
-          style={{
-            width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-            background: gtdRevealed ? 'var(--accent)' : 'var(--bg-elevated)',
-            position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
-          }}
-        >
-          <span style={{
-            position: 'absolute', top: 2, left: gtdRevealed ? 18 : 2, width: 16, height: 16,
-            borderRadius: '50%', background: 'white', transition: 'left 0.2s',
-          }} />
-        </button>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>{t('admin.categories.gtdReveal')}</span>
-            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', padding: '1px 4px', borderRadius: 3, background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}>BETA</span>
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.categories.gtdRevealDesc')}</div>
-        </div>
-      </div>
-
-      {gtdRevealed && <GtdSection />}
+      {/* Plugins that contribute settings under the Categories tab (currently GTD). Rendered only
+          while the plugin is activated; core knows nothing plugin-specific here. */}
+      <PluginSlot name="settings-categories" ctx={{ initialSubTab }} />
     </div>
   );
 }
 
-// ─── GTD Section ──────────────────────────────────────────────────────────────
-function GtdSection() {
+// ─── Plugins Section ──────────────────────────────────────────────────────────
+// Plugins settings tab — lists the plugins registered in this build and lets the user activate/
+// deactivate each for themselves. Activation is per-user (persisted server-side) and independent of
+// a plugin's own per-account config; deactivating hides that plugin's UI and makes it inert.
+function PluginsSection({ onNavigate }) {
   const { t } = useTranslation();
-  const { accounts } = useStore();
+  const enabledPlugins = useStore(s => s.enabledPlugins);
+  const setPluginActivated = useStore(s => s.setPluginActivated);
+  const [manifests, setManifests] = useState(null); // null = loading
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api.plugins.list()
+      .then(list => { if (alive) setManifests(Array.isArray(list) ? list : []); })
+      .catch(() => { if (alive) { setManifests([]); setError(true); } });
+    return () => { alive = false; };
+  }, []);
+
+  const toggle = async (id, next) => {
+    setBusyId(id);
+    setError(false);
+    try { await setPluginActivated(id, next); }
+    catch { setError(true); }
+    finally { setBusyId(null); }
+  };
 
   return (
     <div>
-      <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0, marginBottom: 20 }}>
-        {t('admin.gtd.description')}
-      </p>
-      {accounts.length === 0 ? (
-        <p style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.gtd.noAccounts')}</p>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {accounts.map(account => <GtdAccountBlock key={account.id} account={account} />)}
-        </div>
+      <h2 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 4px' }}>{t('admin.plugins.title')}</h2>
+      <p style={{ fontSize: 13, color: 'var(--text-tertiary)', margin: '0 0 20px', lineHeight: 1.5 }}>{t('admin.plugins.description')}</p>
+
+      {error && (
+        <div style={{ fontSize: 12, color: 'var(--danger, #d94a4a)', marginBottom: 12 }}>{t('admin.plugins.error')}</div>
+      )}
+      {manifests === null && (
+        <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
+      )}
+      {manifests && manifests.length === 0 && !error && (
+        <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.plugins.empty')}</div>
       )}
 
-      <GtdPetBlock />
-    </div>
-  );
-}
-
-// Read a File as a base64 data-URL (data:<mime>;base64,…), the transport the import
-// route expects for the spritesheet bytes.
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Could not read file'));
-    reader.readAsDataURL(file);
-  });
-}
-
-// User-level (not per-account) cosmetic: the inbox-zero pet. Import your own by uploading
-// pet.json + a spritesheet directly; the chosen slug persists as a flat user preference.
-// The preview reuses the live GtdZeroPet, so it shows the dog when cleared and the chosen
-// pet (hover to animate) once set.
-function GtdPetBlock() {
-  const { t } = useTranslation();
-  const gtdPetSlug = useStore(s => s.gtdPetSlug);
-  const setGtdPetSlug = useStore(s => s.setGtdPetSlug);
-  const [msg, setMsg] = useState(null);
-  const [petJsonFile, setPetJsonFile] = useState(null);
-  const [sheetFile, setSheetFile] = useState(null);
-  const [importing, setImporting] = useState(false);
-  // Bumped after a successful import to remount the file inputs empty (a file input's
-  // value can't be set programmatically, so a changed key is the clean reset).
-  const [fileResetKey, setFileResetKey] = useState(0);
-
-  const handleImport = async () => {
-    if (!petJsonFile || !sheetFile) return;
-    setImporting(true); setMsg(null);
-    try {
-      const petJson = await petJsonFile.text();
-      const sheet = await readFileAsDataURL(sheetFile);
-      const pet = await api.importGtdPet({ petJson, sheet });
-      setGtdPetSlug(pet.slug);
-      setPetJsonFile(null); setSheetFile(null); setFileResetKey(k => k + 1);
-      setMsg({ type: 'ok', text: t('admin.gtd.pet.imported', { name: pet.displayName || pet.slug }) });
-    } catch (err) {
-      setMsg({ type: 'error', text: err.message || t('admin.gtd.pet.importFailed') });
-    } finally { setImporting(false); }
-  };
-
-  const handleClear = () => { setGtdPetSlug(null); setMsg(null); };
-
-  const fileLabelStyle = { fontSize: 11, color: 'var(--text-tertiary)', display: 'block', marginBottom: 4 };
-
-  return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', background: 'var(--bg-secondary)', marginTop: 16 }}>
-      <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>{t('admin.gtd.pet.title')}</div>
-      <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 4, marginBottom: 12 }}>{t('admin.gtd.pet.description')}</p>
-
-      <div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>{t('admin.gtd.pet.importTitle')}</div>
-        <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4, marginBottom: 10 }}>{t('admin.gtd.pet.importHint')}</p>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div>
-            <label style={fileLabelStyle}>{t('admin.gtd.pet.chooseJson')}</label>
-            <input
-              key={`petjson-${fileResetKey}`}
-              type="file"
-              accept=".json,application/json"
-              aria-label={t('admin.gtd.pet.chooseJson')}
-              onChange={e => setPetJsonFile(e.target.files?.[0] || null)}
-              style={{ fontSize: 12, color: 'var(--text-secondary)' }}
-            />
-          </div>
-          <div>
-            <label style={fileLabelStyle}>{t('admin.gtd.pet.chooseSheet')}</label>
-            <input
-              key={`sheet-${fileResetKey}`}
-              type="file"
-              accept="image/png,image/webp,image/gif"
-              aria-label={t('admin.gtd.pet.chooseSheet')}
-              onChange={e => setSheetFile(e.target.files?.[0] || null)}
-              style={{ fontSize: 12, color: 'var(--text-secondary)' }}
-            />
-          </div>
-        </div>
-
-        <button onClick={handleImport} disabled={importing || !petJsonFile || !sheetFile} style={{
-          marginTop: 12, padding: '7px 14px', background: 'var(--accent)', border: 'none', borderRadius: 6,
-          color: 'white', fontSize: 13, whiteSpace: 'nowrap',
-          cursor: (importing || !petJsonFile || !sheetFile) ? 'default' : 'pointer',
-          opacity: (importing || !petJsonFile || !sheetFile) ? 0.5 : 1,
-        }}>
-          {importing ? t('admin.gtd.pet.importing') : t('admin.gtd.pet.import')}
-        </button>
-      </div>
-
-      {msg && (
-        <div style={{ padding: '7px 11px', borderRadius: 6, marginTop: 10, fontSize: 12,
-          background: msg.type === 'ok' ? 'rgba(74,222,128,0.1)' : 'rgba(248,113,113,0.1)',
-          color: msg.type === 'ok' ? 'var(--green)' : 'var(--red)',
-          border: `1px solid ${msg.type === 'ok' ? 'rgba(74,222,128,0.2)' : 'rgba(248,113,113,0.2)'}`,
-        }}>{msg.text}</div>
-      )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 14 }}>
-        <div style={{ width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-tertiary)', borderRadius: 8, flexShrink: 0 }}>
-          <GtdZeroPet size={72} />
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {gtdPetSlug ? t('admin.gtd.pet.current', { slug: gtdPetSlug }) : t('admin.gtd.pet.usingDog')}
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.gtd.pet.hoverHint')}</div>
-          {gtdPetSlug && (
-            <button onClick={handleClear} style={{
-              marginTop: 8, padding: '5px 12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
-              borderRadius: 6, color: 'var(--text-secondary)', fontSize: 12, cursor: 'pointer',
-            }}>
-              {t('admin.gtd.pet.clear')}
+      {manifests && manifests.map(p => {
+        const on = enabledPlugins.includes(p.id);
+        const busy = busyId === p.id;
+        return (
+          <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 0', borderBottom: '1px solid var(--border-subtle)' }}>
+            <button
+              type="button"
+              onClick={() => toggle(p.id, !on)}
+              disabled={busy}
+              aria-pressed={on}
+              aria-label={p.name}
+              style={{
+                width: 36, height: 20, borderRadius: 10, border: 'none', cursor: busy ? 'default' : 'pointer', padding: 0,
+                background: on ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
+                position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1, opacity: busy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ position: 'absolute', top: 2, left: on ? 18 : 2, width: 16, height: 16, borderRadius: '50%', background: 'white', transition: 'left 0.2s' }} />
             </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Per-account GTD block: an enable toggle, and (only while enabled) the five
-// state→folder inputs with "save" + "create missing folders" actions. A disabled
-// account shows just the toggle so the tab stays quiet for non-GTD accounts.
-function GtdAccountBlock({ account }) {
-  const { t } = useTranslation();
-  const { updateAccount } = useStore();
-  const enabled = !!account.gtd_enabled;
-  const [folders, setFolders] = useState(() => resolveAccountGtdFolders(account));
-  const [toggling, setToggling] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [msg, setMsg] = useState(null);
-  // Set right before handleCreate's own updateAccount so the re-seed effect below skips
-  // that one self-inflicted gtd_folders change — which would otherwise stomp fields the
-  // user is mid-editing. External gtd_folders changes still re-seed as normal.
-  const skipReseedRef = useRef(false);
-
-  // Re-seed the inputs when the stored mapping changes (e.g. after a save round-trip).
-  // Intentionally keyed on gtd_folders only — reacting to the whole account object
-  // would clobber in-progress edits on unrelated account updates.
-  useEffect(() => {
-    if (skipReseedRef.current) { skipReseedRef.current = false; return; }
-    setFolders(resolveAccountGtdFolders(account));
-  }, [account.gtd_folders]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleToggle = async () => {
-    if (toggling) return;
-    const next = !enabled;
-    setToggling(true); setMsg(null);
-    try {
-      await api.updateAccount(account.id, { gtd_enabled: next });
-      updateAccount(account.id, { gtd_enabled: next });
-    } catch (err) {
-      setMsg({ type: 'error', text: err.message });
-    } finally { setToggling(false); }
-  };
-
-  // Comma-joined, translated state labels for the collision / rejection notices.
-  const stateNames = (states) => [...new Set(states)].map(s => t(`gtd.state.${s}`)).join(', ');
-
-  const handleSave = async () => {
-    // Mirror the backend guard: block a save that would point two states at the same
-    // folder (which would double-list every thread there across two rail/tab sections).
-    const collisions = findGtdFolderCollisions(folders);
-    if (collisions.length) {
-      setMsg({ type: 'error', text: t('admin.gtd.duplicateFolder', { states: stateNames(collisions.flatMap(c => c.states)) }) });
-      return;
-    }
-    setSaving(true); setMsg(null);
-    try {
-      const gtd_folders = diffGtdFolders(folders);
-      const res = await api.updateAccount(account.id, { gtd_folders });
-      updateAccount(account.id, { gtd_folders });
-      // Some submitted names may have been rejected (over-long / traversal) and reset
-      // to defaults — surface which so the user knows their input didn't stick.
-      const rejected = res?.gtd_folders_rejected;
-      if (rejected?.length) {
-        setMsg({ type: 'error', text: t('admin.gtd.rejectedFolders', { states: stateNames(rejected) }) });
-      } else {
-        setMsg({ type: 'ok', text: t('admin.gtd.savedOk') });
-      }
-    } catch {
-      setMsg({ type: 'error', text: t('admin.gtd.saveFailed') });
-    } finally { setSaving(false); }
-  };
-
-  const handleCreate = async () => {
-    setCreating(true); setMsg(null);
-    try {
-      const { results, folders: persisted } = await api.gtdEnsureFolders(account.id, diffGtdFolders(folders));
-      const created = results.filter(r => r.created).length;
-      const existing = results.filter(r => !r.created && !r.error).length;
-      // On a prefixed-namespace server the folders land under a real path (INBOX.Todo) and
-      // the backend persists those effective paths; reflect them so the inputs show where
-      // labels actually live. Merge the returned states directly onto the current form so a
-      // field the user is mid-editing (that ensure didn't return) survives, and suppress the
-      // re-seed effect for this self-inflicted account update so it can't stomp those edits.
-      if (persisted) {
-        skipReseedRef.current = true;
-        setFolders(prev => ({ ...prev, ...persisted }));
-        updateAccount(account.id, { gtd_folders: persisted });
-      }
-      setMsg({ type: 'ok', text: t('admin.gtd.createResult', { created, existing }) });
-    } catch (err) {
-      // The 400 collision case carries a specific server message (e.g. which two states
-      // clash); show it over the generic fallback. English-only — acceptable for this
-      // admin-surface error detail, so no new i18n key.
-      setMsg({ type: 'error', text: err.message || t('admin.gtd.createFailed') });
-    } finally { setCreating(false); }
-  };
-
-  const inputStyle = { width: '100%', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 9px', color: 'var(--text-primary)', fontSize: 13, boxSizing: 'border-box' };
-
-  return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', background: 'var(--bg-secondary)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button
-          type="button"
-          disabled={toggling}
-          onClick={handleToggle}
-          style={{
-            width: 36, height: 20, borderRadius: 10, border: 'none', cursor: toggling ? 'default' : 'pointer', padding: 0,
-            background: enabled ? 'var(--accent)' : 'var(--bg-elevated)',
-            position: 'relative', transition: 'background 0.2s', flexShrink: 0,
-          }}
-        >
-          <span style={{
-            position: 'absolute', top: 2, left: enabled ? 18 : 2, width: 16, height: 16,
-            borderRadius: '50%', background: 'white', transition: 'left 0.2s',
-          }} />
-        </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {account.name || account.email_address}
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
-            {enabled ? t('admin.gtd.enableDesc') : t('admin.gtd.enableHint')}
-          </div>
-        </div>
-      </div>
-
-      {enabled && (
-        <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: 4 }}>
-            {t('admin.gtd.foldersTitle')}
-          </div>
-          <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 0, marginBottom: 12 }}>
-            {t('admin.gtd.foldersDesc')}
-          </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-            {GTD_STATES.map(state => (
-              <div key={state} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <label style={{ flex: '0 0 96px', fontSize: 12, color: 'var(--text-secondary)' }}>
-                  {t(`gtd.state.${state}`)}
-                </label>
-                <input
-                  value={folders[state] ?? ''}
-                  onChange={e => setFolders(prev => ({ ...prev, [state]: e.target.value }))}
-                  placeholder={DEFAULT_GTD_FOLDERS[state]}
-                  style={{ ...inputStyle, flex: 1 }}
-                />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <span style={{ fontSize: 14, color: 'var(--text-primary)', fontWeight: 500 }}>{p.name}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>v{p.version}</span>
               </div>
-            ))}
+              {(() => {
+                const loc = getPluginMeta(p.id)?.settingsLocation;
+                // Activated + has a settings home → a clickable pointer to it. Activated with no
+                // settings, or not activated → a plain status line.
+                if (on && loc && onNavigate) {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate(loc.tab, loc.subtab)}
+                      style={{ marginTop: 3, padding: 0, border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--accent)', textAlign: 'left' }}
+                    >
+                      {t('admin.plugins.configureIn', { location: t(loc.labelKey) })} →
+                    </button>
+                  );
+                }
+                return (
+                  <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                    {on ? t('admin.plugins.activated') : t('admin.plugins.deactivated')}
+                  </div>
+                );
+              })()}
+            </div>
           </div>
-
-          {msg && (
-            <div style={{ padding: '7px 11px', borderRadius: 6, marginBottom: 10, fontSize: 12,
-              background: msg.type === 'ok' ? 'rgba(74,222,128,0.1)' : 'rgba(248,113,113,0.1)',
-              color: msg.type === 'ok' ? 'var(--green)' : 'var(--red)',
-              border: `1px solid ${msg.type === 'ok' ? 'rgba(74,222,128,0.2)' : 'rgba(248,113,113,0.2)'}`,
-            }}>{msg.text}</div>
-          )}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={handleSave} disabled={saving} style={{
-              padding: '7px 14px', background: 'var(--accent)', border: 'none', borderRadius: 6,
-              color: 'white', fontSize: 13, cursor: saving ? 'default' : 'pointer', opacity: saving ? 0.5 : 1,
-            }}>
-              {saving ? t('common.saving') : t('common.save')}
-            </button>
-            <button onClick={handleCreate} disabled={creating} style={{
-              padding: '7px 14px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6,
-              color: 'var(--text-secondary)', fontSize: 13, cursor: creating ? 'default' : 'pointer', opacity: creating ? 0.5 : 1,
-            }}>
-              {creating ? t('admin.gtd.creating') : t('admin.gtd.createFolders')}
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -4684,7 +4863,7 @@ function UsersAndInvitesPanel() {
           onClick={handleToggleReg}
           style={{
             width: 44, height: 24, borderRadius: 12,
-            background: regOpen ? 'var(--accent)' : 'var(--bg-elevated)',
+            background: regOpen ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
             border: `1px solid ${regOpen ? 'var(--accent)' : 'var(--border)'}`,
             cursor: 'pointer', position: 'relative', transition: 'all 0.2s',
             flexShrink: 0,
@@ -5274,6 +5453,7 @@ const LANGUAGES = [
   { code: 'it', nativeName: 'Italiano' },
   { code: 'ru', nativeName: 'Русский' },
   { code: 'zhCN', nativeName: '简体中文'},
+  { code: 'pl', nativeName: 'Polski' },
 ];
 
 function LanguageTab() {
@@ -5338,6 +5518,7 @@ function SubTabs({ tabs, initialTab }) {
         {tabs.map(tab => (
           <button
             key={tab.id}
+            className={active === tab.id ? 'admin-subtab admin-subtab-active' : 'admin-subtab'}
             onClick={() => setActive(tab.id)}
             style={{
               padding: '8px 16px',
@@ -5621,6 +5802,11 @@ function RulesTab() {
       setFormError(t('admin.rules.errorMoveFolder'));
       return;
     }
+    const forwardAction = actions.find(action => action.type === 'forward');
+    if (forwardAction && !isValidForwardAddress(forwardAction.value)) {
+      setFormError(t('admin.rules.errorForwardEmail'));
+      return;
+    }
     setFormSaving(true);
     setFormError('');
     try {
@@ -5717,7 +5903,7 @@ function RulesTab() {
   function actionSummary(rule) {
     const acts = Array.isArray(rule.actions) ? rule.actions : [];
     if (!acts.length) return '—';
-    const labels = { mark_read: t('admin.rules.actionMarkRead'), star: t('admin.rules.actionStar'), archive: t('admin.rules.actionArchive'), delete: t('admin.rules.actionDelete'), move: t('admin.rules.actionMove') };
+    const labels = { mark_read: t('admin.rules.actionMarkRead'), star: t('admin.rules.actionStar'), forward: t('admin.rules.actionForward'), archive: t('admin.rules.actionArchive'), delete: t('admin.rules.actionDelete'), move: t('admin.rules.actionMove') };
     return acts.map(a => labels[a.type] || a.type).join(', ');
   }
 
@@ -5741,6 +5927,7 @@ function RulesTab() {
   const ACTION_TYPES = [
     { type: 'mark_read', label: t('admin.rules.actionMarkRead') },
     { type: 'star',      label: t('admin.rules.actionStar') },
+    { type: 'forward',   label: t('admin.rules.actionForward') },
     { type: 'archive',   label: t('admin.rules.actionArchive') },
     { type: 'delete',    label: t('admin.rules.actionDelete') },
     { type: 'move',      label: t('admin.rules.actionMove') },
@@ -5939,6 +6126,17 @@ function RulesTab() {
                     />
                   );
                 })()}
+                {type === 'forward' && checked && (
+                  <input
+                    type="email"
+                    autoComplete="off"
+                    aria-label={t('admin.rules.actionForward')}
+                    style={{ ...inputStyle, marginTop: 6, marginLeft: 22 }}
+                    value={fd.actions.find(action => action.type === 'forward')?.value || ''}
+                    onChange={event => setActionValue('forward', event.target.value)}
+                    placeholder={t('admin.rules.actionForwardPlaceholder')}
+                  />
+                )}
               </div>
             );
           })}
@@ -6206,7 +6404,7 @@ function RulesAndBlockListTab({ initialSubTab }) {
 const TAB_GROUPS = [
   { id: 'account-mail', labelKey: 'admin.tabs.groupAccountMail', tabIds: ['accounts', 'notifications', 'rules', 'categories'] },
   { id: 'display', labelKey: 'admin.tabs.groupDisplay', tabIds: ['appearance', 'shortcuts'] },
-  { id: 'security-integrations', labelKey: 'admin.tabs.groupSecurityIntegrations', tabIds: ['security', 'integrations', 'ai', 'ai-actions'] },
+  { id: 'security-integrations', labelKey: 'admin.tabs.groupSecurityIntegrations', tabIds: ['security', 'integrations', 'ai', 'ai-actions', 'plugins'] },
   { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'sso'] },
 ];
 
@@ -6255,6 +6453,10 @@ const TABS = [
   {
     id: 'ai-actions', labelKey: 'admin.tabs.aiActions', beta: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9h.01M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/></svg>,
+  },
+  {
+    id: 'plugins', labelKey: 'admin.tabs.plugins', beta: true,
+    icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3v6M18 3v6M6 21v-6M18 21v-6M4 9h16v3a6 6 0 01-6 6h-4a6 6 0 01-6-6V9z"/></svg>,
   },
   // Admin
   {
@@ -6613,7 +6815,7 @@ function PrivacyTab() {
           }}
           style={{
             width: 42, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
-            background: blockRemoteImages ? 'var(--accent)' : 'var(--bg-tertiary)',
+            background: blockRemoteImages ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
             position: 'relative', transition: 'background 0.2s', flexShrink: 0,
           }}
         >
@@ -7123,7 +7325,7 @@ function SecurityTab() {
                 onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal); }}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
-                  background: val ? 'var(--amber)' : 'var(--bg-elevated)',
+                  background: val ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
                   position: 'relative', transition: 'background 0.2s', flexShrink: 0, marginTop: 1,
                 }}
               >
@@ -7715,6 +7917,11 @@ function makeSearchIndex(t) {
     { label: t('admin.messageList.scrollingMode'), keywords: ['scroll', 'infinite', 'paginated', 'pagination', 'pages'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.perPagePaginated'), keywords: ['per page', 'batch', 'messages per page', 'count', '25', '50', '100', '200', 'page size'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.hoverQuickActionsMode'), keywords: ['hover', 'quick actions', 'hover buttons', 'row actions'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
+    {
+      label: t('admin.messageList.senderFavicons'),
+      keywords: ['sender', 'favicon', 'avatar', 'contact photo', 'website icon', 'logo'],
+      tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb,
+    },
     { label: t('admin.messageList.swipeActions'), keywords: ['swipe', 'gesture', 'mobile', 'swipe left', 'swipe right', 'touch'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.syncFrequency'), keywords: ['sync', 'interval', 'frequency', 'refresh', 'poll', 'check mail', '15s', '30s', '60s'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.folderSyncFrequency'), keywords: ['folder', 'sync', 'structure', 'list', 'refresh', 'mailbox', '15 min', '30 min', '1 hour', 'never'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
@@ -7729,6 +7936,7 @@ function makeSearchIndex(t) {
     // Integrations
     { label: t('admin.integrations.microsoft.title'), keywords: ['microsoft', 'outlook', '365', 'oauth', 'azure', 'client id', 'tenant', 'ms365', 'office'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
     { label: t('admin.ai.title'), keywords: ['ai', 'artificial intelligence', 'chatgpt', 'ollama', 'llm', 'language model', 'summarize', 'draft', 'compose assistant', 'openai', 'local ai', 'inference', 'gpt'], tab: 'ai', adminOnly: true, breadcrumb: tabLabel('ai') },
+    { label: t('admin.plugins.title'), keywords: ['plugin', 'plugins', 'extension', 'extensions', 'add-on', 'addon', 'gtd', 'activate', 'enable feature', 'modules'], tab: 'plugins', breadcrumb: tabLabel('plugins') },
     { label: t('admin.categories.title'), keywords: ['categories', 'categorize', 'newsletter', 'promotion', 'social', 'automated', 'inbox tabs', 'sort emails', 'classify'], tab: 'categories', breadcrumb: tabLabel('categories') },
     { label: t('admin.categories.gtdReveal'), keywords: ['gtd', 'todo', 'getting things done', 'watch', 'delegated', 'someday', 'reference', 'next action', 'waiting', 'inbox zero', 'pet'], tab: 'categories', subtab: 'gtd', breadcrumb: `${tabLabel('categories')} › ${t('admin.categories.gtdReveal')}` },
     // Security
@@ -7875,13 +8083,14 @@ export default function AdminPanel() {
       {adminTab === 'shortcuts' && !isMobile && <ShortcutsTab />}
       {adminTab === 'ai' && <AISection />}
       {adminTab === 'ai-actions' && <AiActionsTab />}
+      {adminTab === 'plugins' && <PluginsSection onNavigate={navigateTo} />}
       {adminTab === 'about' && <AboutTab />}
     </>
   );
 
   if (isMobile) {
     return (
-      <div style={{
+      <div className="admin-panel" style={{
         position: 'fixed', inset: 0, zIndex: 2000,
         background: 'var(--bg-secondary)',
         display: 'flex', flexDirection: 'column',
@@ -7926,6 +8135,7 @@ export default function AdminPanel() {
             {visibleTabs.map(tab => (
               <button
                 key={tab.id}
+                className={adminTab === tab.id && !searchResults ? 'admin-tab admin-tab-active' : 'admin-tab'}
                 onClick={() => handleTabClick(tab.id)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 6,
@@ -7974,7 +8184,7 @@ export default function AdminPanel() {
         animation: 'backdrop-enter var(--motion-fast) var(--ease-standard) both',
       }}
     >
-      <div style={{
+      <div className="admin-panel admin-window" style={{
         background: 'var(--bg-secondary)', border: '1px solid var(--border)',
         borderRadius: 16, width: '100%', maxWidth: 680,
         height: '82vh', maxHeight: 700, display: 'flex', overflow: 'hidden',
@@ -7991,6 +8201,9 @@ export default function AdminPanel() {
             {searchInput(true)}
           </div>
 
+          {/* Scrollable tab list — keeps the Close button pinned even when the tab list is taller
+              than the modal (e.g. once several plugins/beta tabs are present). */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {TAB_GROUPS.map((group, gi) => {
             const groupTabs = visibleTabs.filter(tab => group.tabIds.includes(tab.id));
             if (groupTabs.length === 0) return null;
@@ -8010,6 +8223,7 @@ export default function AdminPanel() {
                   return (
                     <button
                       key={tab.id}
+                      className={isActive ? 'admin-tab admin-tab-active' : 'admin-tab'}
                       onClick={() => handleTabClick(tab.id)}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 9,
@@ -8060,9 +8274,9 @@ export default function AdminPanel() {
               </button>
             );
           })}
+          </div>
 
-          <div style={{ flex: 1 }} />
-
+          <div style={{ height: 1, background: 'var(--border-subtle)', margin: '6px 0' }} />
           <button
             onClick={() => setShowAdmin(false)}
             style={{

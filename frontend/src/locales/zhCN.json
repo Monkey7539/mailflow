@@ -179,6 +179,15 @@
     }
   },
   "message": {
+    "find": {
+      "title": "搜索",
+      "close": "关闭搜索",
+      "label": "查找：",
+      "matchCase": "区分大小写",
+      "previous": "上一个",
+      "next": "下一个",
+      "closeButton": "关闭"
+    },
     "selectToRead": "请选择一封邮件以阅读",
     "noSubject": "（无主题）",
     "to": "收件人：",
@@ -403,7 +412,9 @@
     "updateAvailable": "有可用更新：v{{version}}"
   },
   "contextMenu": {
+    "find": "查找",
     "open": "打开",
+    "openInNewWindow": "在新窗口中打开",
     "markRead": "标为已读",
     "markUnread": "标为未读",
     "star": "加星标",
@@ -428,6 +439,7 @@
     "markAsHam": "标记为非垃圾邮件",
     "copySubject": "复制主题",
     "copySender": "复制发件人地址",
+    "copyLink": "复制链接",
     "viewHeaders": "查看完整邮件头",
     "delete": "删除",
     "headers": {
@@ -611,7 +623,8 @@
       "groupAccountMail": "账户与邮件",
       "groupDisplay": "显示",
       "groupSecurityIntegrations": "安全与集成",
-      "groupAdmin": "管理"
+      "groupAdmin": "管理",
+      "plugins": "插件"
     },
     "rules": {
       "title": "收件箱规则",
@@ -650,6 +663,8 @@
       "actionArchive": "归档",
       "actionDelete": "移至废件箱",
       "actionMove": "移动到文件夹",
+      "actionForward": "转发至",
+      "actionForwardPlaceholder": "shoujianren@example.com",
       "actionMovePlaceholder": "文件夹名称",
       "actionMoveSelectFolder": "选择文件夹…",
       "actionMoveRequiresAccount": "需要指定账户",
@@ -659,6 +674,7 @@
       "saving": "保存中…",
       "errorRequired": "名称、至少一个条件和一个动作为必填项。",
       "errorMoveFolder": "请为「移动」动作指定目标文件夹。",
+      "errorForwardEmail": "请输入一个有效的转发邮箱地址。",
       "errorSave": "无法保存规则。",
       "runButton": "对收件箱运行规则",
       "running": "运行中…",
@@ -712,6 +728,10 @@
       "smtpHost": "SMTP 服务器",
       "smtpHostPh": "smtp.gmail.com",
       "smtpPort": "端口",
+      "smtpAuthNote": "仅当您的发件 (SMTP) 服务器使用与上面登录不同的用户名和密码时才需要填写。留空则沿用上面的凭据。",
+      "smtpAuthUser": "SMTP 用户名",
+      "smtpAuthUserPh": "与上面的用户名相同",
+      "smtpAuthPass": "SMTP 密码",
       "signatureSection": "签名",
       "saveChanges": "保存更改",
       "addAccount": "添加账户",
@@ -730,6 +750,9 @@
       "reindexError": "无法启动重新索引",
       "syncFolders": "同步文件夹",
       "syncFoldersError": "文件夹同步失败",
+      "unifiedInboxSection": "统一收件箱",
+      "unifiedInboxEnabled": "包含在统一收件箱中",
+      "unifiedInboxEnabledDesc": "在“所有收件箱”、统一搜索和分类计数中显示此账户的邮件。",
       "categorizationSection": "邮件分类",
       "categorizationEnabled": "启用收件箱分类",
       "categorizationEnabledDesc": "将收到的邮件按类别选项卡分类。默认禁用。",
@@ -796,6 +819,9 @@
     },
     "messageList": {
       "title": "邮件列表",
+      "senderFavicons": "发件人网站图标",
+      "senderFaviconsDesc": "为没有联系人照片的发件人显示网站图标。只会将发件人的域名发送到 Twenty Icons，绝不会发送完整的电子邮件地址。",
+      "senderFaviconsSaveError": "无法保存发件人网站图标设置。",
       "scrollingMode": "滚动模式",
       "infiniteScroll": "无限滚动",
       "infiniteScrollDesc": "向下滚动时自动加载",
@@ -839,6 +865,11 @@
       "hoverQuickActionsOffDesc": "隐藏快速操作，直到使用右键菜单或快捷键。",
       "hoverQuickActionsOn": "开启",
       "hoverQuickActionsOnDesc": "当指针悬停在消息行上时，显示快速操作图标。",
+      "showMessagePreviews": "消息预览",
+      "previewOff": "关闭",
+      "previewOffDesc": "隐藏每个主题下方的预览行。",
+      "previewOn": "开启",
+      "previewOnDesc": "显示每个主题下方的预览行。",
       "mobileAvatarsMode": "发件人头像（移动端）",
       "mobileAvatarsOff": "关闭",
       "mobileAvatarsOffDesc": "不显示头像 — 为发件人和主题留出最大空间。",
@@ -962,7 +993,7 @@
       "mailPolicyTitle": "邮件服务器连接策略",
       "mailPolicyDesc": "控制用户可以配置的连接类型。面向互联网的部署请禁用这些选项。",
       "allowPrivateHosts": "允许私有/本地主机",
-      "allowPrivateHostsDesc": "允许连接到私有或本地地址的 IMAP 和 SMTP 服务器（例如 127.0.0.1、192.168.x.x）。protonmail-bridge 及类似本地邮件桥接程序需要此选项。",
+      "allowPrivateHostsDesc": "允许连接到私有或本地地址的 IMAP/SMTP 邮件服务器、CardDAV 服务器和 AI 提供商（例如 127.0.0.1、192.168.x.x）。protonmail-bridge、自托管的 CardDAV/Nextcloud 服务器或本地 AI 模型需要此选项。",
       "allowInsecureTls": "允许不安全的 TLS",
       "allowInsecureTlsDesc": "允许用户按账户禁用 TLS 证书验证。自签名证书的服务器需要此选项。",
       "allowNonstandardPorts": "允许非标准端口",
@@ -1059,13 +1090,40 @@
       "featureCompose": "写作助手（起草和改进邮件）",
       "featureSummarize": "邮件摘要",
       "saved": "AI 配置已保存。",
-      "removed": "AI 配置已删除。",
       "testOk": "连接成功。",
       "testFail": "连接失败",
       "test": "测试连接",
       "testing": "测试中…",
       "notConfigured": "尚未配置 AI 提供商。",
-      "remove": "删除配置"
+      "connectionMethod": "连接方式",
+      "connectionMethodPlaceholder": "选择连接方式",
+      "connectionMethodApi": "使用 API 密钥",
+      "connectionMethodAccount": "使用订阅",
+      "subscriptionProvider": "订阅提供商",
+      "subscriptionProviderChatgpt": "ChatGPT Plus/Pro (Codex Subscription)",
+      "chatgptModel": "ChatGPT 模型",
+      "chatgptModelPh": "gpt-5.6-luna",
+      "chatgptModelDocs": "查看可用模型",
+      "connectionStatus": "ChatGPT 连接",
+      "connectedAs": "已连接为 {{account}}",
+      "statusConnected": "已连接",
+      "statusDisconnected": "未连接",
+      "statusPending": "正在等待授权",
+      "statusReconnect": "需要重新连接",
+      "statusExpired": "授权已过期",
+      "statusCancelled": "授权已取消",
+      "connect": "连接 ChatGPT",
+      "connecting": "正在启动…",
+      "reconnect": "重新连接",
+      "disconnect": "断开连接",
+      "disconnecting": "正在断开…",
+      "cancelling": "正在取消…",
+      "deviceInstructions": "打开授权页面并输入此一次性代码。",
+      "copyCode": "复制代码",
+      "copied": "已复制",
+      "copyFailed": "无法复制代码。",
+      "openAuthorization": "打开授权页面",
+      "deviceExpires": "代码将于 {{time}} 过期。"
     },
     "aiActions": {
       "description": "创建你自己的 AI 操作。它们会在阅读邮件时出现在 AI 菜单中，与“摘要”并列。每个操作的提示词会应用于邮件内容。",
@@ -1203,6 +1261,8 @@
       "errorSecretRequired": "客户端密钥为必填项。",
       "allowInsecure": "允许本地/自签名连接",
       "allowInsecureDesc": "绕过主机验证和 TLS 证书检查。仅用于局域网专用提供商（例如 pocketid.internal）。不建议用于面向互联网的部署。",
+      "rpLogout": "SSO 注销（RP-initiated）",
+      "rpLogoutDesc": "注销时，除了清除 MailFlow 的 cookie，还会重定向到该提供商的 end-session endpoint 以结束其会话。要求提供商公布 end_session_endpoint，并将 MailFlow 的登录 URL（…/login）注册为 post-logout redirect URI。",
       "adminGroupClaim": "管理员组声明",
       "adminGroupClaimPh": "groups",
       "adminGroupClaimDesc": "包含用户组的 JWT 声明名称（例如 groups）。留空可禁用基于组的管理员分配。",
@@ -1250,6 +1310,8 @@
         "save": "保存配置",
         "savedNote": "配置已保存。点击「连接账户」以进行授权。",
         "connectedNote": "Microsoft 365 账户连接成功！请前往「账户」选项卡查看。",
+        "userNoteConfigured": "您的管理员已设置 Microsoft 365 登录。请在下方连接您的 Outlook.com、Hotmail 或 Microsoft 365 账户。",
+        "userNoteNotConfigured": "管理员尚未设置 Microsoft 365 登录。请联系您的管理员进行配置。",
         "remove": "移除",
         "deviceCodeTitle": "使用设备码连接",
         "deviceCodeNote": "无需重定向 URI 或客户端密钥。在 Azure 中，前往「身份验证」并将「允许公共客户端流」设置为「是」。最适合 Outlook.com / Hotmail 个人账户。",
@@ -1347,6 +1409,15 @@
       "autoLockNeedsPin": "设置 PIN 码以启用自动锁定",
       "autoLockOff": "关闭",
       "autoLockMin": "{{n}} 分钟"
+    },
+    "plugins": {
+      "title": "插件",
+      "description": "为你的账户开启或关闭可选功能。启用插件后会添加其自身的设置和界面。",
+      "activated": "已启用",
+      "deactivated": "未启用",
+      "empty": "此版本中没有可用的插件。",
+      "error": "无法更新插件，请重试。",
+      "configureIn": "在「{{location}}」中配置选项"
     }
   },
   "blockList": {
@@ -1455,5 +1526,9 @@
       "someday": "将来",
       "reference": "参考"
     }
+  },
+  "window": {
+    "minimize": "最小化",
+    "close": "关闭"
   }
 }

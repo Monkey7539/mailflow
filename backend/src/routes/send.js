@@ -3,18 +3,16 @@ import { randomBytes, createHash, randomUUID } from 'crypto';
 import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { refreshMicrosoftToken } from './oauth.js';
-import { decrypt } from '../services/encryption.js';
 import sanitizeHtml from 'sanitize-html';
 import { sanitizeSignature, sanitizeComposeBody } from '../services/emailSanitizer.js';
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { redisClient } from '../services/redis.js';
 import { redactEmail } from '../utils/redact.js';
+import { resolveSentFolder } from '../utils/mailUtils.js';
 import { generateVCard } from '../utils/vcard.js';
-import { resolveForConnection } from '../services/hostValidation.js';
-import { getConnectionPolicy } from '../services/connectionPolicy.js';
+import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { imapManager } from '../index.js';
-import { runTransitionsForSentMessage } from '../services/gtdTransitions.js';
+import { pluginRegistry } from '../plugins/registry.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -262,56 +260,10 @@ router.post('/send', async (req, res) => {
 
   let delivered = false; // true once transport.sendMail has actually handed off the message
   try {
-    if (account.oauth_provider === 'microsoft') {
-      // Only refresh when the token is near/at expiry (mirrors imapManager's
-      // ensureFreshToken). Refreshing on every send needlessly rotates the AAD
-      // refresh token and can invalidate it under concurrent sends.
-      const expiryMs = account.oauth_token_expiry ? new Date(account.oauth_token_expiry).getTime() : 0;
-      if (expiryMs - Date.now() < 5 * 60 * 1000) {
-        account = await refreshMicrosoftToken(account);
-      }
-    }
-
-    let smtpAuth;
-    if ((account.oauth_provider === 'microsoft' || account.oauth_provider === 'google')
-        && account.oauth_access_token) {
-      const accessToken = decrypt(account.oauth_access_token);
-      if (!accessToken) {
-        return res.status(502).json({ error: 'OAuth access token is corrupted — please reconnect your account.' });
-      }
-      smtpAuth = {
-        type: 'OAuth2',
-        user: account.auth_user || account.email_address,
-        accessToken,
-      };
-    } else {
-      const pass = decrypt(account.auth_pass);
-      if (!pass) {
-        return res.status(502).json({ error: 'SMTP password is corrupted or missing — please re-enter your account password in Settings.' });
-      }
-      smtpAuth = { user: account.auth_user, pass };
-    }
-
-    const policy = await getConnectionPolicy();
-    const smtpResolved = await resolveForConnection(account.smtp_host, { allowPrivate: policy.allowPrivateHosts });
-    const smtpPlain = account.smtp_tls !== 'STARTTLS' && account.smtp_tls !== 'SSL';
-    if (!policy.allowInsecureTls && smtpPlain) {
-      return res.status(403).json({ error: 'Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"' });
-    }
-    const smtpTls = { rejectUnauthorized: !(policy.allowInsecureTls && account.imap_skip_tls_verify) };
-    if (smtpResolved.servername) smtpTls.servername = smtpResolved.servername;
-    // For 'SSL': force direct TLS. For 'none': plain with no upgrade.
-    // For 'STARTTLS' (or any other/legacy value): fall back to port-based detection
-    // so existing accounts stored with the default 'STARTTLS' on port 465 keep working.
-    const smtpSecure = account.smtp_tls === 'SSL' || (account.smtp_tls !== 'none' && account.smtp_port === 465);
-    const transport = nodemailer.createTransport({
-      host: smtpResolved.host,
-      port: account.smtp_port,
-      secure: smtpSecure,
-      ...(account.smtp_tls === 'none' ? { ignoreTLS: true } : {}),
-      auth: smtpAuth,
-      tls: smtpTls,
-    });
+    const smtp = await createAccountSmtpTransport(account);
+    if (smtp.error) return res.status(smtp.status).json({ error: smtp.error });
+    account = smtp.account;
+    const transport = smtp.transport;
 
     // Use a stable Message-ID so the SMTP copy and any IMAP APPEND reference the same message.
     const domain = fromEmail.split('@')[1] || 'mailflow.local';
@@ -365,9 +317,14 @@ router.post('/send', async (req, res) => {
     const serverAutoSaves = !!account.oauth_provider;
 
     // For servers that don't auto-save, generate the raw MIME now so we can APPEND it.
+    // Use CRLF newlines ('windows'): RFC 5322 / IMAP APPEND require CRLF. A bare-LF message is
+    // stored verbatim by strict servers (e.g. PurelyMail/Dovecot), and downstream clients then
+    // mis-parse the headers — the reporter saw Subject and the To display-name dropped (#365). This
+    // only affects non-OAuth accounts (OAuth servers auto-save and skip this path); the SMTP-
+    // delivered copy uses a separate transport that is already CRLF, so only the Sent copy was wrong.
     let rawMessage = null;
     if (!serverAutoSaves) {
-      const streamTransport = nodemailer.createTransport({ streamTransport: true, newline: 'unix' });
+      const streamTransport = nodemailer.createTransport({ streamTransport: true, newline: 'windows' });
       const streamInfo = await streamTransport.sendMail(mailOptions);
       const chunks = [];
       await new Promise((resolve, reject) => {
@@ -459,15 +416,9 @@ router.post('/send', async (req, res) => {
       });
     }
 
-    // Get the Sent folder path (manual mapping takes priority over special_use auto-detect)
-    let sentFolder = account.folder_mappings?.sent || null;
-    if (!sentFolder) {
-      const folderResult = await query(
-        "SELECT path FROM folders WHERE account_id = $1 AND special_use = '\\Sent' LIMIT 1",
-        [accountId]
-      );
-      sentFolder = folderResult.rows[0]?.path || null;
-    }
+    // Get the Sent folder path (manual mapping takes priority over special_use auto-detect,
+    // but a mapping pointing at a non-selectable folder is ignored in favour of \Sent — #386).
+    const sentFolder = await resolveSentFolder(accountId, account.folder_mappings);
     console.log(`Post-send: ${redactEmail(account.email_address)} sentFolder=${sentFolder} autoSaves=${serverAutoSaves}`);
 
     // sentCopySaved: null = not applicable (server auto-saves, or no Sent folder resolved);
@@ -483,6 +434,10 @@ router.post('/send', async (req, res) => {
       cc: mapRecipientList(normalizedCc),
       snippet: buildSentSnippet(body, bodyIsHtml),
       date: new Date(),
+      // Carried so the Sent row threads into its conversation via the References chain
+      // rather than orphaning at its own Message-ID (#378).
+      inReplyTo: mailOptions.inReplyTo || null,
+      references: mailOptions.references || null,
     } : null;
 
     if (sentFolder) {
@@ -506,13 +461,13 @@ router.post('/send', async (req, res) => {
           }
           setTimeout(() => {
             imapManager.syncFolderOnDemand(account, sentFolder)
-              // Once the Sent copy is in the DB, re-run GTD transitions for its thread: a reply
-              // to a Todo/Someday thread means the owner acted, so that label should drop. The
-              // sent message reaches no other GTD hook (Sent isn't INBOX, and the tick watches
-              // only the state folders), so this is the only trigger. Swallow on failure — the
-              // next inbound sync / GTD tick self-heals.
-              .then(() => runTransitionsForSentMessage(imapManager, account, mailOptions.messageId)
-                .catch(e => console.warn(`Post-append GTD transition failed: ${e.message}`)))
+              // Once the Sent copy is in the DB, notify label plugins the message synced: GTD
+              // re-runs transitions for its thread (a reply to a Todo/Someday thread means the
+              // owner acted, so that label should drop). The sent message reaches no other hook
+              // (Sent isn't INBOX, and the tick watches only the state folders), so this is the
+              // only trigger. The hook swallows per-plugin errors — the next inbound sync / tick
+              // self-heals.
+              .then(() => pluginRegistry.runHook('onSentMessage', { imapManager: imapManager.pluginFacade, account, messageId: mailOptions.messageId }))
               .catch(e => console.error(`Post-append sync failed: ${e.message}`));
           }, 1000);
         } catch (appendErr) {
@@ -535,8 +490,7 @@ router.post('/send', async (req, res) => {
         const syncAttempt = (label) => imapManager.syncFolderOnDemand(account, sentFolder)
           .then(() => {
             console.log(`Post-send ${label} sync done: ${redactEmail(account.email_address)}/${sentFolder}`);
-            return runTransitionsForSentMessage(imapManager, account, mailOptions.messageId)
-              .catch(e => console.warn(`Post-send ${label} GTD transition failed: ${e.message}`));
+            return pluginRegistry.runHook('onSentMessage', { imapManager: imapManager.pluginFacade, account, messageId: mailOptions.messageId });
           })
           .catch(e => console.error(`Post-send ${label} sync failed: ${e.message}`));
         setTimeout(() => syncAttempt('3s'), 3000);
@@ -548,6 +502,9 @@ router.post('/send', async (req, res) => {
     // Surface only the problem case so existing success handling is unchanged; the UI warns
     // when a delivered message could not be saved to the account's Sent folder.
     if (sentCopySaved === false) sendResult.sentCopySaved = false;
+    // Tell the client which Sent folder we actually resolved to, so its post-send "View"
+    // navigates to the real folder rather than recomputing from a possibly-stale mapping (#386).
+    if (sentFolder) sendResult.sentFolder = sentFolder;
     // Overwrite the in-flight reservation with the final result so a retry after a lost
     // response returns this instead of re-sending.
     if (idemKeyRedis) redisClient.set(idemKeyRedis, JSON.stringify(sendResult), { EX: 86400 }).catch(() => {});

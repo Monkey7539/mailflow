@@ -26,7 +26,11 @@ import contactsRoutes from './routes/contacts.js';
 import todoistRoutes from './routes/todoist.js';
 import aiRoutes from './routes/ai.js';
 import categoriesRoutes from './routes/categories.js';
-import gtdRoutes from './routes/gtd.js';
+import { pluginRegistry } from './plugins/registry.js';
+import { loadBundledPlugins } from './plugins/loadPlugins.js';
+import { setMailEngine } from './plugins/mailEngine.js';
+import pluginsRoutes from './routes/plugins.js';
+import senderFaviconsRoutes from './routes/senderFavicons.js';
 import carddavRouter from './routes/carddav.js';
 import carddavAccountRouter from './routes/carddavAccount.js';
 import { startCardavScheduler } from './services/carddavSync.js';
@@ -154,6 +158,9 @@ app.use('/api', (req, res, next) => {
 // Make imap manager available globally
 export const imapManager = new ImapManager(wss);
 app.set('imapManager', imapManager);
+// Hand the mail engine to the plugin platform so plugin-api capabilities (labels, archive,
+// broadcast) can be bound to it without any plugin importing the mail engine or this entry file.
+setMailEngine(imapManager);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -175,10 +182,17 @@ app.use('/api/todoist', todoistRoutes);
 app.use('/api/carddav', carddavAccountRouter);
 app.use('/api', aiRoutes);
 app.use('/api', categoriesRoutes);
-// Mounted at the /api/gtd subtree (not bare /api) so gtd.js's router-level
-// requireAuth cannot intercept the unauthenticated /api/health and /api/version
-// probes registered below. Its routes drop the gtd/ path prefix accordingly.
-app.use('/api/gtd', gtdRoutes);
+// Tier-1 plugin routers, mounted via the plugin registry (see src/plugins/). Registered
+// here — before the unauthenticated /api/health and /api/version probes below — so a
+// plugin's router-level auth can't intercept them. GTD is the first such plugin; its
+// router mounts at /api/gtd exactly as before.
+loadBundledPlugins();
+// Platform API: list registered plugins + per-user activation (must be after loadBundledPlugins).
+app.use('/api/plugins', pluginsRoutes);
+for (const plugin of pluginRegistry.list()) {
+  if (plugin.router) app.use(plugin.router.base, plugin.router.handler);
+}
+app.use('/api/sender-favicons', senderFaviconsRoutes);
 
 // CardDAV server — body is read lazily inside each handler via rawBody()
 app.use('/carddav', carddavRouter);

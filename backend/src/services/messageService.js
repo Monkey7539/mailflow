@@ -1,27 +1,31 @@
 import { query } from './db.js';
+import { resolveAccountScope } from './unifiedInbox.js';
 
 export async function listMessages({ userId, accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
   const accountsResult = await query(
-    'SELECT id FROM email_accounts WHERE user_id = $1 AND enabled = true',
+    'SELECT id, include_in_unified_inbox FROM email_accounts WHERE user_id = $1 AND enabled = true',
     [userId]
   );
-  const userAccountIds = accountsResult.rows.map(r => r.id);
-  if (!userAccountIds.length) return { messages: [], total: 0 };
+  const {
+    accountIds: scopedAccountIds,
+    resolvedAccountId,
+  } = resolveAccountScope(accountsResult.rows, accountId);
+  if (!scopedAccountIds.length) return { messages: [], total: 0 };
 
   let whereConditions = ['m.is_deleted = false'];
   const values = [];
   let p = 1;
 
-  const isSpecificAccount = accountId && userAccountIds.includes(accountId);
+  const isSpecificAccount = resolvedAccountId !== null;
 
   if (isSpecificAccount) {
     whereConditions.push(`m.account_id = $${p++}`);
-    values.push(accountId);
+    values.push(resolvedAccountId);
     whereConditions.push(`m.folder = $${p++}`);
     values.push(folder);
   } else {
     whereConditions.push(`m.account_id = ANY($${p++})`);
-    values.push(userAccountIds);
+    values.push(scopedAccountIds);
     whereConditions.push(`m.folder = 'INBOX'`);
   }
 
@@ -56,11 +60,11 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
       const r = isUnreadOnly
         ? await query(
             "SELECT COALESCE(SUM(unread_count), 0)::int AS n FROM folders WHERE account_id = ANY($1) AND path = 'INBOX'",
-            [userAccountIds]
+            [scopedAccountIds]
           )
         : await query(
             "SELECT COALESCE(SUM(total_count), 0)::int AS n FROM folders WHERE account_id = ANY($1) AND path = 'INBOX'",
-            [userAccountIds]
+            [scopedAccountIds]
           );
       total = r.rows[0]?.n ?? 0;
     }
@@ -70,7 +74,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
 
   if (threaded === 'true' || threaded === true) {
     const filterValues = [...values];
-    const threadAccountParam = isSpecificAccount ? [accountId] : userAccountIds;
+    const threadAccountParam = isSpecificAccount ? [resolvedAccountId] : scopedAccountIds;
     // For INBOX-specific views the thread badge must match the expansion, so scope
     // thread_totals to that folder. For other folders (All Mail, Sent, etc.) count
     // across all folders so the badge reflects the true thread size.
@@ -95,7 +99,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
                m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to,
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
-               m.list_unsubscribe, m.list_unsubscribe_post,
+               m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses,
                a.name  AS account_name,
                a.email_address AS account_email,
                a.color AS account_color,
@@ -141,7 +145,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
              to_addresses, cc_addresses, reply_to, in_reply_to,
              date, snippet, is_starred, is_read, has_attachments, account_id,
              account_name, account_email, account_color,
-             category, list_unsubscribe, list_unsubscribe_post,
+             category, list_unsubscribe, list_unsubscribe_post, delivery_addresses,
              message_count, unread_count,
              thread_has_contact_photo AS has_contact_photo
       FROM ranked
@@ -159,7 +163,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
       messages: threadResult.rows,
       total: threadCountResult.rows[0]?.total ?? 0,
       threaded: true,
-      resolvedAccountId: isSpecificAccount ? accountId : null,
+      resolvedAccountId,
     };
   }
 
@@ -172,7 +176,7 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
            m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to,
            m.date, m.snippet, m.is_read, m.is_starred,
            m.has_attachments, m.account_id, m.category,
-           m.list_unsubscribe, m.list_unsubscribe_post,
+           m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses,
            a.name as account_name, a.email_address as account_email, a.color as account_color,
            (co.id IS NOT NULL) AS has_contact_photo
     FROM messages m
@@ -188,6 +192,6 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
   return {
     messages: result.rows,
     total,
-    resolvedAccountId: isSpecificAccount ? accountId : null,
+    resolvedAccountId,
   };
 }

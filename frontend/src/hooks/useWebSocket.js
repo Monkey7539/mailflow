@@ -2,10 +2,12 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { installCapacitorNativeBridge } from '../utils/capacitorNativeBridge.js';
 import { playNotificationSound } from '../utils/notificationSounds.js';
 import { pendingMarkReadMap } from '../utils/pendingReads.js';
-import { gtdActiveForContext } from '../utils/gtd.js';
 import { updateFaviconBadge } from '../themes.js';
+import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
+import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 
 // Compute the correct favicon count given unread counts and the currently
 // selected account. Reads selectedAccountId from the store directly so this
@@ -29,14 +31,18 @@ function _faviconCount(counts) {
 // the DB has applied those reads and subtracting again would double-count.
 function _applyServerCounts(counts) {
   if (pendingMarkReadMap.size > 0) {
-    const current = useStore.getState().unreadCounts;
-    if (counts.total >= current.total + pendingMarkReadMap.size) {
+    const state = useStore.getState();
+    const current = state.unreadCounts;
+    const pendingUnifiedCount = [...pendingMarkReadMap.values()]
+      .filter(accountId => accountAffectsUnifiedInbox(state.accounts, accountId))
+      .length;
+    if (counts.total >= current.total + pendingUnifiedCount) {
       // Server hasn't incorporated in-flight reads yet — subtract them.
       const byAccount = { ...counts.byAccount };
       for (const accountId of pendingMarkReadMap.values()) {
         if (byAccount[accountId] > 0) byAccount[accountId]--;
       }
-      const total = Math.max(0, counts.total - pendingMarkReadMap.size);
+      const total = Math.max(0, counts.total - pendingUnifiedCount);
       useStore.setState({ unreadCounts: { total, byAccount } });
     } else {
       // DB already applied the reads — use the authoritative count directly.
@@ -45,6 +51,19 @@ function _applyServerCounts(counts) {
   } else {
     useStore.setState({ unreadCounts: counts });
   }
+}
+
+async function _forwardNativeNewMailNotification(notification) {
+  await installCapacitorNativeBridge();
+  window.mailflowNative?.notifications?.showNewMail?.({
+    title: notification.title,
+    body: notification.body,
+    count: notification.count,
+    accountId: notification.accountId,
+    folder: notification.folder,
+    messageId: notification.messageId,
+    message: notification.message,
+  }).catch(() => {});
 }
 
 // Auth-related close codes that should not trigger reconnect
@@ -63,6 +82,13 @@ export function useWebSocket() {
   const reconnectTimer = useRef(null);
   const mountedRef = useRef(true);
   const reconnectAttempt = useRef(0);
+  // True once the socket has connected at least once. Distinguishes the initial
+  // page-load connect (message list is freshly fetched anyway) from any later
+  // reconnect — backoff OR a wake/visibility revive — which must run the catch-up
+  // so mail that arrived while the socket was down shows without a manual refresh.
+  // reconnectAttempt can't be used for this: revive() resets it to 0 before
+  // reconnecting, which made a wake-triggered reconnect look like a first connect.
+  const hasConnectedBefore = useRef(false);
   const { addNotification, updateAccount, setFolders, setBackfillProgress } = useStore();
 
   const connect = useCallback(() => {
@@ -77,7 +103,8 @@ export function useWebSocket() {
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
-      const wasReconnect = reconnectAttempt.current > 0;
+      const wasReconnect = hasConnectedBefore.current;
+      hasConnectedBefore.current = true;
       reconnectAttempt.current = 0;
       ws._lastActivity = Date.now();
       // Ping every 30s. If no message (including the server's pong) has arrived in ~2.5 intervals,
@@ -98,12 +125,10 @@ export function useWebSocket() {
         api.getUnreadCounts().then(counts => {
           useStore.setState({ unreadCounts: counts });
         }).catch(() => {});
-        // Rail sections can drift during the outage — gtd_sections_updated events
-        // fired while the socket was down are lost, not buffered. Refetch them the
-        // same way we refresh messages/unread, but only for GTD users so a non-GTD
-        // context adds no extra traffic on every reconnect.
-        const { accounts, selectedAccountId, scheduleGtdSectionsFetch } = useStore.getState();
-        if (gtdActiveForContext(accounts, selectedAccountId)) scheduleGtdSectionsFetch();
+        // A plugin's rail/derived data can drift during the outage — events fired while the socket
+        // was down are lost, not buffered. Let each activated plugin resync (GTD refetches its
+        // sections). Core stays plugin-agnostic.
+        dispatchPluginReconnect();
       }
     };
 
@@ -148,23 +173,32 @@ export function useWebSocket() {
           // In-app notifications and sounds are inbox-only — non-inbox folder syncs
           // (Archive, Spam, on-demand syncs) should not trigger alerts for old mail.
           // Also skipped when all messages were silenced by a mark_read rule (alertCount === 0).
-          if (isInbox && alertCount > 0 && document.visibilityState === 'visible') {
+          if (isInbox && alertCount > 0) {
             const latest = alertMessages[0];
-            addNotification({
+            const notification = {
               type: 'new_mail',
               accountId,
+              folder: folder || 'INBOX',
+              messageId: latest.id,
+              message: latest,
               title: latest.fromName || latest.fromEmail || t('notifications.newMessage'),
               body: latest.subject || t('common.noSubject'),
               count: alertCount,
-            });
-            const { notificationSound, customSoundDataUrl } = useStore.getState();
-            playNotificationSound(notificationSound, customSoundDataUrl);
+            };
+
+            if (document.visibilityState === 'visible') {
+              addNotification(notification);
+              const { notificationSound, customSoundDataUrl } = useStore.getState();
+              playNotificationSound(notificationSound, customSoundDataUrl);
+            }
+
+            _forwardNativeNewMailNotification(notification);
           }
 
           // Refresh the message list when the affected folder is visible
           const store = useStore.getState();
           const isRelevant =
-            store.selectedAccountId === null ||
+            (store.selectedAccountId === null && accountAffectsUnifiedInbox(store.accounts, accountId)) ||
             store.selectedAccountId === accountId;
           const folderVisible = store.selectedFolder === (folder || 'INBOX');
 
@@ -192,7 +226,10 @@ export function useWebSocket() {
         const counts = useStore.getState().unreadCounts;
         const byAccount = { ...counts.byAccount };
         byAccount[accountId] = (byAccount[accountId] || 0) + delta;
-        const newCounts = { total: counts.total + delta, byAccount };
+        const total = accountAffectsUnifiedInbox(useStore.getState().accounts, accountId)
+          ? counts.total + delta
+          : counts.total;
+        const newCounts = { total, byAccount };
         useStore.setState({ unreadCounts: newCounts });
         // Update favicon immediately — do not wait for React's render cycle.
         // With a pre-cached base this is synchronous (no image load round-trip).
@@ -259,7 +296,9 @@ export function useWebSocket() {
         // visible, refresh counts for sidebar badges, but no sounds/notifications.
         const { accountId: fuAccountId } = data;
         const fuStore = useStore.getState();
-        const fuRelevant = fuStore.selectedAccountId === null || fuStore.selectedAccountId === fuAccountId;
+        const fuRelevant =
+          (fuStore.selectedAccountId === null && accountAffectsUnifiedInbox(fuStore.accounts, fuAccountId)) ||
+          fuStore.selectedAccountId === fuAccountId;
         if (fuRelevant) {
           window.dispatchEvent(new CustomEvent('mailflow:refresh'));
           window.dispatchEvent(new CustomEvent('mailflow:sync_done'));
@@ -301,19 +340,6 @@ export function useWebSocket() {
         break;
       }
 
-      case 'gtd_sections_updated': {
-        // GTD label folders changed (tick, classify copy/remove, or a transition
-        // strip). Refetch the rail/tab sections — NOT gated on selectedFolder
-        // (label folders never become the selected folder), debounced in the
-        // store since this can fire several times per tick. Only refetch when the
-        // event's account is in the current rail scope (unified sees every account).
-        const store = useStore.getState();
-        if (store.selectedAccountId === null || store.selectedAccountId === data.accountId) {
-          store.scheduleGtdSectionsFetch();
-        }
-        break;
-      }
-
       case 'message_flags': {
         // A read/star flag changed on ANOTHER of this user's devices. Apply it to the matching
         // rows in place — no full folder refetch (that would flicker and refetch-storm while
@@ -335,6 +361,11 @@ export function useWebSocket() {
         }
         break;
       }
+
+      default:
+        // A message type core doesn't handle — hand it to any activated plugin that registered for
+        // it (e.g. GTD's 'gtd_sections_updated'). No-op when nothing is registered.
+        dispatchPluginWsMessage(data);
     }
   }, [addNotification, updateAccount, setFolders, setBackfillProgress, t]);
 

@@ -1,15 +1,15 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 import { query } from '../services/db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
+import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
 import { imapManager } from '../index.js';
 import { stopCardavUser } from '../services/carddavSync.js';
-import { customPetSlug } from '../services/gtdPet.js';
+import { pluginRegistry } from '../plugins/registry.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -75,16 +75,11 @@ router.delete('/users/:id', async (req, res) => {
   await imapManager.disconnectUser(id).catch(err => console.warn('disconnectUser on delete:', err.message));
   stopCardavUser(id);
   await query('DELETE FROM users WHERE id = $1', [id]);
-  // The user's imported GTD pet is stored under a slug DERIVED from their id (customPetSlug),
-  // not linked to users by an FK, so the cascade delete can't reach it — remove it explicitly
-  // or its row (up to a 5MB spritesheet) is orphaned in gtd_pets forever. Best-effort like
-  // disconnectUser above: the user row is already gone, so failing here would misreport a
-  // completed delete as a 500 (and a retry would 404); an orphaned pet row is the lesser harm.
-  const petSlug = customPetSlug(id);
-  if (petSlug) {
-    await query('DELETE FROM gtd_pets WHERE slug = $1', [petSlug])
-      .catch(err => console.warn('gtd_pets cleanup on delete:', err.message));
-  }
+  // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
+  // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
+  // and after the delete: the user row is already gone, so a hook failure must not misreport a
+  // completed delete as a 500. The hook swallows per-plugin errors.
+  await pluginRegistry.runHook('onUserDelete', { userId: id });
   console.log(`[admin] ${req.session.username} deleted user ${target.rows[0].username} (${id})`);
   res.json({ ok: true });
 });
@@ -288,11 +283,11 @@ router.post('/invites', async (req, res) => {
         const cfg = JSON.parse(sysResult.rows[0].value);
         const pass = cfg.pass ? decrypt(cfg.pass) : null;
         if (cfg.host && cfg.user && pass) {
-          const sysResolved = await resolveForConnection(cfg.host);
+          const policy = await getConnectionPolicy();
+          const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
           const sysTls = { rejectUnauthorized: true };
           if (sysResolved.servername) sysTls.servername = sysResolved.servername;
-          transport = nodemailer.createTransport({
-            host: sysResolved.host,
+          transport = createSmtpTransport(sysResolved, {
             port: cfg.port || 587,
             secure: (cfg.port || 587) === 465,
             auth: { user: cfg.user, pass },
@@ -328,8 +323,7 @@ router.post('/invites', async (req, res) => {
         const acctResolved = await resolveForConnection(account.smtp_host, { allowPrivate: policy.allowPrivateHosts });
         const acctTls = { rejectUnauthorized: policy.allowInsecureTls ? !account.imap_skip_tls_verify : true };
         if (acctResolved.servername) acctTls.servername = acctResolved.servername;
-        transport = nodemailer.createTransport({
-          host: acctResolved.host,
+        transport = createSmtpTransport(acctResolved, {
           port: account.smtp_port,
           secure: account.smtp_port === 465,
           auth: smtpAuth,
@@ -410,7 +404,11 @@ router.post('/system-email', async (req, res) => {
     return res.status(400).json({ error: 'SMTP host and username are required' });
   }
 
-  const hostErr = await validateHost(host);
+  // Honor the admin's "Allow private / local hosts" policy, exactly as the personal
+  // account routes do — a self-hosted System Email relay on a private IP must be
+  // accepted when the toggle is on (#358). With it off, the private/reserved check stands.
+  const policy = await getConnectionPolicy();
+  const hostErr = await validateHost(host, { allowPrivate: policy.allowPrivateHosts });
   if (hostErr) return res.status(400).json({ error: hostErr });
 
   // Load existing config so we can keep the encrypted password if the field wasn't changed
@@ -460,11 +458,11 @@ router.post('/system-email/test', async (req, res) => {
     return res.status(400).json({ error: 'No password stored — save the configuration first' });
   }
   try {
-    const testResolved = await resolveForConnection(cfg.host);
+    const policy = await getConnectionPolicy();
+    const testResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
     const testTls = { rejectUnauthorized: true };
     if (testResolved.servername) testTls.servername = testResolved.servername;
-    const transport = nodemailer.createTransport({
-      host: testResolved.host,
+    const transport = createSmtpTransport(testResolved, {
       port: cfg.port,
       secure: cfg.port === 465,
       auth: { user: cfg.user, pass },
@@ -488,14 +486,14 @@ router.get('/oidc', async (req, res) => {
   const result = await query(
     `SELECT id, name, slug, issuer_url, client_id, scopes, provisioning_mode,
             allowed_domains, enabled, require_email_verified, allow_insecure,
-            admin_group_claim, admin_group_value, created_at, updated_at
+            admin_group_claim, admin_group_value, rp_initiated_logout, created_at, updated_at
      FROM oidc_providers ORDER BY name ASC`
   );
   res.json({ providers: result.rows });
 });
 
 router.post('/oidc', async (req, res) => {
-  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value } = req.body;
+  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout } = req.body;
   if (!name || !slug || !issuer_url || !client_id || !client_secret) {
     return res.status(400).json({ error: 'name, slug, issuer_url, client_id and client_secret are required' });
   }
@@ -516,9 +514,9 @@ router.post('/oidc', async (req, res) => {
   }
   try {
     const result = await query(
-      `INSERT INTO oidc_providers (name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value`,
+      `INSERT INTO oidc_providers (name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout`,
       [
         name.trim(), slug.trim(), issuer_url.trim(), client_id.trim(),
         encrypt(client_secret),
@@ -530,6 +528,7 @@ router.post('/oidc', async (req, res) => {
         allow_insecure === true,
         admin_group_claim?.trim() || null,
         admin_group_value?.trim() || null,
+        rp_initiated_logout === true,
       ]
     );
     res.json({ provider: result.rows[0] });
@@ -556,7 +555,7 @@ async function wouldLockOut(providerId) {
 
 router.patch('/oidc/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value } = req.body;
+  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout } = req.body;
 
   const existingResult = await query('SELECT allow_insecure FROM oidc_providers WHERE id = $1', [id]);
   if (!existingResult.rows.length) return res.status(404).json({ error: 'Provider not found' });
@@ -606,9 +605,10 @@ router.patch('/oidc/:id', async (req, res) => {
         allow_insecure = COALESCE($12, allow_insecure),
         admin_group_claim = CASE WHEN $13::text IS DISTINCT FROM '__keep__' THEN $13::text ELSE admin_group_claim END,
         admin_group_value = CASE WHEN $14::text IS DISTINCT FROM '__keep__' THEN $14::text ELSE admin_group_value END,
+        rp_initiated_logout = COALESCE($15, rp_initiated_logout),
         updated_at = NOW()
        WHERE id = $1
-       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value`,
+       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout`,
       [
         id,
         name?.trim() || null,
@@ -624,6 +624,7 @@ router.patch('/oidc/:id', async (req, res) => {
         allow_insecure !== undefined ? allow_insecure : null,
         admin_group_claim !== undefined ? (admin_group_claim?.trim() || null) : '__keep__',
         admin_group_value !== undefined ? (admin_group_value?.trim() || null) : '__keep__',
+        rp_initiated_logout !== undefined ? rp_initiated_logout : null,
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Provider not found' });

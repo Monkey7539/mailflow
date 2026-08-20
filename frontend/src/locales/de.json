@@ -179,6 +179,15 @@
     }
   },
   "message": {
+    "find": {
+      "title": "Suchen",
+      "close": "Suche schließen",
+      "label": "Suchen:",
+      "matchCase": "Groß-/Kleinschreibung",
+      "previous": "Zurück",
+      "next": "Weiter",
+      "closeButton": "Schließen"
+    },
     "selectToRead": "Nachricht auswählen zum Lesen",
     "noSubject": "(kein Betreff)",
     "to": "An:",
@@ -403,7 +412,9 @@
     "updateAvailable": "Update verfügbar: v{{version}}"
   },
   "contextMenu": {
+    "find": "Suchen",
     "open": "Öffnen",
+    "openInNewWindow": "In neuem Fenster öffnen",
     "markRead": "Als gelesen markieren",
     "markUnread": "Als ungelesen markieren",
     "star": "Nachricht markieren",
@@ -423,6 +434,7 @@
     },
     "copySubject": "Betreff kopieren",
     "copySender": "Absenderadresse kopieren",
+    "copyLink": "Link kopieren",
     "viewHeaders": "Vollständige Kopfzeilen anzeigen",
     "delete": "Löschen",
     "headers": {
@@ -611,7 +623,8 @@
       "groupAccountMail": "Konto und Mail",
       "groupDisplay": "Anzeige",
       "groupSecurityIntegrations": "Sicherheit und Integrationen",
-      "groupAdmin": "Administration"
+      "groupAdmin": "Administration",
+      "plugins": "Plugins"
     },
     "accounts": {
       "title": "E-Mail-Konten",
@@ -645,6 +658,10 @@
       "smtpHost": "SMTP-Host",
       "smtpHostPh": "smtp.gmail.com",
       "smtpPort": "Port",
+      "smtpAuthNote": "Nur nötig, wenn Ihr Postausgangsserver (SMTP) einen anderen Benutzernamen und ein anderes Passwort als die Anmeldung oben verwendet. Leer lassen, um sie wiederzuverwenden.",
+      "smtpAuthUser": "SMTP-Benutzername",
+      "smtpAuthUserPh": "Wie Benutzername oben",
+      "smtpAuthPass": "SMTP-Passwort",
       "signatureSection": "Signatur",
       "saveChanges": "Änderungen speichern",
       "addAccount": "Konto hinzufügen",
@@ -663,6 +680,9 @@
       "reindexError": "Neuindizierung konnte nicht gestartet werden",
       "syncFolders": "Ordner synchronisieren",
       "syncFoldersError": "Ordnersynchronisierung fehlgeschlagen",
+      "unifiedInboxSection": "Gemeinsamer Posteingang",
+      "unifiedInboxEnabled": "Im gemeinsamen Posteingang anzeigen",
+      "unifiedInboxEnabledDesc": "Nachrichten dieses Kontos in „Alle Posteingänge“, der gemeinsamen Suche und den Kategoriezählern anzeigen.",
       "categorizationSection": "E-Mail-Kategorisierung",
       "categorizationEnabled": "Posteingang-Kategorisierung aktivieren",
       "categorizationEnabledDesc": "Eingehende E-Mails in Kategorie-Tabs einteilen. Standardmäßig deaktiviert.",
@@ -729,6 +749,9 @@
     },
     "messageList": {
       "title": "Nachrichtenliste",
+      "senderFavicons": "Absender-Favicons",
+      "senderFaviconsDesc": "Website-Symbole für Absender ohne Kontaktfoto anzeigen. An Twenty Icons wird nur die Domain des Absenders gesendet, niemals die vollständige E-Mail-Adresse.",
+      "senderFaviconsSaveError": "Die Einstellung für Absender-Favicons konnte nicht gespeichert werden.",
       "scrollingMode": "Scrollmodus",
       "infiniteScroll": "Endloser Scroll",
       "infiniteScrollDesc": "Lädt automatisch beim Scrollen",
@@ -772,6 +795,11 @@
       "hoverQuickActionsOffDesc": "Schnellaktionen ausblenden, bis das Kontextmenü oder Tastenkürzel verwendet werden.",
       "hoverQuickActionsOn": "Ein",
       "hoverQuickActionsOnDesc": "Schnellaktion-Symbole in Nachrichtenzeilen anzeigen, wenn der Mauszeiger darüber ist.",
+      "showMessagePreviews": "Nachrichten-Vorschau",
+      "previewOff": "Aus",
+      "previewOffDesc": "Die Vorschauzeile unter jeder Betreffzeile ausblenden.",
+      "previewOn": "Ein",
+      "previewOnDesc": "Die Vorschauzeile unter jeder Betreffzeile einblenden.",
       "mobileAvatarsMode": "Absender-Avatare (mobil)",
       "mobileAvatarsOff": "Aus",
       "mobileAvatarsOffDesc": "Kein Avatar — maximaler Platz für Absender und Betreff.",
@@ -895,7 +923,7 @@
       "mailPolicyTitle": "Verbindungsrichtlinie für Mailserver",
       "mailPolicyDesc": "Legt fest, welche Verbindungstypen Benutzer konfigurieren dürfen. Für öffentlich zugängliche Instanzen deaktivieren.",
       "allowPrivateHosts": "Private / lokale Hosts erlauben",
-      "allowPrivateHostsDesc": "Ermöglicht Verbindungen zu IMAP- und SMTP-Servern unter privaten oder lokalen Adressen (z.B. 127.0.0.1, 192.168.x.x). Erforderlich für protonmail-bridge und ähnliche lokale Mail-Bridges.",
+      "allowPrivateHostsDesc": "Ermöglicht Verbindungen zu IMAP-/SMTP-Mailservern, CardDAV-Servern und KI-Anbietern unter privaten oder lokalen Adressen (z.B. 127.0.0.1, 192.168.x.x). Erforderlich für protonmail-bridge, einen selbst gehosteten CardDAV-/Nextcloud-Server oder ein lokales KI-Modell.",
       "allowInsecureTls": "Unsicheres TLS erlauben",
       "allowInsecureTlsDesc": "Erlaubt Benutzern, die TLS-Zertifikatsprüfung pro Konto zu deaktivieren. Erforderlich für Server mit selbstsignierten Zertifikaten.",
       "allowNonstandardPorts": "Nicht-standardmäßige Ports erlauben",
@@ -992,13 +1020,40 @@
       "featureCompose": "Schreibassistent (Entwurf & Verbesserung)",
       "featureSummarize": "E-Mail-Zusammenfassung",
       "saved": "KI-Konfiguration gespeichert.",
-      "removed": "KI-Konfiguration entfernt.",
       "testOk": "Erfolgreich verbunden.",
       "testFail": "Verbindung fehlgeschlagen",
       "test": "Verbindung testen",
       "testing": "Teste…",
       "notConfigured": "Noch kein KI-Anbieter konfiguriert.",
-      "remove": "Konfiguration entfernen"
+      "connectionMethod": "Verbindungsmethode",
+      "connectionMethodPlaceholder": "Verbindungsmethode auswählen",
+      "connectionMethodApi": "API-Schlüssel verwenden",
+      "connectionMethodAccount": "Abonnement verwenden",
+      "subscriptionProvider": "Abonnementanbieter",
+      "subscriptionProviderChatgpt": "ChatGPT Plus/Pro (Codex Subscription)",
+      "chatgptModel": "ChatGPT-Modell",
+      "chatgptModelPh": "gpt-5.6-luna",
+      "chatgptModelDocs": "Verfügbare Modelle ansehen",
+      "connectionStatus": "ChatGPT-Verbindung",
+      "connectedAs": "Verbunden als {{account}}",
+      "statusConnected": "Verbunden",
+      "statusDisconnected": "Nicht verbunden",
+      "statusPending": "Autorisierung ausstehend",
+      "statusReconnect": "Erneute Verbindung erforderlich",
+      "statusExpired": "Autorisierung abgelaufen",
+      "statusCancelled": "Autorisierung abgebrochen",
+      "connect": "ChatGPT verbinden",
+      "connecting": "Wird gestartet…",
+      "reconnect": "Erneut verbinden",
+      "disconnect": "Verbindung trennen",
+      "disconnecting": "Verbindung wird getrennt…",
+      "cancelling": "Wird abgebrochen…",
+      "deviceInstructions": "Öffnen Sie die Autorisierungsseite und geben Sie diesen einmaligen Code ein.",
+      "copyCode": "Code kopieren",
+      "copied": "Kopiert",
+      "copyFailed": "Der Code konnte nicht kopiert werden.",
+      "openAuthorization": "Autorisierungsseite öffnen",
+      "deviceExpires": "Der Code läuft um {{time}} ab."
     },
     "aiActions": {
       "description": "Erstellen Sie eigene KI-Aktionen. Sie erscheinen beim Lesen einer Nachricht im KI-Menü neben „Zusammenfassen“. Der Prompt jeder Aktion wird auf den Nachrichteninhalt angewendet.",
@@ -1145,6 +1200,8 @@
       "errorSecretRequired": "Client-Secret ist erforderlich.",
       "allowInsecure": "Lokale / selbstsignierte Verbindungen erlauben",
       "allowInsecureDesc": "Umgeht die Host-Validierung und TLS-Zertifikatsprüfungen. Nur für LAN-seitige Anbieter (z. B. pocketid.internal) verwenden. Nicht empfohlen für internetfähige Deployments.",
+      "rpLogout": "SSO-Abmeldung (RP-initiated)",
+      "rpLogoutDesc": "Beim Abmelden wird die Sitzung auch bei diesem Anbieter beendet, indem zu dessen end-session endpoint weitergeleitet wird, nicht nur das MailFlow-Cookie. Erfordert, dass der Anbieter einen end_session_endpoint bereitstellt und dass die MailFlow-Anmelde-URL (…/login) als post-logout redirect URI registriert ist.",
       "adminGroupClaim": "Admin-Gruppenanspruch",
       "adminGroupClaimPh": "groups",
       "adminGroupClaimDesc": "Name des JWT-Claims, der die Gruppen des Benutzers enthält (z. B. groups). Leer lassen, um gruppenbasierte Admin-Zuweisung zu deaktivieren.",
@@ -1183,6 +1240,8 @@
         "save": "Konfiguration speichern",
         "savedNote": "Konfiguration gespeichert. Auf \"Konto verbinden\" klicken zum Autorisieren.",
         "connectedNote": "Microsoft 365-Konto erfolgreich verbunden! Im Konten-Tab nachsehen.",
+        "userNoteConfigured": "Ihr Administrator hat die Microsoft-365-Anmeldung eingerichtet. Verbinden Sie unten Ihr Outlook.com-, Hotmail- oder Microsoft-365-Konto.",
+        "userNoteNotConfigured": "Die Microsoft-365-Anmeldung wurde noch nicht von einem Administrator eingerichtet. Bitte bitten Sie Ihren Administrator, sie zu konfigurieren.",
         "remove": "Entfernen",
         "deviceCodeTitle": "Mit Gerätecode verbinden",
         "deviceCodeNote": "Keine Weiterleitungs-URI oder Client-Secret erforderlich. In Azure unter Authentifizierung 'Öffentliche Clientflows zulassen' auf Ja setzen. Ideal für persönliche Outlook.com / Hotmail-Konten.",
@@ -1265,6 +1324,7 @@
       "accountLabel": "Anwenden auf",
       "opStartsWith": "beginnt mit",
       "errorMoveFolder": "Bitte einen Zielordner für die Verschieben-Aktion angeben.",
+      "errorForwardEmail": "Geben Sie eine gültige Weiterleitungsadresse ein.",
       "title": "Posteingangsregeln",
       "conditionLogicLabel": "Übereinstimmen",
       "formTitleAdd": "Neue Regel",
@@ -1285,6 +1345,8 @@
       "actionMovePlaceholder": "Ordnername",
       "errorRequired": "Regelname und mindestens eine Bedingung und Aktion sind erforderlich.",
       "actionMove": "In Ordner verschieben",
+      "actionForward": "Weiterleiten an",
+      "actionForwardPlaceholder": "empfaenger@example.com",
       "nameLabel": "Regelname",
       "editButton": "Bearbeiten",
       "deleteConfirm": "Diese Regel löschen?",
@@ -1347,6 +1409,15 @@
       "autoLockNeedsPin": "Lege eine PIN fest, um die automatische Sperre zu aktivieren",
       "autoLockOff": "Aus",
       "autoLockMin": "{{n}} Min."
+    },
+    "plugins": {
+      "title": "Plugins",
+      "description": "Aktivieren oder deaktivieren Sie optionale Funktionen für Ihr Konto. Ein aktiviertes Plugin fügt eigene Einstellungen und Oberflächen hinzu.",
+      "activated": "Aktiviert",
+      "deactivated": "Nicht aktiviert",
+      "empty": "In dieser Version sind keine Plugins verfügbar.",
+      "error": "Das Plugin konnte nicht aktualisiert werden. Bitte versuchen Sie es erneut.",
+      "configureIn": "Optionen in {{location}} konfigurieren"
     }
   },
   "blockList": {
@@ -1455,5 +1526,9 @@
       "someday": "Irgendwann",
       "reference": "Referenz"
     }
+  },
+  "window": {
+    "minimize": "Minimieren",
+    "close": "Schließen"
   }
 }

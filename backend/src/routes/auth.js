@@ -7,12 +7,13 @@ import { query, pool } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { pushConfigured } from '../services/pushNotifications.js';
-import nodemailer from 'nodemailer';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
+import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { authLimiterConfig } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
 import { sendSystemEmail } from '../services/mailer.js';
+import { buildEndSessionUrl } from './oidc.js';
 import { invalidateGlobalCategorizationCache } from '../services/categorizer.js';
 import { sanitizeGtdPrefs } from '../utils/gtdPrefs.js';
 import { sanitizeRightSidebarPrefs } from '../utils/rightSidebarPrefs.js';
@@ -585,6 +586,8 @@ router.post('/2fa/enrollment/enable', authLimiter, async (req, res) => {
 
 router.post('/logout', async (req, res) => {
   const userId = req.session.userId;
+  const oidcProviderId = req.session.oidcProviderId;
+  const oidcIdToken = req.session.oidcIdToken;
   const rawCookies = req.headers.cookie || '';
   const deviceToken = rawCookies.split(';').map(c => c.trim()).find(c => c.startsWith('mf_td='))?.slice(6);
 
@@ -595,12 +598,18 @@ router.post('/logout', async (req, res) => {
       .catch(err => console.error('logout: failed to delete trusted device:', err.message));
   }
 
+  // If this session signed in via an OIDC provider with RP-initiated logout enabled,
+  // build the end-session URL (using the still-present id_token) before destroying the
+  // session. buildEndSessionUrl never throws and returns null when it does not apply, so
+  // local logout always proceeds. The frontend redirects to this URL if present.
+  const endSessionUrl = await buildEndSessionUrl({ providerId: oidcProviderId, idToken: oidcIdToken });
+
   req.session.destroy((err) => {
     if (err) console.error('Session destroy error:', err.message);
     const cookieOpts = { path: '/', sameSite: 'lax', secure: req.secure };
     res.clearCookie('connect.sid', cookieOpts);
     res.clearCookie('mf_td', { ...cookieOpts, httpOnly: true });
-    res.json({ ok: true });
+    res.json({ ok: true, endSessionUrl });
   });
   if (userId) imapManager.disconnectUser(userId);
 });
@@ -751,7 +760,7 @@ router.get('/preferences', async (req, res) => {
   res.json(prefs);
 });
 
-router.patch('/preferences', async (req, res) => {
+export async function patchPreferences(req, res) {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
   const { theme, font, layout, notificationSound, pageSize, scrollMode, syncInterval,
           blockRemoteImages, imageWhitelist, shortcuts, hiddenFolders, language,
@@ -759,7 +768,8 @@ router.patch('/preferences', async (req, res) => {
           expandedAccounts, collapsedFolders, favoriteFolders, recentFolders, fontSize,
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
           categorizationEnabled, markReadBehavior, markReadDelay, aiActions,
-          autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval } = req.body;
+          autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval,
+          folderOrder, senderFavicons, showMessagePreviews } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -775,6 +785,7 @@ router.patch('/preferences', async (req, res) => {
   const collapsedFoldersJson  = collapsedFolders  != null ? JSON.stringify(collapsedFolders)  : null;
   const favoriteFoldersJson   = favoriteFolders   != null ? JSON.stringify(favoriteFolders)   : null;
   const recentFoldersJson     = recentFolders     != null ? JSON.stringify(recentFolders)     : null;
+  const folderOrderJson       = folderOrder       != null ? JSON.stringify(folderOrder)       : null;
   const fontSizeVal           = fontSize          != null ? String(fontSize)                  : null;
   const replyDefaultVal       = (replyDefault === 'reply' || replyDefault === 'replyAll') ? replyDefault : null;
   const sidebarWidthVal       = (() => { const n = parseInt(sidebarWidth); return (n >= 160 && n <= 400) ? String(n) : null; })();
@@ -793,6 +804,11 @@ router.patch('/preferences', async (req, res) => {
     })).filter(a => a.id && a.label && a.prompt);
     return JSON.stringify(clean);
   })();
+  const hasSenderFavicons = Object.prototype.hasOwnProperty.call(req.body, 'senderFavicons');
+  if (hasSenderFavicons && typeof senderFavicons !== 'boolean') {
+    return res.status(400).json({ error: 'senderFavicons must be a boolean' });
+  }
+  const senderFaviconsVal = hasSenderFavicons ? senderFavicons : null;
   await query(`
     UPDATE users
     SET preferences = preferences
@@ -833,6 +849,9 @@ router.patch('/preferences', async (req, res) => {
       || CASE WHEN $36::boolean IS NOT NULL THEN jsonb_build_object('showMobileAvatars', $36::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $37::boolean IS NOT NULL THEN jsonb_build_object('gravatarAvatars', $37::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $38::text IS NOT NULL THEN jsonb_build_object('folderSyncInterval', $38::text) ELSE '{}'::jsonb END
+      || CASE WHEN $39::jsonb IS NOT NULL THEN jsonb_build_object('folderOrder', $39::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $40::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $40::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $41::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $41::boolean) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null, syncInterval ?? null,
@@ -842,7 +861,8 @@ router.patch('/preferences', async (req, res) => {
       showAppBadge ?? null, showFaviconBadge ?? null, replyDefaultVal, sidebarWidthVal,
       categorizationEnabled ?? null, markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
-      showMobileAvatars ?? null, gravatarAvatars ?? null, folderSyncIntervalVal]);
+      showMobileAvatars ?? null, gravatarAvatars ?? null, folderSyncIntervalVal, folderOrderJson, senderFaviconsVal,
+      showMessagePreviews ?? null]);
 
   if (syncInterval != null) {
     const ms = parseInt(syncInterval) * 1000;
@@ -858,7 +878,9 @@ router.patch('/preferences', async (req, res) => {
   }
 
   res.json({ ok: true });
-});
+}
+
+router.patch('/preferences', patchPreferences);
 
 // Atomically appends a single address or domain to the image whitelist.
 // Using a single UPDATE with a subquery avoids the read-modify-write race
@@ -992,11 +1014,12 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
           const cfg = JSON.parse(sysResult.rows[0].value);
           const pass = cfg.pass ? decrypt(cfg.pass) : null;
           if (cfg.host && cfg.user && pass) {
-            const sysResolved = await resolveForConnection(cfg.host);
+            const policy = await getConnectionPolicy();
+            const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
             const sysTls = { rejectUnauthorized: true };
             if (sysResolved.servername) sysTls.servername = sysResolved.servername;
-            transport = nodemailer.createTransport({
-              host: sysResolved.host, port: cfg.port || 587,
+            transport = createSmtpTransport(sysResolved, {
+              port: cfg.port || 587,
               secure: (cfg.port || 587) === 465,
               auth: { user: cfg.user, pass }, tls: sysTls,
             });
@@ -1029,8 +1052,8 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
           const acctResolved = await resolveForConnection(acct.smtp_host, { allowPrivate: policy.allowPrivateHosts });
           const acctTls = { rejectUnauthorized: policy.allowInsecureTls ? !acct.imap_skip_tls_verify : true };
           if (acctResolved.servername) acctTls.servername = acctResolved.servername;
-          transport = nodemailer.createTransport({
-            host: acctResolved.host, port: acct.smtp_port,
+          transport = createSmtpTransport(acctResolved, {
+            port: acct.smtp_port,
             secure: acct.smtp_port === 465,
             auth: smtpAuth, tls: acctTls,
           });

@@ -179,6 +179,15 @@
     }
   },
   "message": {
+    "find": {
+      "title": "Search",
+      "close": "Close search",
+      "label": "Find:",
+      "matchCase": "Match case",
+      "previous": "Previous",
+      "next": "Next",
+      "closeButton": "Close"
+    },
     "selectToRead": "Select a message to read",
     "noSubject": "(no subject)",
     "to": "To:",
@@ -403,7 +412,9 @@
     "updateAvailable": "Update available: v{{version}}"
   },
   "contextMenu": {
+    "find": "Find",
     "open": "Open",
+    "openInNewWindow": "Open in new window",
     "markRead": "Mark as read",
     "markUnread": "Mark as unread",
     "star": "Star message",
@@ -428,6 +439,7 @@
     "markAsHam": "Mark as Not Spam",
     "copySubject": "Copy subject",
     "copySender": "Copy sender's address",
+    "copyLink": "Copy link",
     "viewHeaders": "View full headers",
     "delete": "Delete",
     "headers": {
@@ -611,7 +623,8 @@
       "groupAccountMail": "Account & Mail",
       "groupDisplay": "Display",
       "groupSecurityIntegrations": "Security & Integrations",
-      "groupAdmin": "Administration"
+      "groupAdmin": "Administration",
+      "plugins": "Plugins"
     },
     "rules": {
       "title": "Inbox rules",
@@ -657,6 +670,8 @@
       "actionArchive": "Archive",
       "actionDelete": "Move to trash",
       "actionMove": "Move to folder",
+      "actionForward": "Forward to",
+      "actionForwardPlaceholder": "recipient@example.com",
       "actionMovePlaceholder": "Exact IMAP folder path (e.g. Work or INBOX/Work)",
       "actionMoveSelectFolder": "Select a folder…",
       "actionMoveRequiresAccount": "Requires a specific account",
@@ -666,6 +681,7 @@
       "saving": "Saving…",
       "errorRequired": "Rule name and at least one condition and action are required.",
       "errorMoveFolder": "Please enter a destination folder for the Move action.",
+      "errorForwardEmail": "Enter one valid forwarding email address.",
       "errorSave": "Failed to save rule.",
       "runButton": "Run rules on inbox",
       "running": "Running…",
@@ -712,6 +728,10 @@
       "smtpHost": "SMTP Host",
       "smtpHostPh": "smtp.gmail.com",
       "smtpPort": "Port",
+      "smtpAuthNote": "Only needed if your outgoing (SMTP) server uses a different username and password than the login above. Leave blank to reuse them.",
+      "smtpAuthUser": "SMTP username",
+      "smtpAuthUserPh": "Same as username above",
+      "smtpAuthPass": "SMTP password",
       "signatureSection": "Signature",
       "saveChanges": "Save changes",
       "addAccount": "Add account",
@@ -730,6 +750,9 @@
       "reindexError": "Failed to start re-index",
       "syncFolders": "Sync folders",
       "syncFoldersError": "Folder sync failed",
+      "unifiedInboxSection": "Unified Inbox",
+      "unifiedInboxEnabled": "Include in Unified Inbox",
+      "unifiedInboxEnabledDesc": "Show messages from this account in All Inboxes, unified search, and category counts.",
       "categorizationSection": "Email Categorization",
       "categorizationEnabled": "Enable inbox categorization",
       "categorizationEnabledDesc": "Sort incoming emails into category tabs. Disabled by default.",
@@ -796,6 +819,9 @@
     },
     "messageList": {
       "title": "Message List",
+      "senderFavicons": "Sender favicons",
+      "senderFaviconsDesc": "Show website icons for senders without a contact photo. Only the sender's domain, never their full email address, is sent to Twenty Icons.",
+      "senderFaviconsSaveError": "Could not save the sender favicon setting.",
       "scrollingMode": "Scrolling mode",
       "infiniteScroll": "Infinite scroll",
       "infiniteScrollDesc": "Auto-loads as you scroll down",
@@ -859,6 +885,11 @@
       "hoverQuickActionsOffDesc": "Keep Quick Actions hidden until you use the context menu or shortcuts.",
       "hoverQuickActionsOn": "On",
       "hoverQuickActionsOnDesc": "Show Quick Action icons in message rows when the pointer is over them.",
+      "showMessagePreviews": "Message previews",
+      "previewOff": "Off",
+      "previewOffDesc": "Hide the preview line beneath each subject.",
+      "previewOn": "On",
+      "previewOnDesc": "Show the preview line beneath each subject.",
       "mobileAvatarsMode": "Sender avatars (mobile)",
       "mobileAvatarsOff": "Off",
       "mobileAvatarsOffDesc": "No avatar — maximum room for sender and subject.",
@@ -962,7 +993,7 @@
       "mailPolicyTitle": "Mail Server Connection Policy",
       "mailPolicyDesc": "Controls which connection types users are permitted to configure. Disable these for internet-facing deployments.",
       "allowPrivateHosts": "Allow private / local hosts",
-      "allowPrivateHostsDesc": "Permits connecting to IMAP and SMTP servers at private or local addresses (e.g. 127.0.0.1, 192.168.x.x). Required for protonmail-bridge and similar local mail bridges.",
+      "allowPrivateHostsDesc": "Permits connecting to IMAP/SMTP mail servers, CardDAV servers, and AI providers at private or local addresses (e.g. 127.0.0.1, 192.168.x.x). Required for protonmail-bridge, a self-hosted CardDAV/Nextcloud server, or a local AI model.",
       "allowInsecureTls": "Allow insecure TLS",
       "allowInsecureTlsDesc": "Allows users to disable TLS certificate verification per account. Required for servers with self-signed certificates.",
       "allowNonstandardPorts": "Allow non-standard ports",
@@ -1059,13 +1090,40 @@
       "featureCompose": "Compose assistant (draft & improve emails)",
       "featureSummarize": "Email summarization",
       "saved": "AI configuration saved.",
-      "removed": "AI configuration removed.",
       "testOk": "Connected successfully.",
       "testFail": "Connection failed",
       "test": "Test connection",
       "testing": "Testing…",
       "notConfigured": "No AI provider configured yet.",
-      "remove": "Remove configuration"
+      "connectionMethod": "Connection method",
+      "connectionMethodPlaceholder": "Choose a connection method",
+      "connectionMethodApi": "Use an API key",
+      "connectionMethodAccount": "Use a subscription",
+      "subscriptionProvider": "Subscription provider",
+      "subscriptionProviderChatgpt": "ChatGPT Plus/Pro (Codex Subscription)",
+      "chatgptModel": "ChatGPT model",
+      "chatgptModelPh": "gpt-5.6-luna",
+      "chatgptModelDocs": "View available models",
+      "connectionStatus": "ChatGPT connection",
+      "connectedAs": "Connected as {{account}}",
+      "statusConnected": "Connected",
+      "statusDisconnected": "Not connected",
+      "statusPending": "Waiting for authorization",
+      "statusReconnect": "Reconnect required",
+      "statusExpired": "Authorization expired",
+      "statusCancelled": "Authorization cancelled",
+      "connect": "Connect ChatGPT",
+      "connecting": "Starting…",
+      "reconnect": "Reconnect",
+      "disconnect": "Disconnect",
+      "disconnecting": "Disconnecting…",
+      "cancelling": "Cancelling…",
+      "deviceInstructions": "Open the authorization page and enter this one-time code.",
+      "copyCode": "Copy code",
+      "copied": "Copied",
+      "copyFailed": "Could not copy the code.",
+      "openAuthorization": "Open authorization page",
+      "deviceExpires": "Code expires at {{time}}."
     },
     "aiActions": {
       "description": "Create your own AI actions. They appear in the AI menu when reading a message, alongside Summarize. Each action's prompt is applied to the message content.",
@@ -1200,6 +1258,8 @@
       "requireEmailVerifiedDesc": "Disable for self-hosted providers (PocketID, Kanidm, etc.) that do not issue email_verified: true in their tokens.",
       "allowInsecure": "Allow local / self-signed connections",
       "allowInsecureDesc": "Bypasses host validation and TLS certificate checks. Use only for LAN-only providers (e.g. pocketid.internal). Not recommended for internet-facing deployments.",
+      "rpLogout": "SSO logout (RP-initiated)",
+      "rpLogoutDesc": "On sign-out, also end the session at this provider by redirecting to its end-session endpoint, not just clearing MailFlow’s cookie. Requires the provider to advertise an end_session_endpoint and to have your MailFlow login URL (…/login) registered as a post-logout redirect URI.",
       "adminGroupClaim": "Admin group claim",
       "adminGroupClaimPh": "groups",
       "adminGroupClaimDesc": "JWT claim name that contains the user's groups (e.g. groups). Leave blank to disable group-based admin assignment.",
@@ -1250,6 +1310,8 @@
         "save": "Save configuration",
         "savedNote": "Configuration saved. Click \"Connect account\" to authorize.",
         "connectedNote": "Microsoft 365 account connected successfully! Check the Accounts tab.",
+        "userNoteConfigured": "Your administrator has set up Microsoft 365 sign-in. Connect your Outlook.com, Hotmail, or Microsoft 365 account below.",
+        "userNoteNotConfigured": "Microsoft 365 sign-in has not been set up by an administrator yet. Please ask your administrator to configure it.",
         "remove": "Remove",
         "deviceCodeTitle": "Connect with device code",
         "deviceCodeNote": "No redirect URI or client secret needed. In Azure, go to Authentication and set 'Allow public client flows' to Yes. Best for personal Outlook.com / Hotmail accounts.",
@@ -1347,6 +1409,15 @@
       "autoLockNeedsPin": "Set a PIN to enable auto-lock",
       "autoLockOff": "Off",
       "autoLockMin": "{{n}} min"
+    },
+    "plugins": {
+      "title": "Plugins",
+      "description": "Turn optional features on or off for your account. Enabling a plugin adds its own settings and interface.",
+      "activated": "Activated",
+      "deactivated": "Not activated",
+      "empty": "No plugins are available in this build.",
+      "error": "Couldn't update the plugin. Please try again.",
+      "configureIn": "Configure options in {{location}}"
     }
   },
   "blockList": {
@@ -1455,5 +1526,9 @@
       "someday": "Someday",
       "reference": "Reference"
     }
+  },
+  "window": {
+    "minimize": "Minimize",
+    "close": "Close"
   }
 }

@@ -12,6 +12,7 @@ import DOMPurify from 'dompurify';
 import { BUILTIN_SUMMARIZE } from '../aiActions.js';
 import { getResults, saveResult, removeResult } from '../aiResults.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
+import { pickReplyAlias } from '../utils/replyAlias.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 
@@ -35,6 +36,8 @@ import { senderColor } from '../themes.js';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderIcon from './FolderIcon.jsx';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
+import SenderAvatarImage from './SenderAvatarImage.jsx';
+import ContextMenu from './ContextMenu.jsx';
 
 function parseAddressField(raw) {
   try {
@@ -87,16 +90,28 @@ function fileIcon(type) {
   );
 }
 
-export default function MessagePane() {
+export default function MessagePane({ windowMessageId = null, onWindowClose = null } = {}) {
   const { t } = useTranslation();
   const {
-    messages, searchResults, searchQuery, selectedMessageId, setSelectedMessage,
+    messages, searchResults, searchQuery, selectedMessageId: globalSelectedId, setSelectedMessage,
     updateMessage, removeMessage, decrementUnread, incrementUnread, openCompose, accounts, addNotification,
     imageWhitelist, addToImageWhitelist, blockRemoteImages, threadMessages,
     replyDefault, shortcuts, recentFolders, favoriteFolders, todoistConnected,
     categorizationEnabled, setCategoryCounts, adjustCategoryCount,
     aiActions, setShowAdmin, setAdminTab,
   } = useStore();
+
+  // Detached-window mode (#219): when a message id is passed in, this pane renders that
+  // specific message independently of the global list selection. Shadowing selectedMessageId
+  // lets the entire component below run unchanged — for the main reading pane windowMode is
+  // false and selectedMessageId === the global selection, so behavior is byte-identical.
+  const windowMode = windowMessageId != null;
+  const selectedMessageId = windowMode ? windowMessageId : globalSelectedId;
+  // Closing actions (archive/trash/move/spam/snooze) should dismiss the window they run in;
+  // in the main pane this is a no-op and the store's own selection handling applies.
+  const closeWindowIfWindowed = useCallback(() => {
+    if (windowMode) onWindowClose?.();
+  }, [windowMode, onWindowClose]);
 
   const isMobile = useMobile();
   const defaultReplyAll = replyDefault === 'replyAll';
@@ -208,6 +223,17 @@ export default function MessagePane() {
     setResolvedSubject(null);
   }, [message?.id]);
 
+  // In window mode, if the message leaves the store (archived/moved from another view,
+  // a background sync, or an action taken here), close the window rather than showing an
+  // empty pane. The ref guards the initial mount, where the store copy can momentarily be
+  // absent, from self-closing before the message has ever resolved.
+  const sawMessageRef = useRef(false);
+  useEffect(() => {
+    if (!windowMode) return;
+    if (message) { sawMessageRef.current = true; return; }
+    if (sawMessageRef.current) onWindowClose?.();
+  }, [windowMode, message, onWindowClose]);
+
   // Antispam (v0.1) — toolbar visibility for the spam / ham buttons.
   // Mirrors the heuristic in ContextMenu.jsx so the toolbar matches the menu.
   const account = accounts.find(a => a.id === message?.account_id);
@@ -229,6 +255,7 @@ export default function MessagePane() {
     if (!message) return;
     const wasUnread = !message.is_read;
     removeMessage(message.id);
+    closeWindowIfWindowed();
     if (wasUnread) decrementUnread(message.account_id);
     let settled = false;
     const undo = () => {
@@ -256,7 +283,7 @@ export default function MessagePane() {
       body: message.subject || t('common.noSubject'),
       onUndo: undo,
     });
-  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t]);
+  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t, closeWindowIfWindowed]);
 
   const currentIdx = allMessages.findIndex(m => m.id === selectedMessageId);
   const hasPrev = currentIdx > 0;
@@ -277,6 +304,12 @@ export default function MessagePane() {
   const [movePickerLoading, setMovePickerLoading] = useState(false);
   const [moveSearch, setMoveSearch] = useState('');
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [findDialogOpen, setFindDialogOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findMatchCase, setFindMatchCase] = useState(false);
+  const [findMatchIndex, setFindMatchIndex] = useState(-1);
+  const findInputRef = useRef(null);
   const [showTodoistModal, setShowTodoistModal] = useState(false);
   const [aiStatus, setAiStatus] = useState(null);
   // Per-action results for the current message: { [actionKey]: { status, text, label } }.
@@ -297,8 +330,8 @@ export default function MessagePane() {
   // no flash of empty content between skeleton-gone and email-shown.
   const prepared = useMemo(() => {
     if (!USE_DIV_RENDER || !body?.html) return null;
-    return prepareEmailHtml(body.html, String(message?.id ?? 'preview'));
-  }, [body?.html, message?.id]);
+    return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'));
+  }, [body?.html, message?.id, windowMode]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -309,6 +342,57 @@ export default function MessagePane() {
   // Ref holding the latest pane action handlers so shortcut subscriptions ([] deps) never go stale
   const paneActionsRef = useRef({});
   const emailScaleRef = useRef(1); // scale applied to wide emails that resist CSS reflow
+
+  const getPaneSelectionText = useCallback(() => {
+    const iframeDoc = iframeRef.current?.contentDocument;
+    const iframeSelection = iframeDoc?.getSelection?.().toString() || '';
+    if (iframeSelection.trim()) return iframeSelection;
+    return window.getSelection?.().toString() || '';
+  }, []);
+
+  const isSelectionContextTarget = useCallback((event, doc = document) => {
+    const selection = doc.getSelection?.();
+    if (!selection?.toString().trim() || selection.rangeCount === 0) return false;
+    const target = event.target;
+    if (!target || target === doc.body || target === doc.documentElement) return false;
+    try {
+      return selection.containsNode(target, true) || selection.getRangeAt(0).intersectsNode(target);
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const hasNativeContextTarget = useCallback((event, doc = document) => {
+    if (isSelectionContextTarget(event, doc)) return true;
+    return Boolean(event.target?.closest?.(
+      'a[href], img, input, textarea, select, button, [role="button"], [contenteditable="true"], [contenteditable=""]'
+    ));
+  }, [isSelectionContextTarget]);
+
+  const openPaneContextMenu = useCallback((x, y, options = {}) => {
+    if (!message) return;
+    setShowReplyMenu(false);
+    setShowMovePicker(false);
+    setShowMoreMenu(false);
+    setShowAiMenu(false);
+    setContextMenu({
+      x,
+      y,
+      message,
+      source: options.source || 'pane',
+      selectedText: options.selectedText ?? getPaneSelectionText(),
+    });
+  }, [getPaneSelectionText, message]);
+
+  const handlePaneContextMenu = useCallback((event) => {
+    if (hasNativeContextTarget(event, event.currentTarget?.ownerDocument || document)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openPaneContextMenu(event.clientX, event.clientY, {
+      selectedText: getPaneSelectionText(),
+      source: 'pane',
+    });
+  }, [getPaneSelectionText, hasNativeContextTarget, openPaneContextMenu]);
 
   // Track previous blocking policy so we can detect tightening vs loosening.
   const prevBlockingPolicyRef = useRef(null);
@@ -455,6 +539,8 @@ export default function MessagePane() {
 
     let rafId;
     let lastH = 0;
+    let contextMenuDoc = null;
+    let iframeContextMenuHandler = null;
 
     const setHeight = () => {
       const doc = iframe.contentDocument;
@@ -591,6 +677,18 @@ export default function MessagePane() {
         }
       });
 
+      iframeContextMenuHandler = (ev) => {
+        if (hasNativeContextTarget(ev, doc)) return;
+        ev.preventDefault();
+        const rect = iframe.getBoundingClientRect();
+        openPaneContextMenu(rect.left + ev.clientX, rect.top + ev.clientY, {
+          source: 'iframe',
+          selectedText: doc.getSelection?.().toString() || '',
+        });
+      };
+      contextMenuDoc = doc;
+      doc.addEventListener('contextmenu', iframeContextMenuHandler);
+
       // Re-measure after each lazy-loaded image settles; also re-expand any
       // scroll containers whose content has grown due to the newly loaded image.
       doc.querySelectorAll('img').forEach(img => {
@@ -618,10 +716,13 @@ export default function MessagePane() {
     return () => {
       cancelAnimationFrame(rafId);
       if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
+      if (contextMenuDoc && iframeContextMenuHandler) {
+        contextMenuDoc.removeEventListener('contextmenu', iframeContextMenuHandler);
+      }
       iframe.removeEventListener('load', onLoaded);
       emailScaleRef.current = 1;
     };
-  }, [body?.html, selectedMessageId]);
+  }, [body?.html, selectedMessageId, hasNativeContextTarget, openPaneContextMenu]);
 
   // Inject scoped email styles before paint so there is no flash of unstyled content.
   // useLayoutEffect runs synchronously after DOM mutations and before the browser paints,
@@ -889,25 +990,13 @@ export default function MessagePane() {
     const myAccount = accounts.find(a => a.id === message.account_id);
     const myEmail = myAccount?.email_address || '';
 
-    const replyAliasId = (() => {
-      const aliases = myAccount?.aliases || [];
-      if (!aliases.length) return null;
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-        const fromEmail = (message.from_email || '').toLowerCase();
-        const match = aliases.find(al => {
-          const aliasEmail = al.email.toLowerCase();
-          return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-        });
-        return match ? match.id : null;
-      } catch { return null; }
-    })();
+    const replyAliasId = pickReplyAlias({
+      aliases: myAccount?.aliases || [],
+      deliveryAddresses: message.delivery_addresses,
+      toAddresses: message.to_addresses,
+      ccAddresses: message.cc_addresses,
+      fromEmail: message.from_email,
+    });
 
     const myAddresses = new Set([
       myEmail.toLowerCase(),
@@ -1081,44 +1170,16 @@ ${bodyContent}
     const msgId = selectedMessageId;
     setAiResults(r => ({ ...r, [key]: { status: 'loading', text: '', label } }));
     try {
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'MailFlow' },
-        credentials: 'include',
+      const fullText = await api.ai.chat([{
+        role: 'user',
+        content: `${action.prompt}\n\n${textContent.slice(0, 6000)}`,
+      }], {
         signal: ctrl.signal,
-        body: JSON.stringify({
-          messages: [{
-            role: 'user',
-            content: `${action.prompt}\n\n${textContent.slice(0, 6000)}`,
-          }],
-        }),
+        onDelta: (text) => {
+          setAiResults(r => ({ ...r, [key]: { status: 'loading', text, label } }));
+        },
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: res.statusText }));
-        setAiResults(r => ({ ...r, [key]: { status: 'error', text: err.error || res.statusText, label } }));
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let lineBuf = '';
-      let fullText = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        lineBuf += decoder.decode(value, { stream: true });
-        const lines = lineBuf.split('\n');
-        lineBuf = lines.pop();
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const chunk = line.slice(6).trim();
-          if (chunk === '[DONE]') break;
-          try {
-            const delta = JSON.parse(chunk)?.choices?.[0]?.delta?.content;
-            if (delta) { fullText += delta; setAiResults(r => ({ ...r, [key]: { status: 'loading', text: fullText, label } })); }
-          } catch { /* skip */ }
-        }
-      }
-      setAiResults(r => ({ ...r, [key]: { status: 'done', text: fullText || '', label } }));
+      setAiResults(r => ({ ...r, [key]: { status: 'done', text: fullText, label } }));
       // Persist only completed results, keyed to the message it ran against.
       if (fullText) saveResult(msgId, key, fullText, label);
     } catch (err) {
@@ -1259,11 +1320,99 @@ ${bodyContent}
     }
   }, []);
 
+  const getFindRoot = useCallback(() => {
+    if (!USE_DIV_RENDER && body?.html && iframeRef.current?.contentDocument?.body) {
+      return {
+        doc: iframeRef.current.contentDocument,
+        root: iframeRef.current.contentDocument.body,
+        iframe: iframeRef.current,
+      };
+    }
+    return {
+      doc: document,
+      root: innerRef.current || scrollContainerRef.current,
+      iframe: null,
+    };
+  }, [body?.html]);
+
+  const collectFindMatches = useCallback((query, matchCase) => {
+    const { doc, root } = getFindRoot();
+    if (!query || !root) return [];
+
+    const needle = matchCase ? query : query.toLowerCase();
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (!parent || ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(parent.tagName)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    const matches = [];
+    let node = walker.nextNode();
+    while (node) {
+      const haystack = matchCase ? node.nodeValue : node.nodeValue.toLowerCase();
+      let index = haystack.indexOf(needle);
+      while (index !== -1) {
+        matches.push({ doc, node, start: index, end: index + query.length });
+        index = haystack.indexOf(needle, index + Math.max(needle.length, 1));
+      }
+      node = walker.nextNode();
+    }
+    return matches;
+  }, [getFindRoot]);
+
+  const selectFindMatch = useCallback((match) => {
+    if (!match) return;
+    const range = match.doc.createRange();
+    range.setStart(match.node, match.start);
+    range.setEnd(match.node, match.end);
+    const selection = match.doc.getSelection?.();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const rect = range.getBoundingClientRect();
+    if (match.doc === document) {
+      const container = scrollContainerRef.current;
+      if (container && rect.height) {
+        const containerRect = container.getBoundingClientRect();
+        container.scrollTop += rect.top - containerRect.top - Math.max(32, container.clientHeight * 0.25);
+      }
+    } else if (iframeRef.current && rect.height) {
+      const iframeRect = iframeRef.current.getBoundingClientRect();
+      const container = scrollContainerRef.current;
+      if (container) {
+        const containerRect = container.getBoundingClientRect();
+        container.scrollTop += iframeRect.top + rect.top - containerRect.top - Math.max(32, container.clientHeight * 0.25);
+      }
+    }
+  }, []);
+
+  const runMessageFind = useCallback((direction = 1) => {
+    const matches = collectFindMatches(findQuery, findMatchCase);
+    if (matches.length === 0) {
+      setFindMatchIndex(-1);
+      return;
+    }
+    const nextIndex = findMatchIndex < 0
+      ? (direction < 0 ? matches.length - 1 : 0)
+      : (findMatchIndex + direction + matches.length) % matches.length;
+    setFindMatchIndex(nextIndex);
+    selectFindMatch(matches[nextIndex]);
+  }, [collectFindMatches, findMatchCase, findMatchIndex, findQuery, selectFindMatch]);
+
+  useEffect(() => {
+    if (!findDialogOpen) return;
+    setTimeout(() => findInputRef.current?.focus(), 0);
+  }, [findDialogOpen]);
+
   const handleMoveToFolder = useCallback((folder) => {
     if (!message) return;
     setShowMovePicker(false);
     const moved = message;
     removeMessage(moved.id);
+    closeWindowIfWindowed();
     if (!moved.is_read) decrementUnread(moved.account_id);
     let undone = false;
     const timer = setTimeout(async () => {
@@ -1288,13 +1437,14 @@ ${bodyContent}
         if (!moved.is_read) incrementUnread(moved.account_id);
       },
     });
-  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t]);
+  }, [message, removeMessage, decrementUnread, incrementUnread, addNotification, t, closeWindowIfWindowed]);
 
   // Close move picker when the selected message changes and handle click-outside
   useEffect(() => {
     setShowMovePicker(false);
     setShowHeaderModal(false);
     setShowMoreMenu(false);
+    setContextMenu(null);
     setUnsubscribeStatus(null);
     setAiClassifying(false);
   }, [selectedMessageId]);
@@ -1325,6 +1475,9 @@ ${bodyContent}
     : [];
 
   if (!message) {
+    // A detached window with no message is mid-close (see auto-close effect above) —
+    // render nothing rather than the list's "select a message" placeholder.
+    if (windowMode) return null;
     return (
       <div style={{
         flex: 1, display: 'flex', flexDirection: 'column',
@@ -1377,6 +1530,7 @@ ${bodyContent}
     const deleted = message;
     setPendingDelete(deleted.id);
     removeMessage(deleted.id);
+    closeWindowIfWindowed();
     if (!deleted.is_read) decrementUnread(deleted.account_id);
     let undone = false;
     const timer = setTimeout(async () => {
@@ -1407,6 +1561,7 @@ ${bodyContent}
   const handleArchive = () => {
     const archived = message;
     removeMessage(archived.id);
+    closeWindowIfWindowed();
     if (!archived.is_read) decrementUnread(archived.account_id);
     let undone = false;
     const timer = setTimeout(async () => {
@@ -1432,6 +1587,138 @@ ${bodyContent}
         if (!archived.is_read) incrementUnread(archived.account_id);
       },
     });
+  };
+
+  const handlePaneContextAction = async (action, data) => {
+    if (!message) return;
+
+    switch (action) {
+      case 'open':
+      case 'bulkSelect':
+        break;
+      case 'copy':
+      case 'copySelection': {
+        const text = getPaneSelectionText();
+        if (text) navigator.clipboard?.writeText(text).catch(() => {});
+        break;
+      }
+      case 'selectAllContent': {
+        const selection = window.getSelection?.();
+        selection?.removeAllRanges();
+        if (contextMenu?.source === 'iframe' && iframeRef.current?.contentDocument?.body) {
+          const doc = iframeRef.current.contentDocument;
+          const range = doc.createRange();
+          range.selectNodeContents(doc.body);
+          doc.getSelection?.().removeAllRanges();
+          doc.getSelection?.().addRange(range);
+        } else if (scrollContainerRef.current) {
+          const range = document.createRange();
+          range.selectNodeContents(scrollContainerRef.current);
+          selection?.addRange(range);
+        }
+        break;
+      }
+      case 'findInContent': {
+        setFindDialogOpen(true);
+        setFindMatchIndex(-1);
+        break;
+      }
+      case 'print':
+        handlePrint();
+        break;
+      case 'markRead':
+        if (!message.is_read) {
+          updateMessage(message.id, { is_read: true });
+          decrementUnread(message.account_id);
+          adjustCategoryCount(message.category, -1);
+          setPending(message.id, message.account_id);
+          api.bulkRead([message.id], true).catch(e => {
+            console.error('markRead failed:', e.message);
+            updateMessage(message.id, { is_read: false });
+            incrementUnread(message.account_id);
+            adjustCategoryCount(message.category, 1);
+            pendingMarkReadMap.delete(message.id);
+          });
+        }
+        break;
+      case 'markUnread':
+        handleMarkUnread();
+        break;
+      case 'toggleStar':
+        await handleStarToggle();
+        break;
+      case 'reply':
+        handleReply(false);
+        break;
+      case 'replyAll':
+        handleReply(true);
+        break;
+      case 'forward':
+        handleForward();
+        break;
+      case 'archive':
+        handleArchive();
+        break;
+      case 'moveTo':
+        if (data) handleMoveToFolder(data);
+        break;
+      case 'delete':
+        handleDelete();
+        break;
+      case 'markSpam':
+        performSingleSpamLabel('spam');
+        break;
+      case 'markHam':
+        performSingleSpamLabel('ham');
+        break;
+      case 'snooze':
+        if (data) {
+          const snoozedMsg = message;
+          removeMessage(snoozedMsg.id);
+          closeWindowIfWindowed();
+          if (!snoozedMsg.is_read) decrementUnread(snoozedMsg.account_id);
+          addNotification({ title: t('message.snoozed.title'), body: snoozedMsg.subject || t('common.noSubject') });
+          api.snoozeMessage(snoozedMsg.id, data).catch(err => {
+            console.error('Snooze failed:', err.message);
+            useStore.getState().restoreMessages([snoozedMsg]);
+            if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
+            addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
+          });
+        }
+        break;
+      case 'createRuleFromMessage': {
+        const store = useStore.getState();
+        store.setRulesPreFill?.({ fromEmail: message.from_email, fromName: message.from_name });
+        store.setAdminTab('rules');
+        store.setShowAdmin(true);
+        break;
+      }
+      case 'addToBlockList': {
+        const email = message.from_email;
+        if (!email) break;
+        api.addToBlockList(email).then(() => {
+          addNotification({ title: t('blockList.blocked'), body: email });
+        }).catch(() => {
+          addNotification({ title: t('blockList.errorAdd'), body: email });
+        });
+        break;
+      }
+      case 'setCategory': {
+        const newCategory = data || 'primary';
+        const dbCategory = newCategory === 'primary' ? null : newCategory;
+        try {
+          await api.setMessageCategory(message.id, newCategory);
+          updateMessage(message.id, { category: dbCategory });
+          const params = message.account_id ? { accountId: message.account_id } : {};
+          api.getCategoryCounts(params).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
+        } catch (err) {
+          console.error('setCategory failed:', err?.message);
+        }
+        break;
+      }
+      default:
+        break;
+    }
   };
 
   const handleLoadImages = () => {
@@ -2066,12 +2353,13 @@ ${bodyContent}
       <div
         ref={scrollContainerRef}
         onScroll={e => setPaneScrolled(e.currentTarget.scrollTop > 4)}
+        onContextMenu={handlePaneContextMenu}
         style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', background: 'var(--bg-primary)' }}
       >
       <div style={{ padding: isMobile ? '12px 0 0' : '24px 28px 0' }}>
 
         {/* Sender card — subject lives here as the card header */}
-        <div style={{
+        <div className="msg-card" style={{
           marginBottom: isMobile ? 12 : 24,
           marginLeft: isMobile ? 0 : undefined,
           marginRight: isMobile ? 0 : undefined,
@@ -2106,8 +2394,13 @@ ${bodyContent}
               background: senderColor(message.from_email || message.from_name),
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               fontSize: 16, fontWeight: 700, color: 'white',
+              position: 'relative', overflow: 'hidden',
             }}>
               {(message.from_name || message.from_email || '?')[0].toUpperCase()}
+              <SenderAvatarImage
+                email={message.from_email}
+                hasContactPhoto={message.has_contact_photo}
+              />
             </div>
 
             {/* Sender info */}
@@ -2366,7 +2659,7 @@ ${bodyContent}
         <div style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
           {/* Unsubscribe banner — shown for newsletter messages that have a List-Unsubscribe header */}
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
-            <div style={{
+            <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',
               background: 'var(--bg-secondary)',
               border: '1px solid var(--border)',
@@ -2397,7 +2690,7 @@ ${bodyContent}
 
           {/* AI classify banner — shown for messages with no category signal when AI is available */}
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
-            <div style={{
+            <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',
               background: 'var(--bg-secondary)',
               border: '1px solid var(--border)',
@@ -2425,7 +2718,7 @@ ${bodyContent}
           )}
 
           {body.hasBlockedRemoteImages && (
-            <div style={{
+            <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',
               background: 'var(--bg-secondary)',
               border: '1px solid var(--border)',
@@ -2465,7 +2758,7 @@ ${bodyContent}
               </div>
             </div>
           )}
-          <div style={{
+          <div className="msg-card" style={{
             position: 'relative',
             padding: '14px 16px 12px',
             background: 'white',
@@ -2490,6 +2783,7 @@ ${bodyContent}
                 ref={outerRef}
                 style={{ position: 'relative', width: '100%' }}
                 onClick={handleEmailClick}
+                onContextMenu={handlePaneContextMenu}
               >
                 <div ref={scaleRef}>
                   <div
@@ -2555,7 +2849,7 @@ ${bodyContent}
           padding: isMobile ? '0 0px 16px' : '0 28px 24px',
         }}>
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
-            <div style={{
+            <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',
               background: 'var(--bg-secondary)', border: '1px solid var(--border)',
               borderLeft: '3px solid var(--text-tertiary)', borderRadius: 8,
@@ -2577,7 +2871,7 @@ ${bodyContent}
             </div>
           )}
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
-            <div style={{
+            <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',
               background: 'var(--bg-secondary)', border: '1px solid var(--border)',
               borderLeft: '3px solid var(--text-tertiary)', borderRadius: 8,
@@ -2596,7 +2890,7 @@ ${bodyContent}
               </button>
             </div>
           )}
-          <div style={{
+          <div className="msg-card" style={{
             margin: 0, padding: '14px 16px 12px',
             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             fontSize: 14, color: '#1a1a1a', lineHeight: 1.7,
@@ -2737,6 +3031,125 @@ ${bodyContent}
             </div>
           </div>
         </>
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          message={contextMenu.message}
+          variant="messagePane"
+          selectedText={getPaneSelectionText()}
+          onClose={() => setContextMenu(null)}
+          onAction={handlePaneContextAction}
+        />
+      )}
+
+      {findDialogOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 80,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 4100,
+            width: 456,
+            maxWidth: 'calc(100vw - 24px)',
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: 'var(--shadow-modal)',
+            color: 'var(--text-primary)',
+            padding: '10px 16px 14px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
+            <div style={{ flex: 1, textAlign: 'center', fontSize: 18, fontWeight: 500 }}>{t('message.find.title')}</div>
+            <button
+              onClick={() => setFindDialogOpen(false)}
+              aria-label={t('message.find.close')}
+              style={{
+                background: 'none', border: 'none', color: 'var(--text-secondary)',
+                cursor: 'pointer', padding: 2, fontSize: 28, lineHeight: 1,
+              }}
+            >
+              &times;
+            </button>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14 }}>
+            <span>{t('message.find.label')}</span>
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              onChange={e => { setFindQuery(e.target.value); setFindMatchIndex(-1); }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  runMessageFind(e.shiftKey ? -1 : 1);
+                } else if (e.key === 'Escape') {
+                  setFindDialogOpen(false);
+                }
+              }}
+              style={{
+                flex: 1,
+                height: 34,
+                boxSizing: 'border-box',
+                border: '1px solid var(--accent)',
+                borderRadius: 4,
+                padding: '5px 8px',
+                outline: 'none',
+                background: 'var(--bg-primary)',
+                color: 'var(--text-primary)',
+                fontSize: 14,
+              }}
+            />
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 22px 4px', fontSize: 14 }}>
+            <input
+              type="checkbox"
+              checked={findMatchCase}
+              onChange={e => { setFindMatchCase(e.target.checked); setFindMatchIndex(-1); }}
+              style={{ width: 17, height: 17 }}
+            />
+            {t('message.find.matchCase')}
+          </label>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button
+              onClick={() => runMessageFind(-1)}
+              disabled={!findQuery}
+              style={{
+                minWidth: 88, height: 38, border: 'none', borderRadius: 4,
+                background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                cursor: findQuery ? 'pointer' : 'default', opacity: findQuery ? 1 : 0.55,
+                fontSize: 14,
+              }}
+            >
+              {t('message.find.previous')}
+            </button>
+            <button
+              onClick={() => runMessageFind(1)}
+              disabled={!findQuery}
+              style={{
+                minWidth: 88, height: 38, border: 'none', borderRadius: 4,
+                background: 'var(--accent)', color: 'var(--accent-text)',
+                cursor: findQuery ? 'pointer' : 'default', opacity: findQuery ? 1 : 0.55,
+                fontSize: 14,
+              }}
+            >
+              {t('message.find.next')}
+            </button>
+            <button
+              onClick={() => setFindDialogOpen(false)}
+              style={{
+                minWidth: 88, height: 38, border: 'none', borderRadius: 4,
+                background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                cursor: 'pointer', fontSize: 14,
+              }}
+            >
+              {t('message.find.closeButton')}
+            </button>
+          </div>
+        </div>
       )}
 
       {showHeaderModal && (

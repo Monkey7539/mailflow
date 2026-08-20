@@ -124,11 +124,16 @@ export function resolveRowDisplay(thread, sectionKey) {
 }
 
 // Whether GTD display surfaces apply to the current context.
-// Unified (no account selected) → any account with GTD on; single account →
-// that account's flag only.
-export function gtdActiveForContext(accounts, selectedAccountId) {
+// Gated first on the user having the GTD plugin activated (deactivating hides every GTD surface,
+// independent of per-account config), then: unified (no account selected) → any account with GTD
+// on; single account → that account's flag only. gtdActivated defaults true so callers that don't
+// yet thread activation (and the unit tests) keep the pre-plugin behavior.
+export function gtdActiveForContext(accounts, selectedAccountId, gtdActivated = true) {
+  if (!gtdActivated) return false;
   if (!Array.isArray(accounts) || accounts.length === 0) return false;
-  if (selectedAccountId == null) return accounts.some(a => a?.gtd_enabled);
+  if (selectedAccountId == null) {
+    return accounts.some(a => a?.gtd_enabled && a?.include_in_unified_inbox !== false);
+  }
   const acct = accounts.find(a => a?.id === selectedAccountId);
   return !!acct?.gtd_enabled;
 }
@@ -279,6 +284,64 @@ export function removeGtdThreadFromSections(sections, identity, states) {
   return changed ? next : sections;
 }
 
+export function snapshotGtdThreadRemoval(sections, identity, states) {
+  if (!sections || identity == null) return null;
+  const removedByState = {};
+  for (const key of [...new Set(states || [])]) {
+    const sec = sections[key];
+    if (!sec || !Array.isArray(sec.threads)) continue;
+    const rows = [];
+    sec.threads.forEach((thread, index) => {
+      if ((thread.message_id || thread.id) === identity) rows.push({ index, thread });
+    });
+    if (rows.length) removedByState[key] = rows;
+  }
+  return Object.keys(removedByState).length ? { identity, removedByState } : null;
+}
+
+export function restoreGtdThreadRemoval(sections, snapshot) {
+  if (!sections || !snapshot) return sections;
+  const next = { ...sections };
+  let changed = false;
+  let restoredWaiting = false;
+  let restoredWaitingUnread = false;
+
+  for (const [key, rows] of Object.entries(snapshot.removedByState)) {
+    const sec = sections[key];
+    if (!sec || !Array.isArray(sec.threads)) continue;
+    const threads = [...sec.threads];
+    let restored = 0;
+    let restoredUnread = 0;
+    for (const row of rows) {
+      if (threads.some(thread => (thread.message_id || thread.id) === snapshot.identity)) continue;
+      threads.splice(Math.min(row.index, threads.length), 0, row.thread);
+      restored += 1;
+      if (!row.thread.is_read) restoredUnread += 1;
+    }
+    if (!restored) continue;
+    changed = true;
+    if (key === 'watch' || key === 'delegated') {
+      restoredWaiting = true;
+      if (restoredUnread) restoredWaitingUnread = true;
+    }
+    next[key] = {
+      ...sec,
+      total: (Number(sec.total) || 0) + restored,
+      unread: (Number(sec.unread) || 0) + restoredUnread,
+      threads,
+    };
+  }
+
+  if (restoredWaiting && sections.waiting && typeof sections.waiting === 'object') {
+    next.waiting = {
+      ...sections.waiting,
+      total: (Number(sections.waiting.total) || 0) + 1,
+      unread: (Number(sections.waiting.unread) || 0) + (restoredWaitingUnread ? 1 : 0),
+    };
+  }
+  return changed ? next : sections;
+}
+
 // Optimistically flip a section thread's read flag across every state it is labelled with
 // (a merged Waiting row lives in both watch and delegated), so a GTD entry's bold/normal
 // styling updates instantly on a mark-read/unread; the gtd refetch reconciles. Also nudges
@@ -389,6 +452,90 @@ export function isSelectedRow(row, selectedId, selectedMid) {
   if (!row) return false;
   if (selectedMid != null && row.message_id != null && row.message_id === selectedMid) return true;
   return row.id != null && row.id === selectedId;
+}
+
+// A stable identity for a message list row: the RFC Message-ID when present, else the (volatile)
+// DB row id. The row's UUID id is regenerated whenever a message is purged and re-inserted
+// (folder move / resync / UID change), so deduplicating a list by id ALONE lets a reindexed
+// message linger under its old id AND reappear under the new one — two rows with the same
+// Message-ID, which the message-list renders as a visible duplicate (and isSelectedRow highlights
+// together). Keying on the Message-ID collapses those; rows without one keep id identity so two
+// distinct id-only rows never merge. Namespaced so a Message-ID can never collide with a UUID.
+// Pure. Mirrors the identity rule in isSelectedRow / pickThreadMessage.
+export function messageIdentity(m) {
+  if (!m) return null;
+  return m.message_id ? `mid:${m.message_id}` : `id:${m.id}`;
+}
+
+// Merge a freshly-fetched page of messages into an existing list, keyed by messageIdentity:
+//  - an incoming row with the SAME DB id as an existing row is dropped (the existing copy may
+//    carry optimistic local-only fields a network refresh lost, e.g. unread_count);
+//  - an incoming row that shares a Message-ID with an existing row but carries a NEW id (the
+//    message was purged+reinserted, regenerating its id) REPLACES that stale row in place, so a
+//    reindexed message never shows as a duplicate and the surviving row is the fresh, clickable one;
+//  - anything genuinely new is appended, de-duplicated within the incoming batch by identity.
+// Returns the original array reference unchanged when nothing was added or replaced, so callers can
+// skip a no-op state update. Pure.
+export function appendMessagesByIdentity(existing, incoming) {
+  const items = (incoming || []).filter(Boolean);
+  if (items.length === 0) return existing;
+
+  const existingIds = new Set(existing.map(m => m.id));
+  const idxByMid = new Map();
+  existing.forEach((m, i) => { if (m.message_id) idxByMid.set(m.message_id, i); });
+
+  let messages = existing;
+  let mutated = false;
+  const additions = [];
+  const takenKeys = new Set(); // identities already consumed from the incoming batch
+
+  for (const m of items) {
+    if (existingIds.has(m.id)) continue;   // exact same row already present — keep existing
+    const key = messageIdentity(m);
+    if (takenKeys.has(key)) continue;      // a same-identity incoming row was already handled
+    takenKeys.add(key);
+    if (m.message_id && idxByMid.has(m.message_id)) {
+      if (!mutated) { messages = existing.slice(); mutated = true; }
+      messages[idxByMid.get(m.message_id)] = m; // reindexed: replace the stale row in place
+    } else {
+      additions.push(m);                        // genuinely new
+    }
+  }
+
+  if (!mutated && additions.length === 0) return existing;
+  return additions.length ? [...messages, ...additions] : messages;
+}
+
+// Collapse a message list so no two rows share a stable identity (Message-ID when present).
+// The SAME email can exist as separate DB rows in more than one place the list draws from — the
+// same message delivered to two accounts in a unified inbox, or a received copy alongside its
+// Sent twin — and every raw list load (setMessages) would otherwise render both, even though the
+// app already treats them as ONE message (see isSelectedRow, which highlights them together).
+// This is the render-time guard the identity-aware merges (appendMessagesByIdentity) don't cover.
+// Order-preserving; on a collision the INBOX copy wins so the list shows the received message.
+// Null-safe: rows without a Message-ID key on their (unique) id, so distinct ones never merge. Pure.
+export function dedupeByIdentity(list) {
+  const idxByKey = new Map(); // identity -> index in result
+  const result = [];
+  for (const m of list || []) {
+    if (!m) continue;
+    const key = messageIdentity(m);
+    if (!idxByKey.has(key)) {
+      idxByKey.set(key, result.length);
+      result.push(m);
+    } else if (result[idxByKey.get(key)].folder !== 'INBOX' && m.folder === 'INBOX') {
+      result[idxByKey.get(key)] = m; // prefer the INBOX copy of the same logical message
+    }
+  }
+  return result;
+}
+
+// Filter `incoming` to the messages whose stable identity is not already present in `existing`.
+// Used by restore/undo so a message the network refresh already brought back — possibly under a
+// regenerated id, matched via Message-ID — is not re-added as a duplicate. Pure.
+export function missingByIdentity(existing, incoming) {
+  const present = new Set(existing.map(messageIdentity));
+  return (incoming || []).filter(m => m && !present.has(messageIdentity(m)));
 }
 
 // Choose which message of a thread a deep-link should open, given the thread's rows and

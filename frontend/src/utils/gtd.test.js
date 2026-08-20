@@ -11,7 +11,9 @@ import {
   mergeWaiting,
   buildGtdDisplaySections,
   removeGtdThreadFromSections,
+  restoreGtdThreadRemoval,
   setGtdThreadReadInSections,
+  snapshotGtdThreadRemoval,
   collectThreadReadIds,
   scheduleGtdThreadAutoRead,
   openGtdThreadWithAutoRead,
@@ -21,6 +23,10 @@ import {
   unclassifyThread,
   pickThreadMessage,
   isSelectedRow,
+  messageIdentity,
+  appendMessagesByIdentity,
+  dedupeByIdentity,
+  missingByIdentity,
   DEFAULT_GTD_FOLDERS,
   resolveAccountGtdFolders,
   gtdStatesInFolders,
@@ -138,7 +144,16 @@ describe('gtdActiveForContext', () => {
     assert.equal(gtdActiveForContext(accounts, null), true);
     assert.equal(gtdActiveForContext([{ id: 'b', gtd_enabled: false }], null), false);
   });
+  it('unified: ignores GTD accounts excluded from the unified inbox', () => {
+    assert.equal(gtdActiveForContext([
+      { id: 'a', gtd_enabled: true, include_in_unified_inbox: false },
+      { id: 'b', gtd_enabled: false, include_in_unified_inbox: true },
+    ], null), false);
+  });
   it('per-account: gates on that account flag only', () => {
+    assert.equal(gtdActiveForContext([
+      { id: 'a', gtd_enabled: true, include_in_unified_inbox: false },
+    ], 'a'), true);
     assert.equal(gtdActiveForContext(accounts, 'a'), true);
     assert.equal(gtdActiveForContext(accounts, 'b'), false);
     assert.equal(gtdActiveForContext(accounts, 'missing'), false);
@@ -146,6 +161,16 @@ describe('gtdActiveForContext', () => {
   it('is false for empty/absent accounts', () => {
     assert.equal(gtdActiveForContext([], null), false);
     assert.equal(gtdActiveForContext(undefined, null), false);
+  });
+  it('gates on the GTD plugin being activated (3rd arg); defaults to activated', () => {
+    // Deactivated: false regardless of per-account gtd_enabled, unified or single.
+    assert.equal(gtdActiveForContext(accounts, null, false), false);
+    assert.equal(gtdActiveForContext(accounts, 'a', false), false);
+    // Activated (explicit) behaves like the default.
+    assert.equal(gtdActiveForContext(accounts, null, true), true);
+    assert.equal(gtdActiveForContext(accounts, 'a', true), true);
+    // Omitted arg defaults to activated (pre-plugin behavior preserved).
+    assert.equal(gtdActiveForContext(accounts, null), true);
   });
 });
 
@@ -437,6 +462,144 @@ describe('isSelectedRow', () => {
   });
 });
 
+describe('messageIdentity', () => {
+  it('keys on the Message-ID when present', () => {
+    assert.equal(messageIdentity({ id: 'uuid-1', message_id: '<m1>' }), 'mid:<m1>');
+    // Same Message-ID under a regenerated id yields the SAME identity.
+    assert.equal(
+      messageIdentity({ id: 'uuid-2', message_id: '<m1>' }),
+      messageIdentity({ id: 'uuid-1', message_id: '<m1>' })
+    );
+  });
+
+  it('falls back to the row id when Message-ID is absent, and never collapses distinct ids', () => {
+    assert.equal(messageIdentity({ id: 'uuid-1', message_id: null }), 'id:uuid-1');
+    assert.equal(messageIdentity({ id: 'uuid-1', message_id: '' }), 'id:uuid-1');
+    assert.notEqual(
+      messageIdentity({ id: 'uuid-1' }),
+      messageIdentity({ id: 'uuid-2' })
+    );
+  });
+
+  it('returns null for a missing row', () => {
+    assert.equal(messageIdentity(null), null);
+    assert.equal(messageIdentity(undefined), null);
+  });
+});
+
+describe('appendMessagesByIdentity', () => {
+  it('replaces a reindexed message in place instead of duplicating it (the #378 bug)', () => {
+    // Existing list holds the message under its old DB id; the fetched page carries the same
+    // Message-ID under a NEW id (purge+reinsert regenerated the UUID).
+    const existing = [{ id: 'old', message_id: '<m1>', snippet: 'a' }];
+    const incoming = [{ id: 'new', message_id: '<m1>', snippet: 'a' }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 1);              // no duplicate
+    assert.equal(result[0].id, 'new');           // survivor is the fresh, clickable copy
+  });
+
+  it('drops an incoming row with the same DB id, preserving the existing (optimistic) copy', () => {
+    const existing = [{ id: 'a', message_id: '<m1>', unread_count: 3 }];
+    const incoming = [{ id: 'a', message_id: '<m1>', unread_count: 0 }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result, existing);              // unchanged reference — no-op
+  });
+
+  it('appends genuinely new messages', () => {
+    const existing = [{ id: 'a', message_id: '<m1>' }];
+    const incoming = [{ id: 'b', message_id: '<m2>' }, { id: 'c', message_id: '<m3>' }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.deepEqual(result.map(m => m.id), ['a', 'b', 'c']);
+  });
+
+  it('de-duplicates within the incoming batch by identity', () => {
+    const existing = [];
+    const incoming = [{ id: 'b', message_id: '<m2>' }, { id: 'b2', message_id: '<m2>' }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 1);
+  });
+
+  it('never collapses distinct messages that both lack a Message-ID', () => {
+    const existing = [{ id: 'a', message_id: null }];
+    const incoming = [{ id: 'b', message_id: null }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.deepEqual(result.map(m => m.id), ['a', 'b']);
+  });
+
+  it('returns the original reference when there is nothing to add or replace', () => {
+    const existing = [{ id: 'a', message_id: '<m1>' }];
+    assert.equal(appendMessagesByIdentity(existing, []), existing);
+    assert.equal(appendMessagesByIdentity(existing, null), existing);
+  });
+});
+
+describe('dedupeByIdentity', () => {
+  it('collapses two rows that share a Message-ID into one (the #378 cross-account/Sent case)', () => {
+    // Same email present as user2's received INBOX copy and user1's Sent copy.
+    const list = [
+      { id: 'a', message_id: '<m1>', folder: 'INBOX', account_id: 'u2' },
+      { id: 'b', message_id: '<m1>', folder: 'Sent', account_id: 'u1' },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 1);
+  });
+
+  it('keeps the INBOX copy when the same message appears in INBOX and another folder', () => {
+    const list = [
+      { id: 'b', message_id: '<m1>', folder: 'Sent' },
+      { id: 'a', message_id: '<m1>', folder: 'INBOX' },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'a');       // INBOX copy wins regardless of order
+    assert.equal(result[0].folder, 'INBOX');
+  });
+
+  it('preserves order and keeps the first occurrence when no INBOX copy exists', () => {
+    const list = [
+      { id: 'x', message_id: '<m2>', folder: 'Archive' },
+      { id: 'a', message_id: '<m1>', folder: 'Sent' },
+      { id: 'b', message_id: '<m1>', folder: 'Archive' },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.deepEqual(result.map(m => m.id), ['x', 'a']);
+  });
+
+  it('never collapses distinct messages that both lack a Message-ID', () => {
+    const list = [
+      { id: 'a', message_id: null, folder: 'INBOX' },
+      { id: 'b', message_id: null, folder: 'INBOX' },
+    ];
+    assert.deepEqual(dedupeByIdentity(list).map(m => m.id), ['a', 'b']);
+  });
+
+  it('handles empty / nullish input and skips falsy rows', () => {
+    assert.deepEqual(dedupeByIdentity([]), []);
+    assert.deepEqual(dedupeByIdentity(null), []);
+    assert.deepEqual(dedupeByIdentity([null, { id: 'a', message_id: '<m1>' }]).map(m => m.id), ['a']);
+  });
+});
+
+describe('missingByIdentity', () => {
+  it('skips messages already present under a regenerated id (matched by Message-ID)', () => {
+    const existing = [{ id: 'new', message_id: '<m1>' }];
+    const incoming = [{ id: 'old', message_id: '<m1>' }]; // same message, stale id
+    assert.deepEqual(missingByIdentity(existing, incoming), []);
+  });
+
+  it('returns messages that are genuinely absent', () => {
+    const existing = [{ id: 'a', message_id: '<m1>' }];
+    const incoming = [{ id: 'b', message_id: '<m2>' }];
+    assert.deepEqual(missingByIdentity(existing, incoming).map(m => m.id), ['b']);
+  });
+
+  it('keeps distinct id-only rows apart', () => {
+    const existing = [{ id: 'a', message_id: null }];
+    const incoming = [{ id: 'b', message_id: null }];
+    assert.deepEqual(missingByIdentity(existing, incoming).map(m => m.id), ['b']);
+  });
+});
+
 describe('openDeepLinkMessage — stale-id recovery', () => {
   const stash = () => {
     const calls = [];
@@ -697,6 +860,65 @@ describe('removeGtdThreadFromSections', () => {
     const before = JSON.stringify(sections);
     removeGtdThreadFromSections(sections, 'x', ['watch', 'delegated']);
     assert.equal(JSON.stringify(sections), before);
+  });
+});
+
+describe('GTD row removal rollback', () => {
+  const make = () => ({
+    todo: {
+      total: 3,
+      unread: 2,
+      threads: [
+        { message_id: 'a', is_read: false },
+        { message_id: 'b', is_read: false },
+        { message_id: 'c', is_read: true },
+      ],
+    },
+    watch: {
+      total: 1,
+      unread: 1,
+      threads: [{ message_id: 'b', is_read: false }],
+    },
+    delegated: {
+      total: 1,
+      unread: 1,
+      threads: [{ message_id: 'b', is_read: false }],
+    },
+    waiting: { total: 1, unread: 1 },
+  });
+
+  it('restores the failed row at its original position and restores counts', () => {
+    const sections = make();
+    const snapshot = snapshotGtdThreadRemoval(sections, 'b', ['todo']);
+    const removed = removeGtdThreadFromSections(sections, 'b', ['todo']);
+    const restored = restoreGtdThreadRemoval(removed, snapshot);
+
+    assert.deepEqual(restored.todo.threads.map(row => row.message_id), ['a', 'b', 'c']);
+    assert.equal(restored.todo.total, 3);
+    assert.equal(restored.todo.unread, 2);
+  });
+
+  it('does not resurrect a different row removed by a concurrent action', () => {
+    const sections = make();
+    const failedSnapshot = snapshotGtdThreadRemoval(sections, 'a', ['todo']);
+    const withoutA = removeGtdThreadFromSections(sections, 'a', ['todo']);
+    const withoutAOrB = removeGtdThreadFromSections(withoutA, 'b', ['todo']);
+    const restored = restoreGtdThreadRemoval(withoutAOrB, failedSnapshot);
+
+    assert.deepEqual(restored.todo.threads.map(row => row.message_id), ['a', 'c']);
+    assert.equal(restored.todo.total, 2);
+    assert.equal(restored.todo.unread, 1);
+  });
+
+  it('restores a merged Waiting row and adjusts the deduped rollup once', () => {
+    const sections = make();
+    const snapshot = snapshotGtdThreadRemoval(sections, 'b', ['watch', 'delegated']);
+    const removed = removeGtdThreadFromSections(sections, 'b', ['watch', 'delegated']);
+    const restored = restoreGtdThreadRemoval(removed, snapshot);
+
+    assert.equal(restored.watch.total, 1);
+    assert.equal(restored.delegated.total, 1);
+    assert.deepEqual(restored.waiting, { total: 1, unread: 1 });
   });
 });
 

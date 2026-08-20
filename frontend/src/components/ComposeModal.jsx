@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { useMobile } from '../hooks/useMobile.js';
+import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import { Extension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
@@ -177,6 +178,7 @@ export default function ComposeModal() {
   const { t } = useTranslation();
   const { closeCompose, composeData, accounts, addNotification, setSelectedAccount, plaintextEmail, setThreadMessages } = useStore();
   const isMobile = useMobile();
+  const uiScale = useUiScale();
 
   const isReply = !!(composeData?.isReply || composeData?.isReplyAll);
   const isForward = !!composeData?.isForward;
@@ -684,46 +686,11 @@ export default function ComposeModal() {
     setAiPanel({ action, status: 'generating', text: '' });
 
     try {
-      const response = await fetch('/api/ai/chat', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'MailFlow' },
-        body: JSON.stringify({ messages }),
+      const fullText = await api.ai.chat(messages, {
         signal: controller.signal,
+        onDelta: (text) => setAiPanel(p => p ? { ...p, text } : p),
       });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: 'AI request failed' }));
-        setAiPanel(p => ({ ...p, status: 'error', text: err.error || 'AI request failed' }));
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') { reader.cancel(); break; }
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta?.content ?? '';
-            if (delta) {
-              fullText += delta;
-              setAiPanel(p => p ? { ...p, text: fullText } : p);
-            }
-          } catch { /* skip malformed SSE line */ }
-        }
-      }
-      setAiPanel(p => p ? { ...p, status: 'done' } : p);
+      setAiPanel(p => p ? { ...p, status: 'done', text: fullText } : p);
     } catch (err) {
       if (err.name !== 'AbortError') {
         setAiPanel(p => p ? { ...p, status: 'error', text: err.message } : p);
@@ -810,7 +777,12 @@ export default function ComposeModal() {
       if (draftUid != null && draftFolder != null && draftAccountId) {
         api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
       }
-      const sentFolder = accounts.find(a => a.id === accountId)?.folder_mappings?.sent || 'Sent';
+      // Prefer the Sent folder the backend actually resolved to; fall back to the account's
+      // mapping only if the response didn't carry one. Avoids navigating "View" to a stale
+      // mapping (e.g. a non-selectable "[Gmail]" parent) that the send path bypassed (#386).
+      const sentFolder = sendResult?.sentFolder
+        || accounts.find(a => a.id === accountId)?.folder_mappings?.sent
+        || 'Sent';
       // The message was delivered; sentCopySaved:false means it couldn't be saved to the
       // account's Sent folder — tell the user so they know their record is incomplete.
       const sentCopyFailed = sendResult?.sentCopySaved === false;
@@ -1255,7 +1227,7 @@ export default function ComposeModal() {
               }}
             />
           ) : (
-            <div className="tiptap-compose" style={{ flex: 1, minHeight: 200, display: 'flex', flexDirection: 'column' }}>
+            <div className="tiptap-compose" style={{ flex: '1 0 auto', minHeight: 200, display: 'flex', flexDirection: 'column' }}>
               <RichToolbar editor={editor} onAttach={() => fileInputRef.current?.click()}
                 htmlMode={htmlMode}
                 onToggleHtml={() => {
@@ -1388,7 +1360,7 @@ export default function ComposeModal() {
         <>
           <div onClick={() => { setShowCcBccMenu(false); setCcBccMenuPos(null); }} style={{ position: 'fixed', inset: 0, zIndex: 2050 }} />
           <div style={{
-            position: 'fixed', top: ccBccMenuPos.top, right: ccBccMenuPos.right,
+            position: 'fixed', top: descale(ccBccMenuPos.top, uiScale), right: descale(ccBccMenuPos.right, uiScale),
             zIndex: 2051,
             background: 'var(--bg-elevated)', border: '1px solid var(--border)',
             borderRadius: 10, overflow: 'hidden', boxShadow: 'var(--shadow-popover)',
@@ -1641,6 +1613,7 @@ export default function ComposeModal() {
       )}
     <div
       ref={composeWindowRef}
+      className="compose-window"
       onKeyDown={handleKeyDown}
       style={maximized ? {
         position: 'fixed', top: 28, left: 28, right: 28, bottom: 28,
@@ -1822,7 +1795,7 @@ export default function ComposeModal() {
             getSuggestions={getSuggestions}
           />
           {(!showCc || !showBcc) && (
-            <div style={{ display: 'flex', flexShrink: 0 }}>
+            <div className="compose-ccbcc-quickadd" style={{ display: 'flex', flexShrink: 0 }}>
               {!showCc && (
                 <button onClick={() => setShowCc(true)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 11, padding: '9px 0 4px 6px' }}>
                   {t('compose.cc')}
@@ -2339,6 +2312,7 @@ function Sep() {
 
 function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, isMobile, aiEnabled, onAiAction, aiPanelOpen }) {
   const { t } = useTranslation();
+  const uiScale = useUiScale();
   const savedSelectionRef = useRef(null);
   const [aiMenuPos, setAiMenuPos] = useState(null);
   const aiBtnRef = useRef(null);
@@ -2747,7 +2721,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
       {/* Popups — position:fixed so they escape any overflow clipping */}
       {colorPos && (
         <div ref={colorPopRef} style={{
-          position: 'fixed', top: colorPos.top, left: colorPos.left, zIndex: 9900,
+          position: 'fixed', top: descale(colorPos.top, uiScale), left: descale(colorPos.left, uiScale), zIndex: 9900,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
           borderRadius: 8, padding: 8, boxShadow: 'var(--shadow-popover)',
           display: 'flex', flexWrap: 'wrap', gap: 4, width: 136,
@@ -2766,7 +2740,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
 
       {highlightPos && (
         <div ref={highlightPopRef} style={{
-          position: 'fixed', top: highlightPos.top, left: highlightPos.left, zIndex: 9900,
+          position: 'fixed', top: descale(highlightPos.top, uiScale), left: descale(highlightPos.left, uiScale), zIndex: 9900,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
           borderRadius: 8, padding: 8, boxShadow: 'var(--shadow-popover)',
           display: 'flex', flexWrap: 'wrap', gap: 4, width: 136,
@@ -2785,7 +2759,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
 
       {linkPos && (
         <div ref={linkPopRef} style={{
-          position: 'fixed', top: linkPos.top, left: linkPos.left, zIndex: 9900,
+          position: 'fixed', top: descale(linkPos.top, uiScale), left: descale(linkPos.left, uiScale), zIndex: 9900,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
           borderRadius: 8, padding: '10px 12px', boxShadow: 'var(--shadow-popover)',
           display: 'flex', flexDirection: 'column', gap: 8, width: 280,
@@ -2809,7 +2783,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
       )}
 
       {emojiPos && emojiPickerRef.current && (
-        <div ref={emojiPopRef} style={{ position: 'fixed', top: emojiPos.top, bottom: emojiPos.bottom, left: emojiPos.left, zIndex: 9900, height: 284, overflow: 'hidden', borderRadius: 8 }}>
+        <div ref={emojiPopRef} style={{ position: 'fixed', top: descale(emojiPos.top, uiScale), bottom: descale(emojiPos.bottom, uiScale), left: descale(emojiPos.left, uiScale), zIndex: 9900, height: 284, overflow: 'hidden', borderRadius: 8 }}>
           <emojiPickerRef.current.Picker data={emojiPickerRef.current.data} onEmojiSelect={emoji => { editor.chain().focus().insertContent(emoji.native).run(); setEmojiPos(null); }}
             theme="auto" previewPosition="none" skinTonePosition="none"
             perLine={7} emojiSize={18} emojiButtonSize={26} maxFrequentRows={1} />
@@ -2818,7 +2792,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
 
       {tablePos && (
         <div ref={tablePopRef} style={{
-          position: 'fixed', top: tablePos.top, left: tablePos.left, zIndex: 9900,
+          position: 'fixed', top: descale(tablePos.top, uiScale), left: descale(tablePos.left, uiScale), zIndex: 9900,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
           borderRadius: 8, padding: '10px 12px', boxShadow: 'var(--shadow-popover)',
           display: 'flex', flexDirection: 'column', gap: 8,
@@ -2854,7 +2828,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
       )}
       {aiMenuPos && (
         <div ref={aiMenuRef} style={{
-          position: 'fixed', top: aiMenuPos.top, left: aiMenuPos.left, zIndex: 9999,
+          position: 'fixed', top: descale(aiMenuPos.top, uiScale), left: descale(aiMenuPos.left, uiScale), zIndex: 9999,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
           borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
           padding: '4px 0', minWidth: 148,
@@ -2969,6 +2943,7 @@ function AttachmentChips({ attachments, onRemove, mobile }) {
 
 function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFocus, inputStyle, getSuggestions, containerStyle }) {
   const { t } = useTranslation();
+  const uiScale = useUiScale();
   const [suggestions, setSuggestions] = useState([]);
   const [suggIdx, setSuggIdx] = useState(-1);
   const debounceRef = useRef(null);
@@ -3024,7 +2999,18 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
       if (e.key === 'ArrowDown') { e.preventDefault(); setSuggIdx(i => Math.min(i + 1, suggestions.length - 1)); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSuggIdx(i => Math.max(i - 1, -1)); return; }
       if (e.key === 'Escape') { clearSuggestions(); return; }
-      if ((e.key === 'Enter' || e.key === 'Tab') && suggIdx >= 0) { e.preventDefault(); commitSuggestion(suggestions[suggIdx]); return; }
+      // Enter/Tab with the dropdown open: use the highlighted suggestion; if none is
+      // highlighted, commit a fully-typed email literally, otherwise take the top
+      // suggestion. Previously an un-highlighted Enter fell through and committed the
+      // raw typed text (e.g. a name like "tommy"), which then failed recipient
+      // validation at send time.
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        if (suggIdx >= 0) commitSuggestion(suggestions[suggIdx]);
+        else if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) commitInput();
+        else commitSuggestion(suggestions[0]);
+        return;
+      }
     }
     if (e.key === ',' || e.key === 'Enter' || e.key === 'Tab') {
       if (value.trim()) { e.preventDefault(); commitInput(); }
@@ -3123,8 +3109,8 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
           onMouseDown={e => e.preventDefault()} /* keep the input focused; don't clear on interaction */
           style={{
             position: 'fixed',
-            top: dropStyle.top, left: dropStyle.left, width: dropStyle.width,
-            maxHeight: dropStyle.maxHeight,
+            top: descale(dropStyle.top, uiScale), left: descale(dropStyle.left, uiScale), width: descale(dropStyle.width, uiScale),
+            maxHeight: descale(dropStyle.maxHeight, uiScale),
             zIndex: 9800,
             background: 'var(--bg-elevated)', border: '1px solid var(--border)',
             borderRadius: 8, boxShadow: 'var(--shadow-popover)',
@@ -3159,7 +3145,7 @@ function ChipInput({ chips, onChipsChange, value, onChange, placeholder, autoFoc
         <div
           onPointerDown={e => e.stopPropagation()}
           style={{
-            position: 'fixed', top: menu.y, left: menu.x, zIndex: 9900, minWidth: 160,
+            position: 'fixed', top: descale(menu.y, uiScale), left: descale(menu.x, uiScale), zIndex: 9900, minWidth: 160,
             background: 'var(--bg-elevated)', border: '1px solid var(--border)',
             borderRadius: 8, boxShadow: 'var(--shadow-popover)', overflow: 'hidden', padding: 4,
           }}

@@ -28,6 +28,7 @@ If you contribute code, please read the [Contributor License Agreement](CLA.md).
 ## Features
 
 - **Unified inbox** — all accounts merged in one view, sorted by date
+- **Sender imagery** — real manual/CardDAV contact photos take priority, with optional domain favicons proxied and cached through Twenty Icons and deterministic initials as the offline fallback; disable sender favicons under Appearance to prevent lookups for your user
 - **Email categorization** — automatic inbox tabs (Primary, Newsletters, Social, Notifications, Other) sort incoming mail by type using header detection and sender heuristics; AI reclassify button for misclassifications
 - **Unsubscribe** — one-click unsubscribe button appears in the message pane for detected newsletters; sends the request or opens the unsubscribe URL automatically
 - **Conversation threads** — messages grouped into reply chains with inline sent replies
@@ -35,7 +36,7 @@ If you contribute code, please read the [Contributor License Agreement](CLA.md).
 - **Attachments** — send and receive file attachments across all accounts
 - **Multiple layouts** — classic, compact, wide reader, vertical split, and more
 - **Multiple themes** — dark, light, and several color schemes; custom CSS field for per-user style overrides
-- **Multi-language UI** — English, French, Spanish, Italian, German, Russian, and Simplified Chinese
+- **Multi-language UI** — English, French, Spanish, Italian, German, Russian, Simplified Chinese, and Polish
 - **Full-text search** — across all connected accounts simultaneously
 - **Real-time notifications** — WebSocket-powered new-mail toasts and web push notifications
 - **PWA** — installable as a desktop or mobile app with push notification support
@@ -44,17 +45,18 @@ If you contribute code, please read the [Contributor License Agreement](CLA.md).
 - **Smart contact autocomplete** — learns from sent mail to rank suggestions
 - **Reply / Forward / Compose** — correct per-account SMTP routing; font family groups, email priority
 - **Folder navigation** — expand any account to browse folders
+- **Folder-structure sync** — folders created or renamed in other clients appear automatically, on a configurable interval or on demand
 - **Star, archive, delete, mark read/unread** — synced back to IMAP
 - **Mark-as-read behavior** — choose immediate (on open), after a configurable delay in seconds, or manual (button only) per-user preference
 - **Inbox rules** — automate actions (move, archive, delete, mark read, star) based on sender, subject, recipient, headers, body, or attachments
 - **Block list** — automatically move mail from blocked senders to trash before inbox rules run
 - **Spam reporting** — mark messages as spam or not spam from the context menu, toolbar, or bulk actions; feedback will feed into automated filtering in a future release
 - **Snooze** — snooze messages until a chosen time; they reappear at the top of the inbox
-- **AI assistant** — connect any OpenAI-compatible provider (local models or cloud); summarise threads, draft replies, ask questions about a message
+- **AI assistant** — use an OpenAI-compatible API provider or a ChatGPT Codex subscription; summarise threads, draft replies, ask questions about a message
 - **Password recovery** — recover your account via a recovery email address configured in profile settings
 - **User management** — admin panel, invite-only registration, invite emails
 - **Two-factor authentication** — TOTP (any authenticator app), email OTP fallback, persistent device trust; admin-configurable enforcement policy
-- **SSO / OIDC** — single sign-on via any OpenID Connect provider; group claims from the IdP can be mapped to the MailFlow admin role
+- **SSO / OIDC** — single sign-on via any OpenID Connect provider; group claims from the IdP can be mapped to the MailFlow admin role, with optional RP-initiated (end-session) logout to sign out of the provider too
 - **Microsoft 365 / OAuth2** — work accounts via Azure App Registration; personal Outlook.com via device code flow
 - **Todoist integration** — create tasks directly from emails; tasks include a deep link back to the original message
 - **CardDAV** — expose your MailFlow contacts as a CardDAV address book for sync with phone and desktop contact apps; contact photos sync and appear as sender avatars in the message list
@@ -184,7 +186,7 @@ docker compose pull
 docker compose up -d
 ```
 
-To pin to a specific version instead of `latest`, add `MAILFLOW_VERSION=1.9.0` to your `.env`.
+To pin to a specific version instead of `latest`, add `MAILFLOW_VERSION=2.7.0` to your `.env`.
 
 ---
 
@@ -252,7 +254,7 @@ No container runtime required. The steps below use Ubuntu/Debian; adapt package 
 
 ### Prerequisites
 
-- **Node.js 20+** — [nodejs.org](https://nodejs.org) or via your package manager
+- **Node.js 22 (LTS)** — [nodejs.org](https://nodejs.org) or via your package manager. Newer majors break the backend: Node's built-in `fetch` conflicts with the pinned `undici` dispatcher.
 - **PostgreSQL 16+**
 - **Redis 7+**
 - **nginx** — serves the built frontend and proxies API/WebSocket requests to the backend
@@ -261,14 +263,14 @@ No container runtime required. The steps below use Ubuntu/Debian; adapt package 
 
 **Ubuntu / Debian:**
 ```bash
-# Node.js 20 via NodeSource
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# Node.js 22 via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs postgresql redis-server nginx
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install node@20 postgresql@16 redis nginx
+brew install node@22 postgresql@16 redis nginx
 brew services start postgresql@16
 brew services start redis
 ```
@@ -302,10 +304,13 @@ Edit `.env`. In addition to the required secrets, set these for a native install
 | `APP_URL` | Full URL, e.g. `https://mail.example.com` |
 | `SESSION_SECRET` | `openssl rand -hex 32` |
 | `DB_HOST` | `localhost` |
+| `DB_PORT` | `5432` — override for a Postgres server on a non-standard port |
 | `DB_NAME` | `mailflow` |
 | `DB_USER` | `mailflow` |
 | `DB_PASSWORD` | password you set in step 2 |
 | `REDIS_URL` | `redis://localhost:6379` — or `redis+unix:///path/to/redis.sock` for a Unix socket |
+
+For Docker installs, the bundled Postgres/Redis work out of the box. To point at **external** database or cache servers (any host/port), or to store data on a host **bind mount** (e.g. an Unraid appdata share with `PUID`/`PGID`), see the "Database & Redis" and "Storage & permissions" sections of [`.env.example`](.env.example).
 | `ENCRYPTION_KEY` | `openssl rand -hex 32` |
 
 ### 5. Build the frontend
@@ -436,16 +441,54 @@ Gmail requires an **App Password** (not your normal password):
 
 ### Microsoft 365 / Outlook (OAuth2)
 
-**Work / school accounts (Microsoft 365):** require modern auth via Azure App Registration:
+Microsoft has disabled basic (password) auth for Outlook.com, Hotmail, and most
+Microsoft 365 accounts, so they connect via OAuth2 under **Settings → Integrations →
+Microsoft 365** (not the normal Add Account form). This is a one-time setup: you
+create a free [Microsoft Entra app registration](https://portal.azure.com) once, and
+the same app then serves every account and user on your instance.
 
-1. In MailFlow settings → Integrations → Microsoft 365 — follow the Azure App
-   Registration instructions shown there
-2. After saving the config, click **Connect Microsoft account**
+**1. Register the app.** In the Azure portal, go to **Microsoft Entra ID → App
+registrations → New registration**. Under **Supported account types**, choose
+**"Accounts in any organizational directory and personal Microsoft accounts"** so it
+covers both Outlook.com/Hotmail and work/school accounts. After creating it, copy the
+**Application (Client) ID**.
 
-**Personal accounts (Outlook.com / Hotmail):** no Azure registration needed — uses the device code flow:
+**2. Grant the mail permissions.** Open the app's **API permissions** page and add
+both of these, then follow the consent note:
 
-1. Settings → Accounts → Add Account → Outlook.com / Hotmail
-2. MailFlow displays a short code — visit [microsoft.com/devicelogin](https://microsoft.com/devicelogin) and enter it to authorise
+- **Add a permission → APIs my organization uses → Office 365 Exchange Online →
+  Delegated permissions**, and add **`IMAP.AccessAsUser.All`** and **`SMTP.Send`**
+  (if Exchange Online is not listed, type "Exchange" in the search box).
+- **Add a permission → Microsoft Graph → Delegated permissions**, and add
+  **`offline_access`**, **`openid`**, **`email`**, and **`profile`**.
+- For **work / school** accounts, click **Grant admin consent for your
+  organization**. Personal accounts consent at sign-in and can skip this.
+
+> This step is required. Without these permissions the account still "connects" and
+> is added, but no mail loads and sending fails with a credentials error, because
+> Outlook's IMAP and SMTP servers reject a token that lacks the mail scopes.
+
+Then follow the steps for your account type:
+
+**Personal accounts (Outlook.com / Hotmail)** (public client, device code):
+
+1. In the Azure app, open **Authentication** and set **"Allow public client flows"**
+   to **Yes**. No client secret or redirect URI is needed.
+2. In Integrations → Microsoft 365, enter the **Client ID** and **Tenant ID**
+   (`common`), leave Client Secret and Redirect URI blank, then save.
+3. Start the device-code flow shown there. MailFlow displays a short code; visit
+   [microsoft.com/devicelogin](https://microsoft.com/devicelogin) and enter it to
+   authorise.
+
+**Work / school accounts (Microsoft 365)** (confidential client):
+
+1. In the Azure app, open **Authentication → Add a platform → Web**, and set the
+   redirect URI to `https://<your-mailflow-host>/oauth/microsoft/callback` (the exact
+   value is shown on the Integrations screen).
+2. Under **Certificates & secrets → New client secret**, create a secret and copy its
+   **Value** (not the Secret ID).
+3. In Integrations → Microsoft 365, enter the Client ID, Tenant ID, Client Secret,
+   and Redirect URI, then save and click **Connect Microsoft account**.
 
 ### Custom IMAP
 
@@ -545,6 +588,24 @@ nginx  (frontend container — internal only)
   └── backend, PostgreSQL, Redis (internal network, unchanged)
 ```
 
+## Desktop and Android apps
+
+MailFlow remains a self-hosted web app, but the repository includes native wrappers for users who prefer an installed desktop or mobile application:
+
+- Windows, macOS, and Linux use Electron-based packages.
+- Android uses a Capacitor WebView wrapper.
+- On first launch, the native wrapper prompts for the MailFlow server URL, such as `https://mail.your-domain.com`, stores it locally, and connects to that server.
+- Native package sources live under `frontend/packages`.
+
+> **Note:** Prebuilt, signed native apps are not published yet — they are in development and will be attached to a future MailFlow release. For now you can build them locally from source:
+
+```bash
+cd frontend
+npm ci
+npm run electron:dist   # desktop installers (.exe / .dmg / .deb / .rpm)
+npm run android:dist    # Android package (.apk / .aab)
+```
+
 ## Supporters
 
 MailFlow is free and open source. If it's useful to you, consider supporting development:
@@ -555,9 +616,7 @@ MailFlow is free and open source. If it's useful to you, consider supporting dev
 ### GitHub Sponsors
 
 <!-- SPONSORS-START -->
-<a href="https://github.com/Rainson12" title="Rainson12"><img src="https://avatars.githubusercontent.com/u/13119203?s=64&u=d18af1210e56533c4b5808986de75dbb28227599&v=4" width="48" height="48" alt="Rainson12" style="border-radius:50%;margin:4px"></a>
-<a href="https://github.com/MikeScanlan5" title="MikeScanlan5"><img src="https://avatars.githubusercontent.com/u/44779151?s=64&u=e7dfabc231fa876f879e63b4cd1c897036751467&v=4" width="48" height="48" alt="MikeScanlan5" style="border-radius:50%;margin:4px"></a>
-<a href="https://github.com/rahhing" title="rahhing"><img src="https://avatars.githubusercontent.com/u/192337730?s=64&u=ef3c773f0ccac769353d63545e0ff6a0c885294a&v=4" width="48" height="48" alt="rahhing" style="border-radius:50%;margin:4px"></a>
+_No sponsors yet — be the first!_
 <!-- SPONSORS-END -->
 
 ---
@@ -573,6 +632,10 @@ MailFlow is free and open source. If it's useful to you, consider supporting dev
 ### GTD
 
 GTD is opt-in per account (**Settings → Categories → GTD**). Migrations for the new schema are additive and apply automatically on first startup. No operator action needed.
+
+### v2.5.0 – v2.7.0
+
+No manual migration steps required. All schema changes apply automatically on first startup.
 
 ### v2.2.0 – v2.4.1
 
@@ -616,5 +679,5 @@ If any accounts were configured with **Skip TLS verification** (e.g. for a self-
 - Password reset tokens are consumed atomically — concurrent reset requests cannot both succeed
 - Database and Redis are not exposed outside the Docker network
 - IMAP/SMTP credentials are stored at rest in the database (standard for webmail clients — protect access to your server and database volume accordingly)
-- All responses include `X-Frame-Options: DENY` and `Referrer-Policy: same-origin` security headers
+- Responses set a strict `Content-Security-Policy`, clickjacking protection via `X-Frame-Options`, and a restrictive `Referrer-Policy`
 - Email HTML is sanitized before rendering, including stripping external `url()` references from CSS style blocks to prevent tracking

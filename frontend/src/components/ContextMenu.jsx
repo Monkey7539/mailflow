@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
-import { GTD_STATES, GTD_COLORS, resolveAccountGtdFolders, gtdStatesInFolders } from '../utils/gtd.js';
 import { getContextMenuPolicy, resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
+import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
+import { useUiScale, descale } from '../hooks/useUiScale.js';
 
 // Module-level regex — spam-name heuristic shared with MessagePane.jsx so
 // it isn't recompiled on every render. Mirrors resolveAllSpamPaths on the
@@ -14,8 +15,9 @@ const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|p
 // ─── Context Menu ─────────────────────────────────────────────────────────────
 const CATEGORIES = ['primary', 'newsletter', 'promotion', 'automated', 'social'];
 
-export default function ContextMenu({ x, y, message, onClose, onAction, defaultMoveView = false, variant = 'inbox' }) {
+export default function ContextMenu({ x, y, message, onClose, onAction, defaultMoveView = false, variant = 'inbox', selectedText = '' }) {
   const { t } = useTranslation();
+  const uiScale = useUiScale();
   // Variants share one menu; the policy removes actions that depend on the center
   // list or conflict with GTD's Done contract while preserving ordinary mail actions.
   const menuPolicy = getContextMenuPolicy(variant);
@@ -27,15 +29,11 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   const accountFolders = useStore(s => s.folders[message.account_id] || []);
   const categorizationEnabled = useStore(s => s.categorizationEnabled);
   const categorizationActive = categorizationEnabled || !!account?.categorization_enabled;
-  // GTD classify is available only for accounts with GTD enabled. "Remove from
-  // <state>" is offered only for the states this thread is actually labelled with
-  // (its folders[] — present on GTD entries, absent on plain inbox rows).
-  const gtdActive = !!account?.gtd_enabled;
-  const gtdFolders = resolveAccountGtdFolders(account);
-  const gtdRemovableStates = gtdStatesInFolders(message.folders, gtdFolders);
   const menuRef = useRef(null);
   const [headerMessage, setHeaderMessage] = useState(null);
-  const [gtdView, setGtdView] = useState(false);
+  // A plugin submenu (render fn) takes over the menu content area, like categorizeView/moveView.
+  // Set via the openSubmenu capability handed to context-menu-item contributions; null = item list.
+  const [pluginSubmenu, setPluginSubmenu] = useState(null);
   const [moveView, setMoveView] = useState(defaultMoveView);
   const [moveFolders, setMoveFolders] = useState(null);
   const [moveFoldersLoading, setMoveFoldersLoading] = useState(defaultMoveView);
@@ -47,6 +45,8 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   const [folderSearch, setFolderSearch] = useState('');
   const unreadCount = Number.parseInt(message.unread_count, 10);
   const hasUnread = Number.isFinite(unreadCount) ? unreadCount > 0 : !message.is_read;
+  const isMessagePane = variant === 'messagePane';
+  const hasSelectedText = Boolean(String(selectedText || '').trim());
 
   // A folder is "spam-like" when either the user mapped it as spam or the IMAP
   // server tagged it with \Junk special-use. Falls back to a multilingual name
@@ -108,15 +108,61 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
+  // Plugin-contributed action items (currently GTD's submenu + sidebar "Done"), spliced into the
+  // Actions group at the seam below. Core stays plugin-agnostic; openSubmenu lets an item take over
+  // the content area with its own submenu render.
+  const pluginActionItems = usePluginCollected('context-menu-actions', {
+    message, account, variant, onAction, onClose,
+    openSubmenu: (render) => setPluginSubmenu(() => render),
+    t,
+  });
+
   const items = [
+    ...(isMessagePane ? [
+      {
+        group: 'Reading',
+        actions: [
+          {
+            label: t('common.copy'),
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
+            action: () => onAction('copySelection'),
+            disabled: !hasSelectedText,
+          },
+          {
+            label: t('messageList.selectAll'),
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7h10v10H7z"/></svg>,
+            action: () => onAction('selectAllContent'),
+          },
+          {
+            label: t('contextMenu.find'),
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>,
+            action: () => onAction('findInContent'),
+          },
+        ],
+      },
+      {
+        group: 'Print',
+        actions: [
+          {
+            label: t('message.print'),
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>,
+            action: () => onAction('print'),
+          },
+        ],
+      },
+    ] : []),
     {
       group: 'Message',
       actions: [
-        {
+        ...(isMessagePane ? [] : [{
           label: t('contextMenu.open'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
           action: () => onAction('open'),
-        },
+        }, {
+          label: t('contextMenu.openInNewWindow'),
+          icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>,
+          action: () => onAction('openWindow'),
+        }]),
         {
           label: hasUnread ? t('contextMenu.markRead') : t('contextMenu.markUnread'),
           icon: hasUnread
@@ -184,20 +230,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           keepOpen: true,
           hasSubmenu: true,
         }] : []),
-        ...(gtdActive ? [{
-          label: t('gtd.title'),
-          icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>,
-          action: () => setGtdView(true),
-          keepOpen: true,
-          hasSubmenu: true,
-        }] : []),
-        // The sidebar's "done" checkmark — mirrors the row's hover cluster. Section-scoped
-        // stripping happens in the GTD content's onAction (it knows the entry's section).
-        ...(menuPolicy.done ? [{
-          label: t('gtd.done'),
-          icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="20 6 9 17 4 12"/></svg>,
-          action: () => onAction('gtdDone'),
-        }] : []),
+        // Plugin-contributed items (GTD's submenu + sidebar "Done") slot in here, exactly where the
+        // GTD entries used to sit — after "Categorize", before "Create rule".
+        ...pluginActionItems,
         ...(!menuPolicy.rules ? [] : [{
           label: t('contextMenu.createRule'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
@@ -236,6 +271,18 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           label: t('contextMenu.copySender'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>,
           action: () => { navigator.clipboard.writeText(message.from_email || ''); onAction('copy'); },
+        },
+        {
+          // Durable permalink to this email: keyed on the stable Message-ID header (falls back to
+          // the volatile row UUID only when absent) so it survives the message moving folders /
+          // being re-synced. Resolved by /?m= on load — see MailApp deep-link handling (#270, #375).
+          label: t('contextMenu.copyLink'),
+          icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
+          action: () => {
+            const ref = message.message_id || message.id;
+            if (ref) navigator.clipboard.writeText(`${window.location.origin}/?m=${encodeURIComponent(ref)}`);
+            onAction('copy');
+          },
         },
       ]
     },
@@ -276,7 +323,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
         ref={menuRef}
         onClick={e => e.stopPropagation()}
         style={{
-          position: 'fixed', left: pos.x, top: pos.y,
+          position: 'fixed', left: descale(pos.x, uiScale), top: descale(pos.y, uiScale),
           background: 'var(--bg-elevated)',
           border: '1px solid var(--border)',
           borderRadius: 10, zIndex: 4000,
@@ -292,75 +339,32 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
           }
         `}</style>
 
-        {/* Message info header */}
-        <div style={{
-          padding: '10px 14px 8px',
-          borderBottom: '1px solid var(--border-subtle)',
-        }}>
+        {!isMessagePane && (
           <div style={{
-            fontSize: 12, fontWeight: 500, color: 'var(--text-primary)',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            padding: '10px 14px 8px',
+            borderBottom: '1px solid var(--border-subtle)',
           }}>
-            {message.subject || t('common.noSubject')}
-          </div>
-          <div style={{
-            fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {message.from_name
-              ? `${message.from_name} <${message.from_email}>`
-              : message.from_email}
-          </div>
-        </div>
-
-        {gtdView ? (
-          <>
-            <div
-              onClick={() => setGtdView(false)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '8px 14px', cursor: 'pointer',
-                borderBottom: '1px solid var(--border-subtle)',
-                color: 'var(--text-secondary)', fontSize: 12,
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <polyline points="15 18 9 12 15 6"/>
-              </svg>
-              {t('gtd.title')}
+            <div style={{
+              fontSize: 12, fontWeight: 500, color: 'var(--text-primary)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {message.subject || t('common.noSubject')}
             </div>
-            {GTD_STATES.map(state => (
-              <div
-                key={state}
-                onClick={() => { onAction('gtdClassify', state); onClose(); }}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}
-                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-              >
-                <span style={{ width: 9, height: 9, borderRadius: 3, flexShrink: 0, background: GTD_COLORS[state] }} />
-                <span style={{ flex: 1 }}>{t(`gtd.state.${state}`)}</span>
-              </div>
-            ))}
-            {gtdRemovableStates.length > 0 && (
-              <>
-                <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />
-                {gtdRemovableStates.map(state => (
-                  <div
-                    key={`rm-${state}`}
-                    onClick={() => { onAction('gtdRemove', state); onClose(); }}
-                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary)' }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                    <span style={{ flex: 1 }}>{t('gtd.removeFrom', { state: t(`gtd.state.${state}`) })}</span>
-                  </div>
-                ))}
-              </>
-            )}
-          </>
+            <div style={{
+              fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {message.from_name
+                ? `${message.from_name} <${message.from_email}>`
+                : message.from_email}
+            </div>
+          </div>
+        )}
+
+        {pluginSubmenu ? (
+          // A plugin item opened its own submenu (e.g. GTD's classify/remove list). It renders its
+          // own back row; onBack returns to the item list.
+          pluginSubmenu(() => setPluginSubmenu(null))
         ) : categorizeView ? (
           <>
             <div
@@ -672,8 +676,10 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                     icon={item.icon}
                     label={item.label}
                     danger={item.danger}
+                    disabled={item.disabled}
                     hasSubmenu={item.hasSubmenu}
                     onClick={() => {
+                      if (item.disabled) return;
                       item.action();
                       if (!item.keepOpen) onClose();
                     }}
@@ -697,7 +703,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
   );
 }
 
-function MenuItem({ icon, label, onClick, danger, hasSubmenu }) {
+function MenuItem({ icon, label, onClick, danger, hasSubmenu, disabled }) {
   const [hov, setHov] = useState(false);
   return (
     <div
@@ -706,11 +712,12 @@ function MenuItem({ icon, label, onClick, danger, hasSubmenu }) {
       onMouseLeave={() => setHov(false)}
       style={{
         display: 'flex', alignItems: 'center', gap: 10,
-        padding: '7px 14px', cursor: 'pointer',
-        background: hov ? (danger ? 'rgba(248,113,113,0.08)' : 'var(--bg-hover)') : 'transparent',
-        color: danger ? (hov ? 'var(--red)' : 'var(--text-secondary)') : 'var(--text-primary)',
+        padding: '7px 14px', cursor: disabled ? 'default' : 'pointer',
+        background: hov && !disabled ? (danger ? 'rgba(248,113,113,0.08)' : 'var(--bg-hover)') : 'transparent',
+        color: disabled ? 'var(--text-tertiary)' : danger ? (hov ? 'var(--red)' : 'var(--text-secondary)') : 'var(--text-primary)',
         transition: 'background 0.08s, color 0.08s',
         fontSize: 13,
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       <span style={{ flexShrink: 0, color: danger && hov ? 'var(--red)' : 'var(--text-tertiary)', display: 'flex' }}>

@@ -2,8 +2,8 @@ import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata } from './messageParser.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
-import { getGtdFolderSet, getGtdConfig, gtdTickFolders } from './gtdConfig.js';
-import { runGtdTransitions, threadKeysForMessageIds, threadKeysInFolders } from './gtdTransitions.js';
+import { pluginRegistry } from '../plugins/registry.js';
+import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
 import { refreshMicrosoftToken } from '../routes/oauth.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { logger } from './logger.js';
@@ -11,7 +11,7 @@ import { decrypt } from './encryption.js';
 import { sendPushToUser } from './pushNotifications.js';
 import { redactEmail } from '../utils/redact.js';
 import { adjustFolderCounts } from '../utils/mailUtils.js';
-import { resolveForConnection } from './hostValidation.js';
+import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { generateVCard } from '../utils/vcard.js';
@@ -39,6 +39,80 @@ function raceTimeout(promise, ms, label) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms)),
   ]);
+}
+
+// Max concurrent connection ESTABLISHMENTS per provider host (#384). Every IMAP connect (persistent,
+// reconnect, pool, backfill, poll-only, snippet) goes through connectImapClient, which holds one of
+// these slots only for the duration of the handshake and frees it the instant connect resolves. So
+// this smooths the startup/backfill burst — persistent connects + pool pre-warms + backfills all
+// firing at once — that otherwise stampedes a provider like Gmail into "Connection not available"
+// refusals, WITHOUT capping how many connections stay open (a long-lived IDLE connection frees its
+// slot as soon as it's established). Keyed by host, so one provider's burst never starves another.
+const CONNECT_CONCURRENCY_PER_HOST = 3;
+const hostConnectSem = createKeyedSemaphore(CONNECT_CONCURRENCY_PER_HOST);
+
+// Connect a fresh ImapFlow client, with an IPv4 fallback for broken IPv6 (#382). autoSelectFamily
+// (set in makeClientCfg) already races the TCP connect and recovers when a family's TCP handshake
+// is dead or hangs — but it commits to whichever family wins the TCP race, so an IPv6 path that
+// COMPLETES the TCP handshake and then STALLS the TLS handshake (broken PMTU / filtered ICMPv6)
+// hangs to the timeout with no recovery. When the first attempt times out on a genuinely dual-stack
+// host, retry once forcing IPv4-only, which sidesteps the stalled IPv6 handshake. Only a timeout
+// triggers the retry — refusals / auth / cert errors are not a family problem, so they propagate
+// unchanged. Returns a connected client the caller owns (it attaches its own 'close'/idle listeners).
+async function connectImapClient(account, resolved, cfgOpts, timeoutMs, label) {
+  const host = (account.imap_host || '').toLowerCase();
+  let sawRefusal = false; // a provider refusal ('Connection not available' etc.) fired mid-attempt
+  const attempt = async (res, tag) => {
+    const client = new ImapFlow(makeClientCfg(account, res, cfgOpts));
+    // #360: an 'error' emitted during the handshake with no listener is unhandled and crashes the
+    // process. Attach one that outlives connect; a caller adding its own later just logs alongside.
+    client.on('error', (err) => {
+      if (isConnectionRefusal(err?.message)) sawRefusal = true;
+      console.error(`IMAP error for ${logAccount(account)}:`, err.message);
+    });
+    // Admission control (#384): cap concurrent connection establishment per host so a startup /
+    // backfill burst can't stampede the provider into refusals. Held only for the handshake and
+    // released the instant connect resolves, so it bounds the open RATE, not open connections.
+    await hostConnectSem.acquire(host);
+    try {
+      await raceTimeout(client.connect(), timeoutMs, tag);
+    } catch (err) {
+      // close() (not logout()): forcefully destroys the socket and aborts the still-pending
+      // connect left running by the race timeout — a graceful logout could itself hang on a
+      // wedged/half-open connection (the exact failure we're recovering from).
+      try { client.close(); } catch { /* already closed */ }
+      throw err;
+    } finally {
+      hostConnectSem.release(host);
+    }
+    return client;
+  };
+  try {
+    return await attempt(resolved, label);
+  } catch (err) {
+    // Skip the IPv4 fallback when the provider REFUSED (a connection-limit / throttle, not an IPv6
+    // stall): a second attempt just piles on pressure and doubles the delay — let the refusal
+    // propagate so the caller's cooldown backs off (#384). Otherwise retry IPv4-only for a wedged
+    // IPv6 TLS handshake (#382).
+    if (!shouldRetryIPv4(err?.message, resolved.addresses, sawRefusal)) throw err;
+    const v4 = resolved.addresses.filter(a => !a.includes(':'));
+    console.warn(`IMAP connect stalled for ${logAccount(account)} (${label}); retrying IPv4-only`);
+    const v4Resolved = { ...resolved, addresses: v4, host: v4[0], lookup: createPinnedLookup(v4) };
+    return await attempt(v4Resolved, `${label} IPv4-retry`);
+  }
+}
+
+// Decide whether a failed connect should be retried IPv4-only: only when it was a TIMEOUT (a stall
+// a family switch can bypass — not an auth / cert error, which IPv4 won't help) AND the host is
+// genuinely dual-stack (both families resolved, so a wedged IPv6 handshake is the plausible cause
+// and there is a v4 address to fall back to) AND the provider did not REFUSE during the attempt.
+// A refusal ('Connection not available' / throttle) means the host is at its limit — a second
+// attempt just piles on pressure and doubles the delay, so back off instead (#384). Pure. (#382)
+export function shouldRetryIPv4(errMessage, addresses, sawRefusal = false) {
+  if (sawRefusal) return false;
+  const addrs = addresses || [];
+  const v4 = addrs.filter(a => !a.includes(':')); // IPv6 literals always contain a colon
+  return /timeout/i.test(String(errMessage || '')) && v4.length > 0 && v4.length !== addrs.length;
 }
 
 // A per-key counting semaphore: at most `limit` holders per key run concurrently; the rest
@@ -73,10 +147,14 @@ export function createKeyedSemaphore(limit) {
   };
 }
 
-// Max concurrent full backfills per provider host. Small so a many-account-on-one-provider
-// user stays well under connection limits; backfill is background catch-up, so serialising
-// it is safe. Other providers/accounts are unaffected (the semaphore is keyed by host).
-const BACKFILL_MAX_PER_HOST = 2;
+// Max concurrent BACKGROUND IMAP connections per provider host — shared by full backfills and
+// the snippet indexer. Small so a many-account-on-one-provider user stays well under the
+// provider's per-user/per-IP connection limit: background catch-up connections across every
+// account on one host draw from this single per-host budget instead of each account opening its
+// own and tripping the limit (Dovecot's mail_max_userip_connections defaults to 10). Live sync
+// (IDLE + the periodic interval) is separate and always flows. Keyed by host, so other
+// providers/accounts are unaffected. See _bgConnSem.
+const BACKGROUND_CONN_MAX_PER_HOST = 2;
 
 // Connection-refusal cooldown. When a provider refuses a NEW connection (per-IP/per-account
 // limit, "try again later", temporary lock, throttling), back that account off with growing
@@ -106,6 +184,43 @@ export function connectCooldownMs(failures) {
   const n = Math.max(1, failures);
   return Math.min(CONNECT_COOLDOWN_BASE_MS * (2 ** Math.min(n - 1, 5)), CONNECT_COOLDOWN_MAX_MS);
 }
+
+// ── Per-host persistent-connection budget (#379 Phase 2) ─────────────────────────────────────
+// Every enabled account otherwise holds one always-on IDLE connection, so N accounts on one
+// provider host = N simultaneous connections — which blows a per-user/per-IP limit (Dovecot's
+// mail_max_userip_connections defaults to 10) when many family/work accounts live on one server.
+// When a finite cap is configured, the first `cap` accounts on a host (in a STABLE order) keep a
+// persistent connection and the rest run "poll-only": no IDLE, just a periodic fresh
+// open→sync→close, the way Apple Mail/Thunderbird demote secondary accounts. Default is unlimited
+// (today's behavior, zero regression); a cap only takes effect when an operator sets one.
+
+// Parse a cap from config: a positive integer caps; 0, negative, empty, or non-numeric = unlimited.
+export function parsePersistentCap(raw) {
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : Infinity;
+}
+
+// The tighter of the global env cap and any provider-profile cap; Infinity (unlimited) when neither
+// is set. Pure given its inputs.
+export function resolvePersistentCap(envCap, profileCap) {
+  return Math.min(
+    Number.isFinite(envCap) && envCap > 0 ? envCap : Infinity,
+    Number.isFinite(profileCap) && profileCap > 0 ? profileCap : Infinity,
+  );
+}
+
+// Whether an account keeps a persistent connection, given the host's accounts in a STABLE order
+// (created_at, then id) and the cap: the first `cap` hold IDLE, the rest go poll-only. An account
+// absent from the list defaults to eligible (fail-safe to today's behavior). Pure.
+export function persistentEligible(orderedHostAccountIds, accountId, cap) {
+  if (!Number.isFinite(cap) || cap <= 0) return true;
+  const rank = orderedHostAccountIds.indexOf(accountId);
+  return rank === -1 ? true : rank < cap;
+}
+
+// Global env default, parsed once at load. A provider profile MAY override per host via
+// `maxPersistentPerHost` (none do by default, so no provider is capped unless an operator opts in).
+const PERSISTENT_CAP_ENV = parsePersistentCap(process.env.IMAP_MAX_PERSISTENT_PER_HOST);
 
 // Decide a folder's sync fetch strategy from its CONDSTORE modseq state. Pure and total so
 // it can be exhaustively unit-tested — it is the load-bearing correctness decision for delta
@@ -165,11 +280,10 @@ const DELTA_SCAN_UID_WINDOW = 5000;
 // deprioritising background traffic whenever the user is actively reading mail.
 const QUIET_WINDOW_MS = 8000;
 
-// How often (ms) to sync a gtd_enabled account's designated label folders. Only INBOX
-// gets IDLE + the fast periodic tick; GTD label folders otherwise sync on open only, so
-// this slower tick keeps the non-INBOX GTD sections (Todo/Watch/…) fresh in the
-// background. Slower than the INBOX interval on purpose — label folders change far less.
-const GTD_SYNC_INTERVAL_MS = 120000;
+// Fallback cadence (ms) for a plugin-declared background sync tick that omits its own
+// `sync.intervalMs`. Slower than the INBOX interval on purpose — a plugin's label folders
+// (which is what these ticks refresh) change far less than INBOX. GTD declares 120000.
+const DEFAULT_PLUGIN_SYNC_INTERVAL_MS = 120000;
 
 // Default folder-structure sync cadence (LIST + folders-table upsert). Folders
 // created/renamed in other clients otherwise only appear when a connection is
@@ -277,48 +391,126 @@ function extractBodyFromMsg(msg) {
 // Key invariant: we work with Buffers of raw bytes until the very last step so
 // that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
 // correctly before being interpreted as any character set.
-function decodeBody(buf, encoding, charset) {
-  const enc = (encoding || '').toLowerCase();
-  // Normalise charset — TextDecoder knows aliases like 'latin-1', but strip quotes
-  // that some mailers wrap around the value (charset="utf-8").
+function decodeQuotedPrintableToBuffer(input) {
+  const qpStr = Buffer.isBuffer(input) ? input.toString('ascii') : String(input || '');
+  const cleaned = qpStr.replace(/=\r\n/g, '').replace(/=\n/g, '');
+  const bytes = [];
+  let i = 0;
+  while (i < cleaned.length) {
+    if (cleaned[i] === '=' && i + 2 < cleaned.length) {
+      const hex = cleaned.slice(i + 1, i + 3);
+      if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+        bytes.push(parseInt(hex, 16));
+        i += 3;
+        continue;
+      }
+    }
+    bytes.push(cleaned.charCodeAt(i) & 0xFF);
+    i++;
+  }
+  return Buffer.from(bytes);
+}
+
+function decodeBytes(rawBytes, charset) {
   let cs = (charset || 'utf-8').toLowerCase().trim().replace(/^['"]|['"]$/g, '');
   if (!cs || cs === 'us-ascii' || cs === 'ascii') cs = 'utf-8'; // ASCII ⊂ UTF-8
-
-  let rawBytes;
-  if (enc === 'base64') {
-    // base64 payload is 7-bit ASCII so toString('ascii') is safe here
-    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString('ascii').replace(/\s/g, '');
-    try { rawBytes = Buffer.from(b64, 'base64'); } catch { rawBytes = buf; }
-  } else if (enc === 'quoted-printable') {
-    const qpStr = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString('ascii');
-    const cleaned = qpStr.replace(/=\r\n/g, '').replace(/=\n/g, '');
-    const bytes = [];
-    let i = 0;
-    while (i < cleaned.length) {
-      if (cleaned[i] === '=' && i + 2 < cleaned.length) {
-        const hex = cleaned.slice(i + 1, i + 3);
-        if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
-          bytes.push(parseInt(hex, 16));
-          i += 3;
-          continue;
-        }
-      }
-      bytes.push(cleaned.charCodeAt(i) & 0xFF);
-      i++;
-    }
-    rawBytes = Buffer.from(bytes);
-  } else {
-    // 7bit / 8bit / binary — the buffer already holds the raw content bytes
-    rawBytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-  }
-
-  // TextDecoder handles utf-8, iso-8859-*, windows-125*, koi8-r, big5, etc.
-  // fatal:false replaces unrecognised bytes with U+FFFD rather than throwing.
   try {
     return new TextDecoder(cs, { fatal: false }).decode(rawBytes);
   } catch {
     return rawBytes.toString('utf8'); // unknown charset — best effort
   }
+}
+
+function decodeTransferPayload(payload, encoding, charset) {
+  const enc = (encoding || '').toLowerCase();
+  if (enc === 'base64') {
+    const b64 = String(payload || '').replace(/\s/g, '');
+    try { return decodeBytes(Buffer.from(b64, 'base64'), charset); } catch { /* fall through */ }
+  }
+  if (enc === 'quoted-printable') {
+    return decodeBytes(decodeQuotedPrintableToBuffer(payload), charset);
+  }
+  return decodeBytes(Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload || ''), 'utf8'), charset);
+}
+
+function parseMimeHeaders(headerBlock) {
+  const headers = {};
+  for (const line of headerBlock.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+    const m = line.match(/^([^:]+):\s*([\s\S]*)$/);
+    if (m) headers[m[1].toLowerCase()] = m[2].trim();
+  }
+  return headers;
+}
+
+// Some broken IMAP servers/messages return a whole multipart fragment when a text
+// part is requested: the payload starts with a MIME boundary and embedded
+// Content-Type/Content-Transfer-Encoding headers. If passed to the sanitizer as
+// HTML, users see boundary lines and quoted-printable garbage (=D0=..., =3D).
+function unwrapEmbeddedMimeText(decoded, depth = 0) {
+  if (depth >= 5) return decoded;
+  const start = String(decoded || '').trimStart();
+  if (!/^--[^\r\n]+\r?\nContent-/i.test(start)) return decoded;
+
+  const firstLineEnd = start.search(/\r?\n/);
+  if (firstLineEnd < 0) return decoded;
+  const marker = start.slice(0, firstLineEnd).trim();
+  const boundary = marker.replace(/^--/, '');
+  if (!boundary) return decoded;
+
+  const escapedBoundary = boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const partRe = new RegExp(`(?:^|\\r?\\n)--${escapedBoundary}(?:--)?\\r?\\n?`, 'g');
+  const candidates = [];
+
+  for (const part of start.split(partRe)) {
+    const trimmed = part.replace(/^\r?\n/, '');
+    const sep = trimmed.search(/\r?\n\r?\n/);
+    if (sep < 0) continue;
+    const headerBlock = trimmed.slice(0, sep);
+    const payload = trimmed.slice(sep + (trimmed.slice(sep).startsWith('\r\n\r\n') ? 4 : 2));
+    const headers = parseMimeHeaders(headerBlock);
+    const ct = headers['content-type']?.match(/^([^;]+)([\s\S]*)$/);
+    if (!ct) continue;
+    const type = ct[1].toLowerCase().trim();
+    if (type !== 'text/html' && type !== 'text/plain') continue;
+    const charset = ct[2].match(/charset=(?:"([^"]+)"|([^;\s]+))/i)?.[1]
+      || ct[2].match(/charset=(?:"([^"]+)"|([^;\s]+))/i)?.[2]
+      || 'utf-8';
+    candidates.push({
+      type,
+      text: decodeTransferPayload(payload, headers['content-transfer-encoding'] || '', charset),
+    });
+  }
+  const best = candidates.find(p => p.type === 'text/html') || candidates.find(p => p.type === 'text/plain');
+  return best ? unwrapEmbeddedMimeText(best.text, depth + 1) : decoded;
+}
+
+// Decode a MIME body part from its raw Buffer.
+//
+// encoding: transfer encoding (quoted-printable, base64, 7bit, 8bit, binary)
+// charset:  character set from Content-Type (utf-8, windows-1252, iso-8859-1, …)
+//
+// Key invariant: we work with Buffers of raw bytes until the very last step so
+// that multi-byte sequences (e.g. =E2=80=94 → em-dash in UTF-8) are reassembled
+// correctly before being interpreted as any character set.
+function decodeBody(buf, encoding, charset) {
+  const enc = (encoding || '').toLowerCase();
+  let rawBytes;
+  if (enc === 'base64') {
+    const b64 = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).toString('ascii').replace(/\s/g, '');
+    try { rawBytes = Buffer.from(b64, 'base64'); } catch { rawBytes = buf; }
+  } else if (enc === 'quoted-printable') {
+    rawBytes = decodeQuotedPrintableToBuffer(buf);
+  } else {
+    rawBytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  }
+
+  return unwrapEmbeddedMimeText(decodeBytes(rawBytes, charset));
+}
+
+function looksLikeTextPayload(buf) {
+  if (!buf || buf.length === 0) return false;
+  const sample = Buffer.isBuffer(buf) ? buf.subarray(0, 512).toString('ascii') : String(buf).slice(0, 512);
+  return /(?:<html|<!doctype|<style|Content-Type:|Content-Transfer-Encoding:|=D0|=D1|=3D|&lt;html|&lt;style)/i.test(sample);
 }
 
 function decodeAttachmentBuffer(buf, encoding) {
@@ -349,7 +541,7 @@ function decodeAttachmentBuffer(buf, encoding) {
   return Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
 }
 
-function walkStructure(node, results) {
+export function walkStructure(node, results) {
   if (!node) return;
   const type = (node.type || '').toLowerCase();
   if (node.childNodes && node.childNodes.length > 0) {
@@ -359,7 +551,22 @@ function walkStructure(node, results) {
   const disposition = (node.disposition || '').toLowerCase();
   const rawFilename = node.dispositionParameters?.filename || node.parameters?.name || null;
   const filename = rawFilename ? rawFilename.replace(BIDI_OVERRIDE_RE, '').trim() || 'attachment' : null;
-  if (type === 'text/html') {
+  // A part explicitly marked Content-Disposition: attachment is an attachment
+  // no matter its MIME type. Checking the text/* types first used to absorb
+  // attached .html/.txt files into the message body: the paperclip showed
+  // (detectAttachments keys on disposition) but the file never appeared in
+  // the attachment list — and an attached HTML file could even replace the
+  // real message body.
+  if (disposition === 'attachment') {
+    results.attachments.push({
+      part: node.part || '1',
+      filename: filename || 'attachment',
+      type: node.type || 'application/octet-stream',
+      encoding: node.encoding || 'base64',
+      size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
+      disposition,
+    });
+  } else if (type === 'text/html') {
     results.textParts.push({
       part: node.part || '1', type,
       encoding: node.encoding || '',
@@ -387,10 +594,11 @@ function walkStructure(node, results) {
       // Content-ID header value is wrapped in angle brackets — strip them
       cid: (node.id || '').replace(/^<|>$/g, ''),
     });
-  } else if (disposition === 'attachment' || filename) {
+  } else if (filename) {
+    // Named non-text part without an explicit disposition — still an attachment.
     results.attachments.push({
       part: node.part || '1',
-      filename: filename || 'attachment',
+      filename,
       type: node.type || 'application/octet-stream',
       encoding: node.encoding || 'base64',
       size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
@@ -481,11 +689,14 @@ const PROVIDERS = {
     skipFolderNames: [],
   },
   purelymail: {
-    // PurelyMail (Dovecot-based) is connection-sensitive and shows three failure modes on
-    // large, mostly-uncached mailboxes: (1) long-lived IDLE sessions go "deaf"/half-open,
-    // (2) IDLE EXISTS can simply not arrive, so new mail is only discovered by polling, and
-    // (3) heavy background BODY[] work saturates the small body-fetch pool, timing out live
-    // opens. So it gets a deliberately conservative, poll-first profile:
+    // PurelyMail (Dovecot-based) is connection-sensitive, but it runs IMAP IDLE reliably —
+    // the same way Apple Mail and Thunderbird do on these accounts — provided the IDLE
+    // connection is kept alive. The earlier "IDLE goes deaf / EXISTS never arrives" symptoms
+    // were a too-infrequent re-IDLE (25 min) letting the socket half-open, not a server limit;
+    // the previous workaround (usesIdle:false + a fresh login every 10s) is what saturated the
+    // per-IP connection limit and produced the socket-timeout churn. So: one long-lived IDLE
+    // connection for instant push, re-issued on a short idleKeepaliveMs so it never goes deaf,
+    // plus a light periodic backstop poll on that same connection.
     //   snippetIndex:false      — disables BOTH the background snippet indexer AND the
     //                             on-view folder body prefetch (both gate on this flag), the
     //                             bulk of the BODY[] load on a 50k-message uncached mailbox.
@@ -495,19 +706,20 @@ const PROVIDERS = {
     //   preferFreshBodyFetch    — user/new-mail body fetches use a brand-new login instead of
     //                             the shared pool, so they neither contend with flag writes on
     //                             the size-2 pool nor inherit a frozen pooled session view.
-    //   usesIdle:false          — new mail IDLE is unreliable on the observed account; fresh
-    //                             poll sync is the source of truth for notifications.
+    //   usesIdle + idleKeepaliveMs — one IDLE connection pushes new mail; re-issued every 4 min
+    //                             so the socket stays alive. maxSyncIntervalMs is now a backstop.
     batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
     connectStaggerMs: 1200, // connection-sensitive — space initial connects wide (#218)
     fetchBody: false,
-    usesIdle: false,
-    pushesFlags: false,
+    usesIdle: true,
+    idleKeepaliveMs: 4 * 60 * 1000, // re-issue IDLE every 4 min (Apple Mail-style) so the connection never goes deaf
+    pushesFlags: false,             // IDLE 'flags' handles most changes; keep the periodic flag poll as a backstop
     snippetIndex: false,
     speculativeFetch: false,
     preferFreshBodyFetch: true,
-    freshInboxSync: true,
+    freshInboxSync: false,          // IDLE push + backstop poll on the persistent connection replaces fresh-login-per-tick
     autoBackfillExistingOnConnect: false,
-    maxSyncIntervalMs: 10000,
+    maxSyncIntervalMs: 120000,      // IDLE pushes new mail instantly; the periodic tick is now a light ~2-min backstop
     flagPollEveryTicks: 6,
     prefetchNewBodies: true,
     prefetchNewBodiesLimit: 1, // warm only the newest arrival; avoids BODY[] bursts while
@@ -527,25 +739,28 @@ const PROVIDERS = {
   },
 };
 
-// Builds the GTD portion of the move-detector relocate guard, shared by the
-// sync and backfill relocate UPDATEs so their exemption logic stays identical.
-// A GTD-labeled message intentionally lives in multiple folders as sibling rows;
-// relocating in place would collapse them and ping-pong the message. So a row is
-// exempt from relocation when either the folder being synced ($1, the relocate
-// target) or the row's current folder is GTD-designated — both fall through to a
-// sibling INSERT instead.
+// Builds the move-detector relocate guard from a set of relocate-exempt "label" folders,
+// shared by the sync and backfill relocate UPDATEs so their exemption logic stays identical.
+// A labeled message intentionally lives in multiple folders as sibling rows; relocating in
+// place would collapse them and ping-pong the message. So a row is exempt from relocation
+// when either the folder being synced ($1, the relocate target) or the row's current folder
+// is an exempt label folder — both fall through to a sibling INSERT instead.
 //
-// gtdFolders: array of designated folder paths (empty when GTD is disabled).
+// The exempt folder set is generic: any plugin can contribute folders via the
+// `relocateExemptFolders` collect-hook (see collectRelocateExemptFolders). GTD is the
+// first contributor (its designated state folders). Nothing here knows about GTD.
+//
+// exemptFolders: array of exempt folder paths (empty when no plugin contributes any).
 // paramIndex: the next positional bind index ($N) available in the caller's query.
-// Returns { clause, params }. With no GTD folders the clause is '' and params is
-// [], so a GTD-disabled account runs byte-identical SQL to before this feature.
-export function gtdRelocateGuard(gtdFolders, paramIndex) {
-  if (!gtdFolders || gtdFolders.length === 0) return { clause: '', params: [] };
+// Returns { clause, params }. With no exempt folders the clause is '' and params is
+// [], so an account with no label plugins runs byte-identical SQL to before this feature.
+export function relocateExemptGuard(exemptFolders, paramIndex) {
+  if (!exemptFolders || exemptFolders.length === 0) return { clause: '', params: [] };
   const p = `$${paramIndex}`;
   const clause =
     `\n                  AND $1 <> ALL(${p}::text[])` +
     `\n                  AND folder <> ALL(${p}::text[])`;
-  return { clause, params: [gtdFolders] };
+  return { clause, params: [exemptFolders] };
 }
 
 // DB half of copyMessage: insert the destination sibling row for a message that was
@@ -555,7 +770,7 @@ export function gtdRelocateGuard(gtdFolders, paramIndex) {
 // makes it idempotent against the destination folder's next sync, which would insert
 // the same row. Destination counts are bumped only when a row is actually created
 // (RETURNING is empty if a sync beat us to it), and unread only when the copy is
-// unread. Extracted (like gtdRelocateGuard) so the DB behavior is unit-testable
+// unread. Extracted (like relocateExemptGuard) so the DB behavior is unit-testable
 // without a live IMAP pool.
 export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid) {
   const res = await query(`
@@ -567,7 +782,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       thread_references, thread_id, is_bulk,
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
-      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at
+      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -577,7 +792,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       thread_references, thread_id, is_bulk,
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
-      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at
+      category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -606,138 +821,23 @@ export async function deleteMessageCopyRow(accountId, uid, folder) {
   return row ? 1 : 0;
 }
 
-// On a non-UIDPLUS COPY the destination sibling row is deferred to syncFolderOnDemand, so
-// the early gtd_sections_updated emit can leave GTD section data stale until that sync lands (up
-// to a GTD tick away). Re-emit once the deferred sync resolves so the data converges
-// immediately; on sync failure keep the existing warn and skip the re-emit (the next GTD
-// tick still reconciles). srcUid/fromFolder identify the copied message so the transition
-// engine can be re-run over its thread now that the sibling exists: a transition run that
-// raced ahead of the deferred insert saw stale thread state, so re-running here applies any
-// needed strip immediately instead of at the next tick. Gated on gtd_enabled; transition
-// failures are debug-level (the tick still reconciles). Extracted (like insertCopiedSibling)
-// so the emit/transition sequencing is unit-testable without a live IMAP pool.
-export function emitAfterDeferredCopySync(mgr, account, toFolder, srcUid, fromFolder) {
-  return mgr.syncFolderOnDemand(account, toFolder)
-    .then(async () => {
-      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
-      if (!account.gtd_enabled) return;
-      try {
-        const { rows } = await query(
-          'SELECT thread_key FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3 LIMIT 1',
-          [account.id, srcUid, fromFolder]
-        );
-        const threadKey = rows[0]?.thread_key;
-        if (threadKey) await runGtdTransitions(mgr, account, [threadKey]);
-      } catch (err) {
-        logger.debug(`post-copy transition re-run failed for ${toFolder}: ${err.message}`);
-      }
-    })
-    .catch(err => console.warn(`post-copy destination sync failed for ${toFolder}:`, err.message));
-}
-
-// Broadcast a GTD sections refresh after a batch changed the messages table outside a GTD tick, so
-// the tick's fingerprint can't detect the change on its own. Two triggers:
-//   • an ORDINARY sync that DELETED rows the server no longer has (reconcile orphan-removal,
-//     UIDVALIDITY purge) — dropping a GTD thread's INBOX/label copy; and
-//   • a BACKFILL that INSERTED historical rows into a GTD folder (account remap/toggle
-//     reconnect, POST /reindex) — the tick's before==after fingerprint misses rows backfill
-//     already wrote.
-// Either way clients would otherwise show stale GTD section data until the next GTD tick or a user
-// action (the frontend click self-heal only masks the worst symptom). Gated cheaply: skip when
-// nothing changed, and skip when GTD is off for the account (getGtdConfig is cached, so a
-// disabled account adds no query on the hot path — and, per that cache's 5-min TTL, an account
-// whose GTD was just toggled converges within a tick). No per-row relevance check: the client
-// debounces refreshes at 400ms, so a harmless over-emit is preferred to a missed one, and a
-// missed emit leaves durable stale GTD section data. mgr is injected (like emitAfterDeferredCopySync) so this
-// stays unit-testable without a live socket server; emit failures never disturb the caller.
-export async function emitGtdSectionsRefreshIfEnabled(mgr, account, changedCount) {
+// Notify label-feed plugins that an ordinary mail mutation changed the messages table outside
+// their own periodic tick, so a tick's change-fingerprint can't detect it. Fires the generic
+// `sectionsChanged` hook; each active plugin decides whether the change is relevant to its
+// labels and broadcasts its own scoped refresh event (GTD broadcasts gtd_sections_updated when
+// GTD is enabled — see plugins/gtd/hooks.js). Two kinds of trigger drive it:
+//   • an ORDINARY sync/reconcile that DELETED rows the server no longer has (orphan-removal,
+//     UIDVALIDITY purge) — dropping a labeled thread's INBOX/label copy; and
+//   • a BACKFILL that INSERTED historical rows into a label folder (account remap/toggle
+//     reconnect, POST /reindex) — a tick's before==after fingerprint misses rows already written.
+// Gated cheaply: when nothing changed we don't even dispatch the hook, so a non-label account
+// adds no work on the hot path. No per-row relevance check here: the client debounces refreshes,
+// so a harmless over-emit is preferred to a missed one that leaves durable stale section data.
+// mgr is injected so plugin handlers stay unit-testable without a live socket server; the hook
+// swallows per-plugin errors so an emit failure never disturbs the caller.
+export async function emitSectionsChanged(mgr, account, changedCount) {
   if (!(changedCount > 0)) return;
-  try {
-    const { enabled } = await getGtdConfig(account.id);
-    if (enabled) mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
-  } catch (err) {
-    logger.debug(`GTD sections refresh emit skipped for ${logAccount(account)}: ${err.message}`);
-  }
-}
-
-// Alias so each call site's name documents which trigger fired the emit: insert-triggered
-// (backfill) call sites import emitGtdSectionsRefreshIfEnabled, delete-triggered (reconcile
-// orphan-removal / UIDVALIDITY purge) call sites import this name — the gate logic itself
-// is identical either way.
-export const emitGtdSectionsRefreshOnDelete = emitGtdSectionsRefreshIfEnabled;
-
-// One GTD tick's body: sync each designated label folder for a connected gtd_enabled
-// account, then broadcast a single gtd_sections_updated if any folder actually changed.
-// Folders are synced one at a time (not in parallel) so a multi-folder account doesn't
-// grab a handful of pooled connections at once, and the on-demand sync lock is respected
-// so a user-triggered folder open and this tick never double-sync the same folder.
-// Extracted out of the class (like emitAfterDeferredCopySync) so this sequencing is
-// unit-testable with a mock manager, without a live socket server or IMAP pool; mgr is
-// injected for the same reason. The whole body is wrapped in one try/catch (mirrors
-// _syncTick) so a config-fetch DB blip is logged with account context here instead of
-// only surfacing via the process-wide unhandledRejection handler.
-export async function runGtdSyncTick(mgr, account) {
-  try {
-    // Live persistent connection is our signal the account is healthy; syncMessages here
-    // runs on a pooled connection, so it never disturbs the IDLE sync client.
-    if (!mgr.connections.has(account.id)) return;
-    const config = await getGtdConfig(account.id);
-    const folders = gtdTickFolders(config); // [] when GTD was turned off — inert
-    if (folders.length === 0) return;
-
-    const changedFolders = [];
-    for (const folder of folders) {
-      const key = `${account.id}:${folder}`;
-      if (mgr.onDemandSyncing.has(key)) continue; // a user-triggered sync owns this folder
-      mgr.onDemandSyncing.add(key);
-      try {
-        const before = await mgr._gtdFolderFingerprint(account.id, folder);
-        await mgr._gtdSyncFolder(account, folder);
-        const after = await mgr._gtdFolderFingerprint(account.id, folder);
-        if (before !== after) changedFolders.push(folder);
-      } catch (err) {
-        console.warn(`GTD sync error ${logAccount(account)}/${folder}:`, err.message);
-      } finally {
-        mgr.onDemandSyncing.delete(key);
-      }
-    }
-
-    if (changedFolders.length > 0) {
-      // A label folder's membership changed (a state added/removed elsewhere — another
-      // client or an external automation). Re-run transitions for the threads those folders
-      // now touch so a newly-labeled thread whose newest message already satisfies a strip
-      // rule converges without waiting for new INBOX mail. Idempotent: re-evaluating a
-      // thread the tick just stripped finds nothing left and is a no-op. Runs before the
-      // emit so the GTD sections refetch reflects the post-strip state.
-      try {
-        const threadKeys = await threadKeysInFolders(account.id, changedFolders);
-        await runGtdTransitions(mgr, account, threadKeys);
-      } catch (err) {
-        console.warn(`GTD transitions error ${logAccount(account)}:`, err.message);
-      }
-      mgr.broadcast({ type: 'gtd_sections_updated', accountId: account.id }, account.user_id);
-    }
-  } catch (err) {
-    console.warn(`GTD tick error ${logAccount(account)}:`, err.message);
-  }
-}
-
-// Choose the INBOX message ids to run GTD transitions over after a sync batch completes.
-//   newInboxIds — the id of every row this sync newly inserted into INBOX, collected REGARDLESS
-//     of read state. An inbound reply that arrived already \Seen (read on another device before
-//     this sync landed) must still clear its thread's Watch/Delegated label, yet such a row never
-//     enters the unread-gated `newMessages` notification list — so that list cannot be reused as
-//     the GTD candidate set. Read state is deliberately not consulted here.
-//   deletedIds — ids the block-list / inbox rules genuinely DELETED (expunged / dropped) from
-//     INBOX; those threads lost this arrival entirely, so they are excluded. A rule-MOVED reply
-//     is NOT in this set — its row still lives (in another folder) and its thread must still be
-//     re-evaluated, so it stays a candidate. Rules only ever run on the unread subset, so a read
-//     row is never among these ids.
-// Extracted (like insertCopiedSibling) so the candidate selection is unit-testable without
-// standing up the full syncMessages fetch loop.
-export function selectGtdReevalIds(newInboxIds, deletedIds) {
-  const removed = deletedIds instanceof Set ? deletedIds : new Set(deletedIds || []);
-  return newInboxIds.filter((id) => !removed.has(id));
+  await pluginRegistry.runHook('sectionsChanged', { mgr, account, changedCount });
 }
 
 export function providerProfile(account) {
@@ -811,14 +911,24 @@ function relocateMessageParams(folder, parsed, accountId, msgId) {
   ];
 }
 
-// GTD-aware relocate: GTD label folders are exempt from relocation because a labeled message
-// intentionally lives as sibling rows in several folders, and relocating in place would
+// Label-aware relocate: exempt label folders are excluded from relocation because a labeled
+// message intentionally lives as sibling rows in several folders, and relocating in place would
 // collapse them and ping-pong the message. Appends the sibling-exemption guard (empty, so
-// behavior is unchanged when GTD is off) plus RETURNING, so the sync and backfill relocate
-// call sites share one implementation and both inherit the exemption. See gtdRelocateGuard.
-// gtdFolders is [] when GTD is disabled for the account.
-function relocateMessageQuery(folder, parsed, accountId, msgId, gtdFolders) {
-  const guard = gtdRelocateGuard(gtdFolders, 12);
+// behavior is unchanged when no plugin contributes folders) plus RETURNING, so the sync and
+// backfill relocate call sites share one implementation and both inherit the exemption. See
+// relocateExemptGuard. exemptFolders is [] when no label plugin is active for the account.
+// Union of every active plugin's relocate-exempt label folders for this account, via the
+// generic `relocateExemptFolders` collect-hook. Empty when no label plugin is active (so a
+// non-GTD account keeps byte-identical relocate SQL). Errors in a plugin contribute nothing
+// (collectHook swallows), so a misbehaving plugin can never disturb the sync relocate path.
+// Module-level (not a method) so it depends only on the registry, never on manager state.
+export async function collectRelocateExemptFolders(account) {
+  const sets = await pluginRegistry.collectHook('relocateExemptFolders', { account, accountId: account.id });
+  return [...new Set(sets.flat().filter(Boolean))];
+}
+
+function relocateMessageQuery(folder, parsed, accountId, msgId, exemptFolders) {
+  const guard = relocateExemptGuard(exemptFolders, 12);
   return {
     sql: `${RELOCATE_MESSAGE_SQL}${guard.clause}\n  RETURNING id`,
     params: [...relocateMessageParams(folder, parsed, accountId, msgId), ...guard.params],
@@ -927,20 +1037,25 @@ async function ensureFreshToken(account) {
   return account;
 }
 
-// resolved: { host, servername } from resolveForConnection() — pins the IP so the
-// actual TCP connection uses the address we validated, not a later DNS lookup.
+// resolved comes from resolveForConnection(), which limits sockets to the validated
+// address set so DNS rebinding cannot change the target between validation and connect.
 // policy: result of getConnectionPolicy() — gates TLS verification override.
-export function makeClientCfg(account, resolved, { enableIdle = false, policy = {} } = {}) {
+export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
   if (!policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
   }
   const skipTls = policy.allowInsecureTls && !!account.imap_skip_tls_verify;
   const tlsOpts = { rejectUnauthorized: !skipTls };
-  // Set servername so TLS SNI and cert verification use the original hostname even
-  // though the socket connects directly to the pinned IP address.
+  // Keep the original hostname for TLS authentication while Node connects only to the
+  // prevalidated addresses and moves to the next candidate when one is unreachable.
   if (resolved.servername) tlsOpts.servername = resolved.servername;
+  if (resolved.lookup && resolved.servername) {
+    tlsOpts.lookup = resolved.lookup;
+    tlsOpts.autoSelectFamily = true;
+    tlsOpts.autoSelectFamilyAttemptTimeout = 1000;
+  }
   const cfg = {
-    host: resolved.host,
+    host: resolved.lookup && resolved.servername ? resolved.servername : resolved.host,
     port: account.imap_port,
     secure: account.imap_tls,
     auth: { user: account.auth_user, pass: decrypt(account.auth_pass) },
@@ -955,7 +1070,9 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
   // avoid interfering with body-fetch pipelines.
-  if (enableIdle) cfg.maxIdleTime = 25 * 60 * 1000;
+  // Connection-sensitive providers (e.g. PurelyMail) need IDLE re-issued more often than the
+  // 25-min default or the socket goes half-open ("deaf"); idleKeepaliveMs overrides it.
+  if (enableIdle) cfg.maxIdleTime = idleKeepaliveMs || 25 * 60 * 1000;
   // OAuth2 XOAUTH2 for Gmail and Microsoft
   if ((account.oauth_provider === 'google' || account.oauth_provider === 'microsoft')
       && account.oauth_access_token) {
@@ -996,13 +1113,9 @@ async function acquirePooledClient(account) {
   if (pool.clients.length < POOL_SIZE) {
     const freshAccount = await ensureFreshToken(account);
     const { resolved, policy } = await resolveAccountHost(freshAccount);
-    const client = new ImapFlow(makeClientCfg(freshAccount, resolved, { policy }));
-    await Promise.race([
-      client.connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('IMAP connection timeout (30s)')), 30000)
-      ),
-    ]);
+    // Connect with the shared IPv4-fallback helper (#382); it attaches the #360 handshake-error
+    // listener and recovers from a stalled IPv6 handshake by retrying IPv4-only.
+    const client = await connectImapClient(freshAccount, resolved, { policy }, 30000, 'IMAP pool connect');
     // Remove from pool immediately when the server closes the socket, then
     // wake any waiters so they can claim another idle connection if one exists.
     client.on('close', () => {
@@ -1012,9 +1125,6 @@ async function acquirePooledClient(account) {
         p.inUse.delete(client);
         drainWaiters(p);
       }
-    });
-    client.on('error', (err) => {
-      console.error(`IMAP pool error for account ${id}:`, err.message);
     });
     pool.clients.push(client);
     pool.inUse.add(client);
@@ -1029,16 +1139,7 @@ async function acquirePooledClient(account) {
       try {
         const freshAccount = await ensureFreshToken(account);
         const { resolved, policy } = await resolveAccountHost(freshAccount);
-        const tmp = new ImapFlow(makeClientCfg(freshAccount, resolved, { policy }));
-        tmp.on('error', (err) => {
-          console.error(`IMAP temp client error for account ${account.id}:`, err.message);
-        });
-        await Promise.race([
-          tmp.connect(),
-          new Promise((_, rej) =>
-            setTimeout(() => rej(new Error('IMAP connection timeout (30s)')), 30000)
-          ),
-        ]);
+        const tmp = await connectImapClient(freshAccount, resolved, { policy }, 30000, 'IMAP temp connect');
         resolve(tmp);
       } catch (err) {
         reject(err);
@@ -1103,15 +1204,8 @@ async function withFreshClient(account, fn) {
 async function withFreshLogin(account, fn) {
   const fresh = await ensureFreshToken(account);
   const { resolved, policy } = await resolveAccountHost(fresh);
-  const client = new ImapFlow(makeClientCfg(fresh, resolved, { policy }));
-  client.on('error', () => {}); // avoid unhandled 'error' on abrupt close
+  const client = await connectImapClient(fresh, resolved, { policy }, 30000, 'IMAP fresh-login connect');
   try {
-    await Promise.race([
-      client.connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('IMAP connection timeout (30s)')), 30000)
-      ),
-    ]);
     return await fn(client);
   } finally {
     // close() (not logout()): destroys the socket and aborts a still-pending connect()
@@ -1198,12 +1292,15 @@ export class ImapManager {
     this.wss = wss;
     this.connections = new Map();   // accountId -> ImapFlow (persistent sync connection)
     this.syncIntervals = new Map();
-    this.gtdSyncIntervals = new Map(); // accountId -> timer for the periodic GTD label-folder tick
+    this.pluginSyncIntervals = new Map(); // `${accountId}::${pluginId}` -> timer for a plugin's periodic sync tick
     this.backfillRunning = new Set(); // `${accountId}:${folder}` — prevent duplicate folder backfills
     this.backfillAllRunning = new Set(); // accountId — prevent concurrent full backfill sequences
-    this._backfillSem = createKeyedSemaphore(BACKFILL_MAX_PER_HOST); // cap concurrent backfills per provider host
+    this._bgConnSem = createKeyedSemaphore(BACKGROUND_CONN_MAX_PER_HOST); // cap concurrent background IMAP conns (backfill + snippet indexer) per provider host
     this._connectCooldown = new Map(); // accountId -> { until: ms, failures: number } after connection refusals
     this.onDemandSyncing = new Set(); // `${accountId}:${folder}` — prevent duplicate on-demand syncs
+    // Bounded engine facade handed to plugin hooks instead of `this` — plugins get only the reviewed
+    // sync/label primitives (see mailEngineFacade), never the raw engine, its connections, or locks.
+    this.pluginFacade = createPluginMailFacade(this);
     this.syncingAccounts = new Set(); // prevent overlapping interval syncs
     this.syncStartedAt = new Map();   // accountId -> ms when the current sync tick began (hung-sync detection)
     this.syncThrottleSkips = new Map(); // accountId -> remaining ticks to skip when throttled
@@ -1211,8 +1308,9 @@ export class ImapManager {
     this.userSyncIntervalMs = new Map(); // userId -> interval ms (user-configurable)
     this.userFolderSyncIntervalMs = new Map(); // userId -> folder-structure sync ms (0 = never)
     this.lastFolderSyncAt = new Map(); // accountId -> last folder-structure sync timestamp
+    this._pollOnlyAccounts = new Set(); // accountId — demoted to poll-only (no persistent IDLE) by the per-host connection budget (#379)
     this.snippetIndexerRunning = new Set(); // accountId — prevent duplicate snippet-index runs
-    this.snippetBackoff = new Map();        // accountId -> { failures, until } circuit breaker
+    this.snippetBackoff = new Map();        // imap_host -> { failures, until } circuit breaker (host-level: a per-host connection limit hits every account on that host, so back them all off together)
     this.lastUserActivity = new Map();      // accountId -> ms timestamp of last live body fetch
     this.syncTickCount = new Map(); // accountId -> successful sync ticks (for reconcile scheduling)
     this.lastSyncOkAt = new Map(); // accountId -> ms timestamp of last successful sync tick (staleness detection)
@@ -1239,7 +1337,12 @@ export class ImapManager {
           "SELECT id, email_address FROM email_accounts WHERE enabled = true AND protocol = 'imap'"
         );
         for (const row of result.rows) {
-          if (!this.connections.has(row.id) && !this.connectingAccounts.has(row.id)) {
+          // A poll-only account (per-host budget) holds no persistent connection by design; while
+          // its poll timer is live it is healthy, so don't treat it as "not connected" and try to
+          // reconnect it into an always-on connection. If its timer somehow died it falls through
+          // and reconnects — which re-establishes poll-only via connectAccount.
+          const pollOnlyHealthy = this._pollOnlyAccounts.has(row.id) && this.syncIntervals.has(row.id);
+          if (!this.connections.has(row.id) && !this.connectingAccounts.has(row.id) && !pollOnlyHealthy) {
             // Respect the connection-refusal cooldown — connectAccount would bail anyway, so
             // skip early to avoid a needless credential fetch and a misleading log line.
             const cd = this._connectCooldown.get(row.id);
@@ -1277,15 +1380,18 @@ export class ImapManager {
       try {
         for (const accountId of this.connections.keys()) {
           if (this.snippetIndexerRunning.has(accountId)) continue;
-          const bo = this.snippetBackoff.get(accountId);
-          if (bo && Date.now() < bo.until) continue;
           const backlog = await query(
-            "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') LIMIT 1",
+            "SELECT 1 FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL LIMIT 1",
             [accountId]
           );
           if (!backlog.rows.length) continue;
           const acct = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
           if (!acct.rows.length) continue;
+          // Host-level circuit breaker: skip if this account's provider host is backing off
+          // (another account on it was just refused). startSnippetIndexer re-checks; this only
+          // avoids the run setup. Keyed by imap_host, so it needs the fetched account row.
+          const bo = this.snippetBackoff.get((acct.rows[0].imap_host || '').toLowerCase());
+          if (bo && Date.now() < bo.until) continue;
           this.startSnippetIndexer(acct.rows[0]).catch(err =>
             console.warn(`Scheduled snippet indexer failed for account ${accountId}:`, err.message)
           );
@@ -1674,22 +1780,34 @@ export class ImapManager {
     // intervals running whenever the connection died between reconnect attempts.
     await this.disconnectAccount(account.id);
 
+    // Per-host persistent-connection budget (#379 Phase 2). When an operator has set a finite cap
+    // for this (connection-limited) host and this account is beyond it, run poll-only instead of
+    // holding an always-on IDLE connection: no entry in this.connections, just a periodic fresh
+    // open→sync→close. Default cap is unlimited, so this whole branch is skipped and behavior is
+    // unchanged for everyone who hasn't opted in. A lookup error fails safe to the persistent path.
+    const persistentCap = this._effectivePersistentCap(account);
+    if (Number.isFinite(persistentCap)) {
+      const eligible = await this._isPersistentEligible(account, persistentCap).catch(() => true);
+      if (!eligible) {
+        try { this._startPollOnly(account); }
+        finally { this.connectingAccounts.delete(account.id); }
+        return true;
+      }
+    }
+
     // Refresh OAuth token if needed before connecting
     account = await ensureFreshToken(account);
     const { resolved, policy } = await resolveAccountHost(account);
     let client;
     try {
-      client = new ImapFlow(makeClientCfg(account, resolved, { enableIdle: providerProfile(account).usesIdle !== false, policy }));
-      // Race the connect against a 30-second timeout.
-      // client.connect() has no built-in connection timeout — on slow or unresponsive
-      // IMAP servers (e.g. purelymail.com during cold starts) it can hang indefinitely,
-      // silently blocking all further retries because connectingAccounts still holds the lock.
-      await Promise.race([
-        client.connect(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('IMAP connection timeout (30s)')), 30000)
-        ),
-      ]);
+      // Connect via the shared helper: it attaches the #360 handshake-error listener, races the
+      // connect against a 30s timeout (client.connect() has none — a slow/unresponsive server like
+      // purelymail on a cold start would otherwise hang forever, wedging retries while
+      // connectingAccounts holds the lock), and recovers from a stalled IPv6 handshake by retrying
+      // IPv4-only (#382).
+      client = await connectImapClient(account, resolved,
+        { enableIdle: providerProfile(account).usesIdle !== false, policy, idleKeepaliveMs: providerProfile(account).idleKeepaliveMs },
+        30000, 'IMAP connect');
 
       // Remove from active connections the moment the server closes the socket.
       // Without this, a cleanly-closed connection lingers in this.connections and
@@ -1700,15 +1818,18 @@ export class ImapManager {
           console.log(`IMAP connection closed for ${logAccount(account)}`);
         }
       });
-      // Prevent unhandled 'error' events from crashing the Node.js process.
-      // ImapFlow emits 'error' on socket timeouts and other transport-level failures;
-      // without this listener Node throws on unhandled EventEmitter errors.
-      client.on('error', (err) => {
-        console.error(`IMAP error for ${logAccount(account)}:`, err.message);
-      });
       this._attachIdleListeners(client, account);
       this.connections.set(account.id, client);
       await query('UPDATE email_accounts SET sync_error = NULL WHERE id = $1', [account.id]);
+
+      // Decide whether to auto-backfill BEFORE the initial sync below runs. For providers
+      // with autoBackfillExistingOnConnect:false (e.g. PurelyMail) the gate skips backfill
+      // when the account already has cached mail — but the initial INBOX sync inserts ~20
+      // recent rows, so evaluating this AFTER the sync made a genuinely fresh account
+      // (0 messages, e.g. right after delete + re-add) look non-empty and never backfill
+      // until a manual /reindex (#354). Capturing it here preserves the "don't re-backfill
+      // an established account on reconnect" intent while fixing the fresh-account case.
+      const shouldBackfill = await this._shouldAutoBackfillOnConnect(account);
 
       // Initial sync is non-fatal — throttling or temporary IMAP errors here should
       // not prevent the account from being marked connected. The 60-second interval
@@ -1747,7 +1868,7 @@ export class ImapManager {
 
       // Backfill uses its OWN connection so it doesn't block the sync connection.
       // backfillAllFolders runs INBOX first, then all other known folders sequentially.
-      if (await this._shouldAutoBackfillOnConnect(account)) {
+      if (shouldBackfill) {
         this.backfillAllFolders(account).catch(err =>
           console.error(`Backfill error for ${logAccount(account)}:`, err.message)
         );
@@ -1757,10 +1878,11 @@ export class ImapManager {
 
       const intervalMs = this.userSyncIntervalMs.get(account.user_id) || 60000;
       this._startSyncInterval(account, intervalMs);
-      // Only gtd_enabled accounts arm a GTD tick — a non-GTD account starts no extra
-      // timer at all, so the whole tick stays inert when nobody uses GTD. (Enabling GTD
-      // on a live account takes effect on its next reconnect.)
-      if (account.gtd_enabled) this._startGtdSyncInterval(account);
+      // Arm any plugin-declared background sync ticks whose isActive gate accepts this account
+      // (e.g. GTD's label-folder tick when gtd_enabled). A plugin with no active tick for this
+      // account starts no timer at all, so ticks stay inert when nobody uses the feature.
+      // (Enabling such a feature on a live account takes effect on its next reconnect.)
+      this._startPluginSyncTimers(account).catch(err => console.warn(`Plugin sync timer arm failed for ${logAccount(account)}:`, err.message));
 
       this._connectCooldown.delete(account.id); // healthy again — clear any refusal cooldown
       console.log(`Connected account: ${logAccount(account)}`);
@@ -1786,8 +1908,8 @@ export class ImapManager {
     const timer = this.syncIntervals.get(accountId);
     // clearTimeout works for both setTimeout and setInterval Timeout objects in Node.js
     if (timer) { clearTimeout(timer); this.syncIntervals.delete(accountId); }
-    const gtdTimer = this.gtdSyncIntervals.get(accountId);
-    if (gtdTimer) { clearTimeout(gtdTimer); this.gtdSyncIntervals.delete(accountId); }
+    this._pollOnlyAccounts.delete(accountId); // poll-only timer lives in syncIntervals (cleared above)
+    this._stopPluginSyncTimers(accountId);
     const client = this.connections.get(accountId);
     if (client) {
       try { await client.logout(); } catch { /* already disconnected */ }
@@ -1802,6 +1924,103 @@ export class ImapManager {
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
     if (expungeTimer) { clearTimeout(expungeTimer); this._expungeDebounceTimers.delete(accountId); }
     evictPool(accountId);
+  }
+
+  // Effective per-host persistent-connection cap for an account: the tighter of the env default and
+  // any provider-profile cap. Infinity = unlimited (default), which short-circuits the whole
+  // poll-only path in connectAccount so behavior is unchanged.
+  _effectivePersistentCap(account) {
+    return resolvePersistentCap(PERSISTENT_CAP_ENV, providerProfile(account).maxPersistentPerHost);
+  }
+
+  // Whether this account is within its host's persistent-connection budget. Queries the enabled
+  // IMAP accounts sharing the host in a STABLE order (created_at, then id) so the same accounts
+  // keep the persistent slots across restarts and reconnects rather than flip-flopping by connect
+  // order. Only called when a finite cap is configured.
+  async _isPersistentEligible(account, cap) {
+    if (!Number.isFinite(cap)) return true;
+    const host = (account.imap_host || '').toLowerCase();
+    if (!host) return true;
+    const rows = await query(
+      "SELECT id FROM email_accounts WHERE enabled = true AND protocol = 'imap' AND lower(imap_host) = $1 ORDER BY created_at ASC NULLS FIRST, id ASC",
+      [host]
+    );
+    return persistentEligible(rows.rows.map(r => r.id), account.id, cap);
+  }
+
+  // Run an account in poll-only mode: no persistent IDLE connection, just a periodic fresh
+  // open→sync→close on the sync interval. New-mail latency becomes the sync interval (like a
+  // secondary account in a desktop client), but the account stops consuming an always-on slot on a
+  // connection-limited host. The timer lives in syncIntervals so disconnectAccount tears it down.
+  _startPollOnly(account) {
+    this._pollOnlyAccounts.add(account.id);
+    console.log(`Poll-only mode for ${logAccount(account)} — ${account.imap_host} at persistent-connection budget; polling INBOX on the interval instead of holding IDLE`);
+    query('UPDATE email_accounts SET sync_error = NULL WHERE id = $1', [account.id]).catch(() => {});
+    this.broadcast({ type: 'account_connected', accountId: account.id }, account.user_id);
+    // Initial poll now, then on the interval. Stagger the first tick so many demoted accounts on one
+    // host don't all open at the same instant (mirrors _startSyncInterval's jitter).
+    this._pollOnlyTick(account).catch(err => console.warn(`Poll-only initial sync failed for ${logAccount(account)}: ${err.message}`));
+    const ms = effectiveSyncIntervalMs(account, this.userSyncIntervalMs.get(account.user_id) || 60000);
+    const jitter = Math.floor(Math.random() * Math.min(ms, 30000));
+    const t = setTimeout(() => {
+      if (!this._pollOnlyAccounts.has(account.id)) return; // disconnected/promoted during the jitter window
+      const interval = setInterval(() => {
+        this._pollOnlyTick(account).catch(err => console.warn(`Poll-only sync failed for ${logAccount(account)}: ${err.message}`));
+      }, ms);
+      this.syncIntervals.set(account.id, interval);
+    }, jitter);
+    this.syncIntervals.set(account.id, t);
+  }
+
+  // One poll-only sync cycle: a single short-lived connection (drawn from the per-host background
+  // budget so it can never exceed the cap) that refreshes folders occasionally and syncs INBOX,
+  // then logs out. Honors the refusal cooldown and arms it on a refusal, exactly like the
+  // persistent sync path. Cross-device flag changes to OLD mail are not polled here (v1); INBOX
+  // new-mail and its flags are, which is what a demoted secondary account needs.
+  async _pollOnlyTick(account) {
+    if (this.syncingAccounts.has(account.id)) return;
+    const cd = this._connectCooldown.get(account.id);
+    if (cd && Date.now() < cd.until) return;
+    this.syncingAccounts.add(account.id);
+    const host = (account.imap_host || '').toLowerCase();
+    let client = null;
+    let slotHeld = false;
+    try {
+      await this._bgConnSem.acquire(host);
+      slotHeld = true;
+      const fresh = await raceTimeout(ensureFreshToken(account), 15000, 'Poll-only token refresh');
+      const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Poll-only host resolve');
+      client = await connectImapClient(fresh, resolved, { enableIdle: false, policy }, 30000, 'Poll-only connect');
+
+      const folderMs = this.userFolderSyncIntervalMs.has(account.user_id)
+        ? this.userFolderSyncIntervalMs.get(account.user_id)
+        : DEFAULT_FOLDER_SYNC_INTERVAL_MS;
+      if (folderSyncDue(folderMs, this.lastFolderSyncAt.get(account.id))) {
+        this.lastFolderSyncAt.set(account.id, Date.now());
+        await raceTimeout(this.syncFolders(fresh, client), 20000, 'Poll-only folder sync')
+          .then(() => this.broadcast({ type: 'folders_synced', accountId: account.id }, account.user_id))
+          .catch(err => console.warn(`Poll-only folder sync failed for ${logAccount(account)}: ${err.message}`));
+      }
+
+      const syncResult = await raceTimeout(
+        this.syncMessages(fresh, client, 'INBOX', 20, false, true),
+        40000,
+        'Poll-only INBOX sync',
+      );
+      this.lastSyncOkAt.set(account.id, Date.now());
+      this._connectCooldown.delete(account.id);
+      if ((syncResult?.insertedCount || 0) > 0 && !syncResult?.broadcastedNewMessages) {
+        this.broadcast({ type: 'sync_complete', accountId: account.id }, account.user_id);
+      }
+    } catch (err) {
+      const detail = extractImapError(err);
+      if (isConnectionRefusal(detail)) this._noteConnectionRefusal(account);
+      console.warn(`Poll-only sync error for ${logAccount(account)}: ${detail}`);
+    } finally {
+      if (client) { try { await client.logout(); } catch { /* already closed */ } }
+      if (slotHeld) this._bgConnSem.release(host);
+      this.syncingAccounts.delete(account.id);
+    }
   }
 
   async disconnectUser(userId) {
@@ -1832,9 +2051,7 @@ export class ImapManager {
     try {
       const fresh = await raceTimeout(ensureFreshToken(account), 15000, 'Fresh sync token refresh');
       const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Fresh sync host resolve');
-      client = new ImapFlow(makeClientCfg(fresh, resolved, { policy }));
-      client.on('error', () => {}); // close() below intentionally aborts timed-out sockets
-      await raceTimeout(client.connect(), 30000, 'Fresh sync connect');
+      client = await connectImapClient(fresh, resolved, { policy }, 30000, 'Fresh sync connect');
       // syncMessages' own CONDSTORE modseq check is the "did anything change?" gate: it returns
       // cheaply when HIGHESTMODSEQ is unchanged, and runs the delta fetch on ANY change. We used
       // to pre-gate on a UID-watermark search here, but that only detected NEW mail — a flag
@@ -1892,30 +2109,28 @@ export class ImapManager {
         // Kept outside the race so a timeout can force-close a half-open client.
         let pendingClient = null;
         try {
-          // One overall timeout guards the ENTIRE reconnect. The DB query, token refresh
-          // and host resolution below are otherwise un-timeout-guarded; a hang in any of
-          // them would never reach the finally, leaving connectingAccounts set — which
-          // silently freezes both future sync ticks (the skip guard above) and the health
-          // check (it skips accounts mid-connect) for this account until the await
-          // eventually resolves. 40s covers a slow connect (~30s) plus the setup steps.
-          const reconnected = await Promise.race([
-            (async () => {
-              const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
-              // Bail if the account was deleted OR disabled since this reconnect was queued.
-              // The staleness check schedules a reconnect via setTimeout that disconnectAccount
-              // cannot cancel, so a user disabling a stuck account must not be silently revived.
-              if (!accountResult.rows.length || !accountResult.rows[0].enabled) return null;
-              const freshAccount = await ensureFreshToken(accountResult.rows[0]);
-              const { resolved, policy } = await resolveAccountHost(freshAccount);
-              pendingClient = new ImapFlow(makeClientCfg(freshAccount, resolved, { enableIdle: providerProfile(freshAccount).usesIdle !== false, policy }));
-              await pendingClient.connect();
-              return { client: pendingClient, account: freshAccount };
-            })(),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('Reconnect timeout (40s)')), 40000)
-            ),
-          ]);
-          if (!reconnected) return; // account deleted mid-reconnect
+          // The setup steps (DB query, token refresh, host resolution) are otherwise
+          // un-timeout-guarded; a hang in any would never reach the finally, leaving
+          // connectingAccounts set — which silently freezes future sync ticks (the skip guard
+          // above) and the health check (it skips accounts mid-connect) for this account. Bound
+          // them together, then connect via the shared helper which owns the connect timeout and
+          // the IPv4 fallback (#382) — a single all-encompassing race would otherwise cut the
+          // fallback attempt short.
+          const setup = await raceTimeout((async () => {
+            const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
+            // Bail if the account was deleted OR disabled since this reconnect was queued.
+            // The staleness check schedules a reconnect via setTimeout that disconnectAccount
+            // cannot cancel, so a user disabling a stuck account must not be silently revived.
+            if (!accountResult.rows.length || !accountResult.rows[0].enabled) return null;
+            const freshAccount = await ensureFreshToken(accountResult.rows[0]);
+            const { resolved, policy } = await resolveAccountHost(freshAccount);
+            return { freshAccount, resolved, policy };
+          })(), 20000, 'Reconnect setup');
+          if (!setup) return; // account deleted/disabled mid-reconnect
+          pendingClient = await connectImapClient(setup.freshAccount, setup.resolved,
+            { enableIdle: providerProfile(setup.freshAccount).usesIdle !== false, policy: setup.policy, idleKeepaliveMs: providerProfile(setup.freshAccount).idleKeepaliveMs },
+            30000, 'Reconnect');
+          const reconnected = { client: pendingClient, account: setup.freshAccount };
           activeClient = reconnected.client;
           syncAccount = reconnected.account;
           activeClient.on('close', () => {
@@ -1923,9 +2138,8 @@ export class ImapManager {
               this.connections.delete(account.id);
             }
           });
-          activeClient.on('error', (err) => {
-            console.error(`IMAP error for ${logAccount(syncAccount)}:`, err.message);
-          });
+          // NB: the 'error' listener is attached before connect() inside the IIFE above
+          // (#360) — activeClient is that same pendingClient, so it's already covered here.
           this._attachIdleListeners(activeClient, syncAccount);
           this.connections.set(account.id, activeClient);
           // Mirror connectAccount's success cleanup: clear the refusal backoff so the next
@@ -2146,8 +2360,8 @@ export class ImapManager {
             // counts, the Inbox pill badge, two-way GTD entry star). This reactive/poll flag path is a
             // mutation the periodic GTD tick — which syncs only the label folders, never INBOX —
             // won't otherwise surface, so refresh GTD section data like the other mutation paths. Gated:
-            // inert for non-GTD accounts (cached config). See emitGtdSectionsRefreshIfEnabled.
-            await emitGtdSectionsRefreshIfEnabled(this, account, changed);
+            // inert for non-GTD accounts (cached config). See emitSectionsChanged.
+            await emitSectionsChanged(this.pluginFacade, account, changed);
           }
         } finally {
           lock.release();
@@ -2173,26 +2387,51 @@ export class ImapManager {
     this.syncIntervals.set(account.id, t);
   }
 
-  // Arm the periodic GTD label-folder tick for a gtd_enabled account. Mirrors
-  // _startSyncInterval (jittered first fire, then a steady interval) and shares the same
-  // disconnect teardown. Only ever called for gtd_enabled accounts, so nothing schedules
-  // when GTD is off.
-  _startGtdSyncInterval(account) {
-    const jitter = Math.floor(Math.random() * Math.min(GTD_SYNC_INTERVAL_MS, 30000));
-    const t = setTimeout(() => {
-      if (!this.gtdSyncIntervals.has(account.id)) return; // disconnected during jitter window
-      runGtdSyncTick(this, account);
-      const interval = setInterval(() => runGtdSyncTick(this, account), GTD_SYNC_INTERVAL_MS);
-      this.gtdSyncIntervals.set(account.id, interval);
-    }, jitter);
-    this.gtdSyncIntervals.set(account.id, t);
+  // Arm every plugin-declared background sync tick that is active for this account. A plugin
+  // declares one via a `sync: { intervalMs?, isActive?(ctx), tick(ctx) }` descriptor on its
+  // manifest; `ctx` is { mgr: this.pluginFacade, account }. Each armed tick mirrors _startSyncInterval
+  // (jittered first fire, then a steady interval) and is keyed `${accountId}::${pluginId}` so
+  // several plugins — and several accounts — coexist and tear down independently. A plugin whose
+  // isActive rejects this account (e.g. GTD when gtd_enabled is false) arms nothing, so ticks
+  // stay fully inert when unused. tick(ctx) owns its own error handling; we still guard the
+  // dispatch so a throwing/rejecting tick can never crash the timer.
+  async _startPluginSyncTimers(account) {
+    for (const plugin of pluginRegistry.list()) {
+      const sync = plugin.sync;
+      if (!sync || typeof sync.tick !== 'function') continue;
+      // isActive may be async (GTD's per-account enable now lives in the plugin config store, not
+      // on the account row), so await it — a false gate arms nothing, keeping ticks inert when unused.
+      try { if (sync.isActive && !(await sync.isActive({ account }))) continue; } catch { continue; }
+      const key = `${account.id}::${plugin.id}`;
+      const intervalMs = sync.intervalMs || DEFAULT_PLUGIN_SYNC_INTERVAL_MS;
+      const fire = () => {
+        try { Promise.resolve(sync.tick({ mgr: this.pluginFacade, account })).catch(err => console.warn(`Plugin ${plugin.id} sync tick error for ${logAccount(account)}:`, err.message)); }
+        catch (err) { console.warn(`Plugin ${plugin.id} sync tick error for ${logAccount(account)}:`, err.message); }
+      };
+      const jitter = Math.floor(Math.random() * Math.min(intervalMs, 30000));
+      const t = setTimeout(() => {
+        if (!this.pluginSyncIntervals.has(key)) return; // disconnected during jitter window
+        fire();
+        const interval = setInterval(fire, intervalMs);
+        this.pluginSyncIntervals.set(key, interval);
+      }, jitter);
+      this.pluginSyncIntervals.set(key, t);
+    }
   }
 
-  // Cheap change fingerprint for one folder's rows. Advances when a row is inserted,
-  // removed, moved in/out, or flipped read/unread — enough to decide whether a GTD tick
-  // changed anything worth telling GTD section clients about. SUM(uid) catches same-count membership
-  // churn (one in, one out) that COUNT alone would miss.
-  async _gtdFolderFingerprint(accountId, folder) {
+  // Tear down every plugin sync timer armed for this account (all `${accountId}::*` keys).
+  _stopPluginSyncTimers(accountId) {
+    const prefix = `${accountId}::`;
+    for (const [key, timer] of this.pluginSyncIntervals) {
+      if (key.startsWith(prefix)) { clearTimeout(timer); this.pluginSyncIntervals.delete(key); }
+    }
+  }
+
+  // Cheap change fingerprint for one folder's rows — a generic sync-capability primitive plugin
+  // ticks use to decide whether a folder actually changed. Advances when a row is inserted,
+  // removed, moved in/out, or flipped read/unread. SUM(uid) catches same-count membership churn
+  // (one in, one out) that COUNT alone would miss.
+  async folderFingerprint(accountId, folder) {
     const { rows } = await query(
       `SELECT COUNT(*)::int AS n,
               COUNT(*) FILTER (WHERE NOT is_read)::int AS unread,
@@ -2206,10 +2445,10 @@ export class ImapManager {
     return `${r.n}:${r.unread}:${r.uidsum}:${r.maxuid}`;
   }
 
-  // One label folder's pooled-connection sync for a GTD tick — pulled out of the tick loop
-  // (like _gtdFolderFingerprint) so runGtdSyncTick can mock this away in tests instead of
-  // exercising a live IMAP pool. Behavior is unchanged from the tick's former inline call.
-  async _gtdSyncFolder(account, folder) {
+  // Sync one folder on a pooled connection — a generic sync-capability primitive plugin ticks
+  // use to refresh a label folder without disturbing the persistent IDLE sync client. Testable:
+  // a plugin tick can mock this away instead of exercising a live IMAP pool.
+  async syncFolderViaPool(account, folder) {
     return withFreshClient(account, (client) =>
       this.syncMessages(account, client, folder, 100, false, true));
   }
@@ -2242,12 +2481,16 @@ export class ImapManager {
     try {
       const mailboxes = await client.list();
       for (const mb of mailboxes) {
+        // \Noselect (e.g. Gmail's "[Gmail]" parent) and \NonExistent mailboxes cannot be
+        // SELECTed. Persist that so role resolvers never route to them and the folder-mapping
+        // UI can hide them — see migration 0047 and mailUtils.mappedFolderUsable.
+        const noSelect = !!(mb.flags && (mb.flags.has('\\Noselect') || mb.flags.has('\\NonExistent')));
         await query(`
-          INSERT INTO folders (account_id, path, name, delimiter, special_use)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO folders (account_id, path, name, delimiter, special_use, no_select)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (account_id, path) DO UPDATE
-          SET name = $3, special_use = $5, updated_at = NOW()
-        `, [account.id, mb.path, mb.name, mb.delimiter, mb.specialUse || null]);
+          SET name = $3, special_use = $5, no_select = $6, updated_at = NOW()
+        `, [account.id, mb.path, mb.name, mb.delimiter, mb.specialUse || null, noSelect]);
       }
       // Many IMAP servers omit INBOX from LIST responses (it is implicit per RFC 3501).
       // Without a row in folders, subfolders like INBOX/Work have no parent in the map
@@ -2328,8 +2571,8 @@ export class ImapManager {
             storedModseq = null;
             // A UIDVALIDITY purge drops every row for this folder — including any GTD thread's copy
             // here — so refresh GTD section data like the other sync-delete paths. Backfill re-populates
-            // below; the emit just avoids a stale gap. See emitGtdSectionsRefreshOnDelete.
-            await emitGtdSectionsRefreshOnDelete(this, account, purged.rowCount);
+            // below; the emit just avoids a stale gap. See emitSectionsChanged.
+            await emitSectionsChanged(this.pluginFacade, account, purged.rowCount);
             // Route through the per-host backfill cap too: a provider-side mailbox rebuild
             // can reset UIDVALIDITY across many accounts/folders at once, which would
             // otherwise flood connections on exactly the many-account-per-provider setup the
@@ -2338,13 +2581,13 @@ export class ImapManager {
             // internal acquire would self-deadlock at the limit.
             const reindexHost = (account.imap_host || '').toLowerCase();
             setImmediate(async () => {
-              await this._backfillSem.acquire(reindexHost);
+              await this._bgConnSem.acquire(reindexHost);
               try {
                 await this.backfillMessages(account, folder);
               } catch (err) {
                 console.error(`Post-UIDVALIDITY backfill error for ${logAccount(account)}/${folder}:`, err.message);
               } finally {
-                this._backfillSem.release(reindexHost);
+                this._bgConnSem.release(reindexHost);
               }
             });
           }
@@ -2390,21 +2633,27 @@ export class ImapManager {
         let insertedCount = 0;
         let broadcastedNewMessages = false;
 
-        // GTD re-evaluation candidates: the id of every row this sync newly inserts into INBOX,
-        // read or unread. Kept separate from `newMessages` (which is unread-only for
-        // notifications) because an inbound reply already \Seen on another device must still
-        // clear its thread's Watch/Delegated label. `gtdDeletedIds` collects only the ids the
-        // block-list / inbox rules genuinely DELETED (expunged / dropped) from INBOX, so they can
-        // be excluded below; a rule-MOVED reply is intentionally kept — its thread still needs
-        // re-evaluating even though the reply was filed elsewhere.
-        const gtdNewInboxIds = [];
-        const gtdDeletedIds = new Set();
+        // Inbox-ingest facts core hands to plugins after this batch (via the `inboxIngest` hook):
+        //   • newInboxIds — the id of every row this sync newly inserts into INBOX, read or unread.
+        //     Kept separate from `newMessages` (which is unread-only for notifications) because an
+        //     inbound reply already \Seen on another device must still let a plugin re-evaluate its
+        //     thread (e.g. clear a GTD Watch/Delegated label).
+        //   • ingestDeletedIds — only the ids the block-list / inbox rules genuinely DELETED
+        //     (expunged / dropped) from INBOX, so a plugin can exclude them; a rule-MOVED reply is
+        //     intentionally kept — its thread still needs re-evaluating even though it was filed
+        //     elsewhere.
+        // `wantsInboxIngest` gates all of this on there being an active inbox-ingest plugin for
+        // THIS account (GTD's handler is active only when gtd_enabled), so a mailbox with no such
+        // plugin collects nothing and issues no extra queries — identical to the pre-plugin gate.
+        const wantsInboxIngest = folder === 'INBOX' && await pluginRegistry.hasActiveAsync('inboxIngest', { account });
+        const newInboxIds = [];
+        const ingestDeletedIds = new Set();
 
-        // Designated GTD folder paths for this account (empty when GTD is off).
-        // Loaded once per sync — the config is cached — so the relocate guard
-        // keeps a GTD-labeled message's sibling rows instead of collapsing them
-        // onto whichever folder synced last. See relocateMessageQuery / gtdRelocateGuard.
-        const gtdFolderPaths = [...(await getGtdFolderSet(account.id))];
+        // Relocate-exempt label folders for this account (empty when no label plugin is
+        // active). Loaded once per sync — the plugins' folder sets are cheap/cached — so the
+        // relocate guard keeps a labeled message's sibling rows instead of collapsing them
+        // onto whichever folder synced last. See relocateMessageQuery / collectRelocateExemptFolders.
+        const exemptFolders = await collectRelocateExemptFolders(account);
 
         // Insert/update a single fetched message and track it as new if appropriate.
         // Called from both Phase 1 and Phase 2; ON CONFLICT handles deduplication so
@@ -2442,7 +2691,7 @@ export class ImapManager {
             // [Gmail]/All Mail simultaneously).
             if (msgId) {
               const { sql: relocateSql, params: relocateParams } =
-                relocateMessageQuery(folder, parsed, account.id, msgId, gtdFolderPaths);
+                relocateMessageQuery(folder, parsed, account.id, msgId, exemptFolders);
               const relocated = await query(relocateSql, relocateParams);
               if (relocated.rows.length > 0) return;
             }
@@ -2464,8 +2713,8 @@ export class ImapManager {
                 date, snippet, is_read, is_starred, has_attachments, flags,
                 body_html, body_text, attachments,
                 thread_references, thread_id, is_bulk, category,
-                list_unsubscribe, list_unsubscribe_post
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+                list_unsubscribe, list_unsubscribe_post, delivery_addresses
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
               SET subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
@@ -2507,11 +2756,21 @@ export class ImapManager {
                   body_text = COALESCE(messages.body_text, EXCLUDED.body_text),
                   attachments = COALESCE(messages.attachments::text, EXCLUDED.attachments::text)::jsonb,
                   thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
-                  thread_id = COALESCE(messages.thread_id, EXCLUDED.thread_id),
+                  -- #378: heal a row that was self-rooted (thread_id = its own Message-ID, e.g. a
+                  -- sent copy orphaned by an older upsert) by adopting the real conversation root
+                  -- the sync just computed. Genuine thread roots keep their value (EXCLUDED equals it).
+                  thread_id = CASE
+                    WHEN messages.thread_id = messages.message_id
+                         AND EXCLUDED.thread_id IS NOT NULL
+                         AND EXCLUDED.thread_id <> messages.message_id
+                    THEN EXCLUDED.thread_id
+                    ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+                  END,
                   is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                   category = COALESCE(messages.category, EXCLUDED.category),
                   list_unsubscribe = COALESCE(messages.list_unsubscribe, EXCLUDED.list_unsubscribe),
-                  list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post)
+                  list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
+                  delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses)
               RETURNING id, (xmax = 0) as is_new
             `, [
               account.id, parsed.uid, folder,
@@ -2526,14 +2785,16 @@ export class ImapManager {
               refs, threadId, parsed.isBulk ?? null, msgCategory,
               sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe'] ?? null)),
               sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
+              JSON.stringify(parsed.deliveryAddresses || []),
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
-              // GTD candidate: any newly-inserted INBOX row, read OR unread (read state is not a
-              // gate here — see selectGtdReevalIds). The unread-only push below still drives
-              // notifications. Gated on gtd_enabled so a non-GTD account builds nothing extra.
-              if (folder === 'INBOX' && account.gtd_enabled) {
-                gtdNewInboxIds.push(result.rows[0].id);
+              // Inbox-ingest candidate: any newly-inserted INBOX row, read OR unread (read state
+              // is not a gate here — the plugin decides). The unread-only push below still drives
+              // notifications. Gated on wantsInboxIngest so a mailbox with no ingest plugin builds
+              // nothing extra.
+              if (wantsInboxIngest) {
+                newInboxIds.push(result.rows[0].id);
               }
               if (!parsed.isRead) {
                 newMessages.push({ ...parsed, id: result.rows[0].id, accountId: account.id, folder });
@@ -2633,8 +2894,8 @@ export class ImapManager {
               // Externally-changed flags on a GTD-designated folder's rows now flow through this new
               // delta path (per-folder flag deltas). A read/star flip on a label-folder OR INBOX copy
               // is GTD-relevant, so refresh GTD section data like the other mutation paths rather than waiting
-              // for the next tick. Gated: inert for non-GTD accounts. See emitGtdSectionsRefreshIfEnabled.
-              await emitGtdSectionsRefreshIfEnabled(this, account, changed);
+              // for the next tick. Gated: inert for non-GTD accounts. See emitSectionsChanged.
+              await emitSectionsChanged(this.pluginFacade, account, changed);
             }
           }
         } else if (plan === 'full') {
@@ -2691,9 +2952,9 @@ export class ImapManager {
           // don't still alert the user about mail they chose to auto-silence.
           let mutedIds = new Set();
           if (folder === 'INBOX') {
-            // Snapshot the unread candidates before the block-list / rules run, so the GTD
-            // re-eval below can exclude any they move out of INBOX. Only needed when GTD is on.
-            const gtdUnreadBefore = account.gtd_enabled ? newMessages.map(m => m.id) : null;
+            // Snapshot the unread candidates before the block-list / rules run, so the ingest
+            // re-eval below can exclude any they move out of INBOX. Only needed with an ingest plugin.
+            const unreadBeforeRules = wantsInboxIngest ? newMessages.map(m => m.id) : null;
             try {
               newMessages = await applyBlockList(newMessages, account, this);
             } catch (err) {
@@ -2708,13 +2969,13 @@ export class ImapManager {
             }
             // Any unread candidate no longer in `newMessages` was moved out of / deleted from
             // INBOX by the block-list or a rule. Only genuinely-DELETED ones are excluded from
-            // the GTD re-eval: a rule that merely MOVED an inbound reply (its row still lives,
-            // in another folder) must still re-evaluate the thread so a self-reply's Watch/
-            // Delegated label clears. Distinguish the two by a single is_deleted probe over the
-            // removed ids — a moved row survives (is_deleted = false), a deleted one does not.
-            if (gtdUnreadBefore) {
+            // the ingest re-eval: a rule that merely MOVED an inbound reply (its row still lives,
+            // in another folder) must still let the plugin re-evaluate the thread so a self-reply's
+            // Watch/Delegated label clears. Distinguish the two by a single is_deleted probe over
+            // the removed ids — a moved row survives (is_deleted = false), a deleted one does not.
+            if (unreadBeforeRules) {
               const survivingIds = new Set(newMessages.map(m => m.id));
-              const removedIds = gtdUnreadBefore.filter(id => !survivingIds.has(id));
+              const removedIds = unreadBeforeRules.filter(id => !survivingIds.has(id));
               if (removedIds.length) {
                 const alive = await query(
                   'SELECT id FROM messages WHERE id = ANY($1::uuid[]) AND is_deleted = false',
@@ -2722,7 +2983,7 @@ export class ImapManager {
                 );
                 const aliveIds = new Set(alive.rows.map(r => r.id));
                 for (const id of removedIds) {
-                  if (!aliveIds.has(id)) gtdDeletedIds.add(id);
+                  if (!aliveIds.has(id)) ingestDeletedIds.add(id);
                 }
               }
             }
@@ -2800,22 +3061,18 @@ export class ImapManager {
           }
         }
 
-        // GTD transitions: re-evaluate every newly-arrived INBOX thread, independent of the
-        // unread notification path above — an inbound reply that arrived already \Seen (read
-        // on another device) never enters `newMessages`, so it must be picked up from the
-        // read-inclusive candidate set. Excludes rows the block-list / rules moved or deleted.
-        // Runs even when `newMessages` is empty (all arrivals were already read). Gated on
-        // gtd_enabled so a non-GTD account issues zero extra queries.
-        if (folder === 'INBOX' && account.gtd_enabled) {
-          const gtdIds = selectGtdReevalIds(gtdNewInboxIds, gtdDeletedIds);
-          if (gtdIds.length > 0) {
-            try {
-              const threadKeys = await threadKeysForMessageIds(account.id, gtdIds);
-              await runGtdTransitions(this, account, threadKeys);
-            } catch (err) {
-              console.error('gtdTransitions error:', err.message);
-            }
-          }
+        // Inbox-ingest: hand the newly-arrived INBOX rows to any active ingest plugin so it can
+        // re-evaluate the affected threads, independent of the unread notification path above —
+        // an inbound reply that arrived already \Seen (read on another device) never enters
+        // `newMessages`, so the plugin sees it via the read-inclusive candidate set. Runs even
+        // when `newMessages` is empty (all arrivals were already read). `ingestDeletedIds` lets
+        // the plugin drop rows the block-list / rules deleted. The hook swallows per-plugin
+        // errors, so a plugin can never break the sync batch. Only fires when there is something
+        // to hand off and an ingest plugin is active (wantsInboxIngest).
+        if (wantsInboxIngest && newInboxIds.length > 0) {
+          await pluginRegistry.runHook('inboxIngest', {
+            mgr: this.pluginFacade, account, newInboxIds, deletedIds: ingestDeletedIds,
+          });
         }
         await query('UPDATE email_accounts SET last_sync = NOW() WHERE id = $1', [account.id]);
         return { insertedCount, broadcastedNewMessages };
@@ -2847,10 +3104,11 @@ export class ImapManager {
     // don't permanently modify the shared PROVIDERS singleton for other accounts.
     const cfg = { ...providerProfile(account) };
 
-    // Designated GTD folder paths for this account (empty when GTD is off).
-    // Loaded once per backfill — the config is cached — so the relocate guard
-    // keeps GTD-labeled messages' sibling rows. See relocateMessageQuery / gtdRelocateGuard.
-    const gtdFolderPaths = [...(await getGtdFolderSet(account.id))];
+    // Relocate-exempt label folders for this account (empty when no label plugin is active).
+    // Loaded once per backfill — the plugins' folder sets are cheap/cached — so the relocate
+    // guard keeps labeled messages' sibling rows. See relocateMessageQuery /
+    // collectRelocateExemptFolders.
+    const exemptFolders = await collectRelocateExemptFolders(account);
 
     // Dedicated connection managed here — completely independent of the shared pool
     // so backfilling never blocks the user from opening emails.
@@ -2867,16 +3125,8 @@ export class ImapManager {
       if (!row || !row.enabled) throw new Error('Account deleted or disabled');
       const fresh = await ensureFreshToken(row);
       const { resolved, policy } = await resolveAccountHost(fresh);
-      const newClient = new ImapFlow(makeClientCfg(fresh, resolved, { policy }));
-      newClient.on('error', (err) => {
-        console.error(`Backfill IMAP error for ${logAccount(account)}:`, err.message);
-      });
-      await Promise.race([
-        newClient.connect(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('IMAP connection timeout (30s)')), 30000)
-        ),
-      ]); // if this throws, bfClient stays null
+      // if this throws, bfClient stays null (helper closes its own failed socket, #382 IPv4 fallback)
+      const newClient = await connectImapClient(fresh, resolved, { policy }, 30000, 'Backfill connect');
       bfClient = newClient;
       batchesOnConn = 0;
     };
@@ -2939,7 +3189,7 @@ export class ImapManager {
               console.warn(`Backfill: UIDVALIDITY changed for ${logAccount(account)}/${folder}: ${storedValidity} → ${currentValidity}. Purging stale messages.`);
               const purged = await query('DELETE FROM messages WHERE account_id = $1 AND folder = $2', [account.id, folder]);
               // Same GTD section-data staleness gap as the syncMessages purge path.
-              await emitGtdSectionsRefreshOnDelete(this, account, purged.rowCount);
+              await emitSectionsChanged(this.pluginFacade, account, purged.rowCount);
             }
             // Always keep stored validity current
             await query(
@@ -3025,7 +3275,7 @@ export class ImapManager {
       let i = 0;
       // Count rows this backfill actually wrote (inserts + relocations) so GTD section data can be
       // refreshed once at completion when the account is gtd_enabled — the tick's fingerprint
-      // can't see rows backfill already wrote (before==after). See emitGtdSectionsRefreshIfEnabled.
+      // can't see rows backfill already wrote (before==after). See emitSectionsChanged.
       let backfilledRows = 0;
 
       while (i < missingUids.length) {
@@ -3093,7 +3343,7 @@ export class ImapManager {
 
                 if (bfMsgId) {
                   const { sql: relocateSql, params: relocateParams } =
-                    relocateMessageQuery(folder, parsed, account.id, bfMsgId, gtdFolderPaths);
+                    relocateMessageQuery(folder, parsed, account.id, bfMsgId, exemptFolders);
                   const relocated = await query(relocateSql, relocateParams);
                   if (relocated.rows.length > 0) { backfilledRows += relocated.rows.length; continue; }
                 }
@@ -3115,8 +3365,8 @@ export class ImapManager {
                     date, snippet, is_read, is_starred, has_attachments, flags,
                     body_html, body_text, attachments,
                     thread_references, thread_id, is_bulk, category,
-                    list_unsubscribe, list_unsubscribe_post
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+                    list_unsubscribe, list_unsubscribe_post, delivery_addresses
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
                   SET subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
@@ -3158,11 +3408,19 @@ export class ImapManager {
                       body_text = COALESCE(messages.body_text, EXCLUDED.body_text),
                       attachments = COALESCE(messages.attachments::text, EXCLUDED.attachments::text)::jsonb,
                       thread_references = COALESCE(messages.thread_references, EXCLUDED.thread_references),
-                      thread_id = COALESCE(messages.thread_id, EXCLUDED.thread_id),
+                      -- #378: heal a self-rooted (orphaned) row by adopting the real conversation root.
+                      thread_id = CASE
+                        WHEN messages.thread_id = messages.message_id
+                             AND EXCLUDED.thread_id IS NOT NULL
+                             AND EXCLUDED.thread_id <> messages.message_id
+                        THEN EXCLUDED.thread_id
+                        ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+                      END,
                       is_bulk = COALESCE(messages.is_bulk, EXCLUDED.is_bulk),
                       category = COALESCE(messages.category, EXCLUDED.category),
                       list_unsubscribe = COALESCE(messages.list_unsubscribe, EXCLUDED.list_unsubscribe),
-                      list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post)
+                      list_unsubscribe_post = COALESCE(messages.list_unsubscribe_post, EXCLUDED.list_unsubscribe_post),
+                      delivery_addresses = COALESCE(messages.delivery_addresses, EXCLUDED.delivery_addresses)
                 `, [
                   account.id, parsed.uid, folder,
                   bfMsgId, sanitizeStr(parsed.subject),
@@ -3176,6 +3434,7 @@ export class ImapManager {
                   bfRefs, bfThreadId, parsed.isBulk ?? null, bfCategory,
                   sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe'] ?? null)),
                   sanitizeStr(decodeMimeWords(parsed.parsedHeaders?.['list-unsubscribe-post'] ?? null)),
+                  JSON.stringify(parsed.deliveryAddresses || []),
                 ]);
                 backfilledRows++;
                 if (bfThreadId && bfThreadId !== bfMsgId) {
@@ -3247,7 +3506,7 @@ export class ImapManager {
       // folder is a designated GTD folder and any row changed, nudge GTD section clients. One emit per
       // affected folder (backfillAllFolders loops here); the client debounces. Gated cheaply
       // on gtd_enabled + changedCount>0 only.
-      await emitGtdSectionsRefreshIfEnabled(this, account, backfilledRows);
+      await emitSectionsChanged(this.pluginFacade, account, backfilledRows);
     } catch (err) {
       console.error(`Backfill failed for ${logAccount(account)}/${folder}:`, err.message);
     } finally {
@@ -3330,12 +3589,7 @@ export class ImapManager {
         if (!row) return;
         const fresh = await ensureFreshToken(row);
         const { resolved, policy } = await resolveAccountHost(fresh);
-        client = new ImapFlow(makeClientCfg(fresh, resolved, { policy }));
-        client.on('error', () => {});
-        await Promise.race([
-          client.connect(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('IMAP timeout (30s)')), 30000)),
-        ]);
+        client = await connectImapClient(fresh, resolved, { policy }, 30000, 'Flag-sync connect');
 
         const uidToId = new Map(msgs.map(m => [m.uid, m.id]));
         const updates = [];
@@ -3386,11 +3640,11 @@ export class ImapManager {
     this.broadcast({ type: 'backfill_all_start', accountId: account.id }, account.user_id);
     let slotHeld = false;
     try {
-      // Cap concurrent backfills per provider host: a user with many accounts on one
-      // provider would otherwise open a backfill connection for every account at once,
-      // tripping connection limits. This only queues the background catch-up — live sync
-      // (IDLE + the periodic interval) is unaffected and keeps flowing while queued.
-      await this._backfillSem.acquire(host);
+      // Draw from the per-host background-connection budget (shared with the snippet indexer):
+      // a user with many accounts on one provider would otherwise open a background connection
+      // for every account at once, tripping connection limits. This only queues the background
+      // catch-up — live sync (IDLE + the periodic interval) is unaffected and keeps flowing.
+      await this._bgConnSem.acquire(host);
       slotHeld = true;
       const { skipFolderPatterns, skipFolderNames } = providerProfile(account);
 
@@ -3413,7 +3667,7 @@ export class ImapManager {
       }
 
     } finally {
-      if (slotHeld) this._backfillSem.release(host); // free the per-host slot for the next account
+      if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.backfillAllRunning.delete(account.id);
       this.broadcast({ type: 'backfill_all_complete', accountId: account.id }, account.user_id);
       // Both run as background jobs after the complete signal — neither should block the UI.
@@ -3442,9 +3696,11 @@ export class ImapManager {
     if (!cfg.snippetIndex) return;
 
     if (this.snippetIndexerRunning.has(account.id)) return;
-    // Honor the circuit breaker for every caller (scheduler, post-connect, post-sync)
-    // so a persistently-failing account is not retried on each reconnect either.
-    const backoff = this.snippetBackoff.get(account.id);
+    // Honor the HOST-level circuit breaker for every caller (scheduler, post-connect, post-sync):
+    // a connection-limit refusal is a property of the provider host shared by every account on
+    // it, so once one account is refused none should retry until the backoff clears.
+    const host = (account.imap_host || '').toLowerCase();
+    const backoff = this.snippetBackoff.get(host);
     if (backoff && Date.now() < backoff.until) return;
     this.snippetIndexerRunning.add(account.id);
 
@@ -3460,11 +3716,12 @@ export class ImapManager {
     // without indexing anything (the case that should trip the circuit breaker).
     let batchCount = 0;
     let failed = false;
-    let refused = false; // provider refused a connection (at its per-account limit) — back off hard
+    let refused = false; // provider refused a connection (at its per-host limit) — back off hard
+    let slotHeld = false; // holding a per-host background-connection slot
     try {
       // Check if there's anything to index before opening a connection
       const countResult = await query(
-        "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '')",
+        "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL",
         [account.id]
       );
       const totalMissing = parseInt(countResult.rows[0].count);
@@ -3472,19 +3729,20 @@ export class ImapManager {
 
       logger.debug(`Snippet indexer: ${logAccount(account)} has ${totalMissing} messages without snippets`);
 
+      // Draw from the per-host background-connection budget (shared with backfill) so every
+      // account on one provider host shares a bounded number of background connections instead
+      // of each opening its own and tripping the provider's per-IP limit. Acquired only once
+      // there is work to do; released in the finally.
+      await this._bgConnSem.acquire(host);
+      slotHeld = true;
+
       const openClient = async () => {
         if (siClient) { try { await siClient.logout(); } catch { /* already disconnected */ } siClient = null; }
         const row = (await query('SELECT * FROM email_accounts WHERE id = $1', [account.id])).rows[0];
         if (!row) throw new Error('Account deleted');
         const fresh = await ensureFreshToken(row);
         const { resolved, policy } = await resolveAccountHost(fresh);
-        const c = new ImapFlow(makeClientCfg(fresh, resolved, { policy }));
-        c.on('error', err => console.error(`Snippet indexer IMAP error ${logAccount(account)}:`, err.message));
-        await Promise.race([
-          c.connect(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 30000)),
-        ]);
-        siClient = c;
+        siClient = await connectImapClient(fresh, resolved, { policy }, 30000, 'Snippet indexer connect');
       };
 
       await openClient();
@@ -3492,7 +3750,7 @@ export class ImapManager {
       // Get distinct folders that have unindexed messages
       const foldersResult = await query(
         `SELECT folder, count(*) as cnt FROM messages
-         WHERE account_id = $1 AND (snippet IS NULL OR snippet = '')
+         WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL
          GROUP BY folder ORDER BY cnt DESC`,
         [account.id]
       );
@@ -3514,7 +3772,7 @@ export class ImapManager {
 
           if (batchCount >= MAX_BATCHES_PER_RUN) {
             const remaining = await query(
-              "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '')",
+              "SELECT count(*) FROM messages WHERE account_id = $1 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL",
               [account.id]
             );
             console.log(`Snippet indexer paused for ${logAccount(account)} after ${batchCount} batches — ${remaining.rows[0].count} remaining, will resume on next startup`);
@@ -3523,7 +3781,7 @@ export class ImapManager {
 
           const batchResult = await query(
             `SELECT uid FROM messages
-             WHERE account_id = $1 AND folder = $2 AND (snippet IS NULL OR snippet = '')
+             WHERE account_id = $1 AND folder = $2 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL
              ORDER BY date DESC LIMIT $3`,
             [account.id, folder, batchSize]
           );
@@ -3535,7 +3793,7 @@ export class ImapManager {
             try {
               for await (const msg of siClient.fetch(uids.join(','), {
                 uid: true, envelope: true, bodyStructure: true,
-                bodyParts: ['1', '1.1', '1.2'],
+                bodyParts: BODY_PREFETCH_PARTS,
               }, { uid: true })) {
                 try {
                   const parsed = await parseMessage(msg);
@@ -3552,16 +3810,27 @@ export class ImapManager {
             } finally {
               lock.release();
             }
+            // Mark every message in this batch that still has no snippet as attempted, so a
+            // fetched-but-empty (or server-missing) message is never re-selected — this is what
+            // guarantees the backlog drains by one batch per iteration instead of looping on the
+            // same un-snippetable rows forever (#379).
+            await query(
+              `UPDATE messages SET snippet_attempted_at = NOW()
+               WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])
+                 AND (snippet IS NULL OR snippet = '') AND snippet_attempted_at IS NULL`,
+              [account.id, folder, uids]
+            );
             batchCount++;
             consecutiveErrors = 0;
           } catch (err) {
             consecutiveErrors++;
             console.error(`Snippet indexer batch error ${logAccount(account)}/${folder}:`, err.message);
-            // Connection refusal = the provider is at its per-account connection limit (iCloud
-            // especially, right after a startup backfill burst). Reopening a fresh connection to
-            // retry would only pile on more pressure and can starve the live sync/IDLE connection
-            // — the exact failure that lets new mail slip through. Stop this run and back off hard
-            // instead; the 10-minute scheduler resumes the backlog once the provider is calm.
+            // Connection refusal = the provider is at its per-host/per-IP connection limit
+            // (iCloud especially, or many accounts on one server, right after a startup backfill
+            // burst). Reopening a fresh connection to retry would only pile on more pressure and
+            // can starve the live sync/IDLE connection — the exact failure that lets new mail slip
+            // through. Stop this run and back the whole host off hard instead; the 10-minute
+            // scheduler resumes the backlog once the provider is calm.
             if (isConnectionRefusal(err.message)) {
               failed = true;
               refused = true;
@@ -3591,22 +3860,23 @@ export class ImapManager {
       console.error(`Snippet indexer error ${logAccount(account)}:`, err.message);
     } finally {
       if (siClient) { try { await siClient.logout(); } catch { /* already disconnected */ } }
+      if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.snippetIndexerRunning.delete(account.id);
-      // Circuit breaker: a run that failed without indexing a single batch (e.g. iCloud
-      // refusing the extra connection at its per-account limit) backs off exponentially
-      // so the scheduler stops reopening competing IMAP connections that slow live body
-      // fetches. Any progress — or a clean/no-work finish — clears the backoff.
+      // HOST-level circuit breaker: a run that failed without indexing a single batch (e.g. the
+      // provider refusing the extra connection at its per-host limit) backs the whole host off
+      // exponentially so the scheduler stops reopening competing IMAP connections for every
+      // account on it. Any progress — or a clean/no-work finish — clears the host's backoff.
       // Back off when the run made no progress, OR when the provider refused a connection at
       // its limit even if some batches got through — in the refusal case, continuing to reopen
       // connections on the 10-minute cadence keeps competing with the live sync during exactly
       // the window when new mail must not be missed.
       if (refused || (failed && batchCount === 0)) {
-        const failures = (this.snippetBackoff.get(account.id)?.failures || 0) + 1;
+        const failures = (this.snippetBackoff.get(host)?.failures || 0) + 1;
         const delay = Math.min(SNIPPET_BACKOFF_BASE_MS * 2 ** (failures - 1), SNIPPET_BACKOFF_MAX_MS);
-        this.snippetBackoff.set(account.id, { failures, until: Date.now() + delay });
+        this.snippetBackoff.set(host, { failures, until: Date.now() + delay });
         console.log(`Snippet indexer backing off ${logAccount(account)} for ${Math.round(delay / 60000)}m (failure #${failures})`);
       } else {
-        this.snippetBackoff.delete(account.id);
+        this.snippetBackoff.delete(host);
       }
     }
   }
@@ -3638,10 +3908,18 @@ export class ImapManager {
     cc = [],
     snippet = '',
     date = new Date(),
+    inReplyTo = null,
+    references = null,
   }) {
     if (!uid || !folder) return;
     const msgId = sanitizeStr(messageId);
-    const threadId = msgId || null;
+    // Thread the Sent copy into its conversation the same way a real sync does — via the
+    // RFC 5322 References/In-Reply-To chain — instead of rooting it at its own Message-ID.
+    // Self-rooting orphaned every sent message into its own thread, showing as a duplicate
+    // "shadow" separate from the conversation (#378).
+    const threadId = msgId
+      ? await computeThreadId(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), sanitizeStr(subject))
+      : null;
     await query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
@@ -3664,7 +3942,14 @@ export class ImapManager {
         date = EXCLUDED.date,
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         is_read = true,
-        thread_id = COALESCE(messages.thread_id, EXCLUDED.thread_id)
+        -- #378: adopt the freshly computed conversation root if the stored row was self-rooted.
+        thread_id = CASE
+          WHEN messages.thread_id = messages.message_id
+               AND EXCLUDED.thread_id IS NOT NULL
+               AND EXCLUDED.thread_id <> messages.message_id
+          THEN EXCLUDED.thread_id
+          ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id)
+        END
     `, [
       account.id, uid, folder, msgId,
       sanitizeStr(subject || '(no subject)'),
@@ -3957,23 +4242,38 @@ export class ImapManager {
               }
             }
           }
+        }
 
-          // Per-part individual retry for any text/image part that came back missing or
-          // zero-length from the batched fetch.  Some IMAP servers (confirmed on
-          // purelymail.com) return a 0-byte literal for non-empty parts when one sibling
-          // part in the same FETCH command happens to be empty — the batched
-          // BODY[1] BODY[2] response is malformed, but BODY[2] alone works correctly.
-          const individualParts = [...results.textParts, ...(results.inlineImages || [])];
-          for (const part of individualParts) {
-            const existing = prefetched.get(part.part);
-            if (existing && existing.length > 0) continue; // already have content
-            try {
-              for await (const msg of client.fetch(uidStr, { uid: true, bodyParts: [part.part] }, { uid: true })) {
-                const v = msg.bodyParts?.get(part.part);
-                if (v && v.length > 0) prefetched.set(part.part, v);
-              }
-            } catch { /* don't let a single part failure block others */ }
-          }
+        // Per-part individual fetch for text parts. Some IMAP servers return a
+        // non-empty but malformed text payload for speculative/batched sibling
+        // requests while BODY[2.1] alone is correct; accepting the batched value
+        // leaks MIME boundaries and quoted-printable fragments into the UI. Do
+        // this even when speculative fetch already returned the part, so the
+        // direct text result overwrites any malformed batched value. Inline
+        // images keep the batched value because they are binary and are not
+        // parsed as HTML.
+        for (const part of results.textParts) {
+          try {
+            for await (const msg of client.fetch(uidStr, { uid: true, bodyParts: [part.part] }, { uid: true })) {
+              const v = msg.bodyParts?.get(part.part);
+              if (v && v.length > 0) prefetched.set(part.part, v);
+            }
+          } catch { /* don't let a single part failure block others */ }
+        }
+
+        // Inline images normally keep the batched value for performance. Retry
+        // only the suspicious ones: some servers return a text/html sibling for
+        // an image part in a multi-part batch, producing data:image URLs that
+        // contain escaped HTML/QP text and leak quoted-message garbage.
+        for (const part of inlineImages) {
+          const existing = prefetched.get(part.part);
+          if (!looksLikeTextPayload(existing)) continue;
+          try {
+            for await (const msg of client.fetch(uidStr, { uid: true, bodyParts: [part.part] }, { uid: true })) {
+              const v = msg.bodyParts?.get(part.part);
+              if (v && v.length > 0) prefetched.set(part.part, v);
+            }
+          } catch { /* keep the batched value if the direct retry fails */ }
         }
 
         for (const part of results.textParts) {
@@ -3990,7 +4290,7 @@ export class ImapManager {
           for (const img of inlineImages) {
             if (!img.cid) continue;
             const buf = prefetched.get(img.part);
-            if (!buf) continue;
+            if (!buf || looksLikeTextPayload(buf)) continue;
             const enc = (img.encoding || '').toLowerCase();
             const b64 = enc === 'base64'
               ? buf.toString('ascii').replace(/\s/g, '')
@@ -4313,15 +4613,18 @@ export class ImapManager {
     });
   }
 
-  // Add a GTD label = COPY the message into the label folder, keeping the source copy.
+  // Apply a label = COPY the message into the label folder, keeping the source copy.
   // Mirrors moveMessage's connection acquisition, folder lock, and error discipline,
   // but uses COPY (not MOVE) so the source row stays put and the label becomes a
   // sibling row. On UIDPLUS the copyuid is known, so the destination sibling is
   // inserted immediately (label shows without waiting for a sync). Without UIDPLUS the
   // destination UID is unknown, so we pull the folder and let the next sync ingest the
-  // copy as a sibling (the GTD relocate exemption keeps it from collapsing onto the
+  // copy as a sibling (the relocate-exemption keeps it from collapsing onto the
   // source) — the same non-UIDPLUS reliance the move path has. No _guardMoveUid is
   // needed: COPY leaves the source in place, so nothing looks like an orphan mid-flight.
+  // Post-copy notification/re-evaluation is a plugin concern: the generic `afterLabelCopy`
+  // hook lets the owning plugin (GTD) broadcast its refresh event and, on the deferred path,
+  // reconcile once the sibling lands. copyMessage itself stays label-feature-agnostic.
   async copyMessage(accountId, uid, fromFolder, toFolder) {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
@@ -4344,26 +4647,26 @@ export class ImapManager {
       throw err;
     }
 
-    // A classify action changed this account's label folders — tell GTD section clients. Emitted at
-    // the manager level so every caller of copyMessage inherits it. Safe on both paths:
-    // it carries no row and doesn't assume the sibling row exists yet (it won't on the
-    // non-UIDPLUS path, where the row is deferred to the destination sync below).
-    this.broadcast({ type: 'gtd_sections_updated', accountId }, account.user_id);
+    // Hand off to label plugins (GTD broadcasts its section-refresh and, on the deferred path,
+    // reconciles once the sibling lands — see plugins/gtd/hooks.js afterLabelCopy). Fired before
+    // the sibling INSERT to preserve the historical emit-then-insert order; `newUid` tells the
+    // plugin whether the sibling is available now (UIDPLUS) or deferred to a destination sync
+    // (null). The hook swallows per-plugin errors and the plugin's deferred work is fire-and-
+    // forget, so this never blocks or breaks the copy.
+    await pluginRegistry.runHook('afterLabelCopy', { mgr: this.pluginFacade, account, toFolder, fromFolder, srcUid: uid, newUid });
 
-    if (newUid == null) {
-      emitAfterDeferredCopySync(this, account, toFolder, uid, fromFolder);
-      return null;
-    }
+    if (newUid == null) return null;
 
     await insertCopiedSibling(accountId, uid, fromFolder, toFolder, newUid);
     return newUid;
   }
 
-  // Remove a single GTD label = delete ONE folder's copy of the message, leaving the
-  // other sibling rows intact. IMAP delete/expunge mechanics reuse permanentDeleteMessage
-  // (which locks the folder and deletes that uid); the DB delete is scoped to that one
-  // folder's row. If the IMAP delete throws, the DB row is left in place so the two
-  // never silently diverge.
+  // Remove a single label = delete ONE folder's copy of the message, leaving the other
+  // sibling rows intact. IMAP delete/expunge mechanics reuse permanentDeleteMessage (which
+  // locks the folder and deletes that uid); the DB delete is scoped to that one folder's row.
+  // If the IMAP delete throws, the DB row is left in place so the two never silently diverge.
+  // Post-remove notification is a plugin concern (generic `afterLabelRemove` hook), so this
+  // stays label-feature-agnostic.
   async removeMessageCopy(accountId, uid, folder) {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
     const account = accountResult.rows[0];
@@ -4371,8 +4674,8 @@ export class ImapManager {
 
     await this.permanentDeleteMessage(account, uid, folder);
     const result = await deleteMessageCopyRow(accountId, uid, folder);
-    // Removing a label copy changes GTD section data — same manager-level emit as copy.
-    this.broadcast({ type: 'gtd_sections_updated', accountId }, account.user_id);
+    // Removing a label copy changes label-feed data — let plugins broadcast their refresh.
+    await pluginRegistry.runHook('afterLabelRemove', { mgr: this.pluginFacade, account, folder, uid });
     return result;
   }
 
@@ -4911,7 +5214,7 @@ export class ImapManager {
       // Reconcile just removed server-deleted rows across one or more folders. If any was a GTD
       // thread's INBOX (or label) copy GTD section data is now stale — this covers threads archived or
       // deleted by an external mail client, which nothing else here would refresh. Cheap gate.
-      await emitGtdSectionsRefreshOnDelete(this, account, deletedCount);
+      await emitSectionsChanged(this.pluginFacade, account, deletedCount);
     }
   }
 
