@@ -1222,9 +1222,9 @@ export default function Sidebar() {
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: `6px 10px 6px ${indent}px`, borderRadius: 7,
                   }}>
-                    {/* Match the drag-handle + chevron footprint of sibling folder rows */}
-                    <span style={{ width: isMobile ? 12 : 28, flexShrink: 0 }} />
-                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0, display: 'flex' }}>{ICONS.folder}</span>
+                    {/* No handle/chevron spacer or folder icon here: at deep indents
+                        they'd squeeze the input to nothing, and the indent alone
+                        already places the row among its future siblings. */}
                     <input
                       ref={createInputRef}
                       value={createName}
