@@ -620,7 +620,7 @@ export default function Sidebar() {
       return;
     }
     try {
-      await api.createFolder(creatingFolder.accountId, createName.trim());
+      await api.createFolder(creatingFolder.accountId, createName.trim(), creatingFolder.parentPath);
       const updated = await api.getFolders(creatingFolder.accountId);
       setFolders(creatingFolder.accountId, updated);
       setCreatingFolder(null);
@@ -1222,6 +1222,8 @@ export default function Sidebar() {
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: `6px 10px 6px ${indent}px`, borderRadius: 7,
                   }}>
+                    {/* Match the drag-handle + chevron footprint of sibling folder rows */}
+                    <span style={{ width: isMobile ? 12 : 28, flexShrink: 0 }} />
                     <span style={{ color: 'var(--text-tertiary)', flexShrink: 0, display: 'flex' }}>{ICONS.folder}</span>
                     <input
                       ref={createInputRef}
