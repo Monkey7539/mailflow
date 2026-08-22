@@ -2357,6 +2357,9 @@ export default function MessageList() {
       updateMessage(message.id, { is_read: true, unread_count: 0 });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
+      // Also decrement the sidebar folder badge, so INBOX (etc.) updates immediately on open
+      // rather than lagging until the next folder-count refresh.
+      useStore.getState().adjustFolderUnread(message.account_id, message.folder, -1);
       setPending(message.id, message.account_id);
       api.bulkRead([message.id], true)
         .catch(() => api.bulkRead([message.id], true))
@@ -2370,6 +2373,7 @@ export default function MessageList() {
           updateMessage(message.id, { is_read: false, unread_count: prevUnread });
           incrementUnread(message.account_id);
           adjustCategoryCount(message.category, 1);
+          useStore.getState().adjustFolderUnread(message.account_id, message.folder, +1);
           pendingMarkReadMap.delete(message.id);
         });
     };
