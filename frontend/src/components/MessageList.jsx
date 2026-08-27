@@ -122,7 +122,7 @@ export default function MessageList() {
     folders, favoriteFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
-    searchAllFolders,
+    searchAllFolders, setSearchAllFolders,
     activeGtdTab, setActiveGtdTab, gtdSections, enabledPlugins,
     openMessageWindow,
   } = useStore();
@@ -292,6 +292,9 @@ export default function MessageList() {
   // Bumped to force the search effect to re-run (e.g. after rules move messages) so an
   // active search snapshot drops messages that no longer match. See #223.
   const [searchReloadToken, setSearchReloadToken] = useState(0);
+  // Server/network failure of the active search (e.g. rate-limit 429). Shown in
+  // the empty state instead of a misleading "no results".
+  const [searchError, setSearchError] = useState(null);
 
   // Ref that always holds the latest values needed by shortcut handlers.
   // Updated synchronously on every render so handlers are never stale.
@@ -519,11 +522,13 @@ export default function MessageList() {
       setIsSearching(false);
       setSearchResults([]);
       setSearchHasMore(false);
+      setSearchError(null);
       searchFetchedOffsetRef.current = 0;
       return;
     }
     setIsSearching(true);
     setSearchHasMore(false);
+    setSearchError(null);
     const seq = ++searchSeq.current;
     searchTimer.current = setTimeout(async () => {
       try {
@@ -533,7 +538,15 @@ export default function MessageList() {
         setSearchResults(applyReadGuard(data.messages));
         setSearchHasMore(data.messages.length === searchPageSize);
       } catch (err) {
-        if (searchSeq.current === seq) console.error('Search failed:', err);
+        if (searchSeq.current === seq) {
+          console.error('Search failed:', err);
+          // Clear instead of leaving a previous query's results standing under
+          // the new query text, and surface the failure (a swallowed rate-limit
+          // 429 otherwise reads as "no results").
+          setSearchResults([]);
+          searchFetchedOffsetRef.current = 0;
+          setSearchError(err.message || 'Search failed');
+        }
       } finally {
         if (searchSeq.current === seq) setIsSearching(false);
       }
@@ -3332,14 +3345,39 @@ export default function MessageList() {
           </div>
         )}
 
+        {/* Scope reminder while a folder-scoped search is active — recent matches
+            often live in other folders, which otherwise reads as broken search. */}
+        {searchQuery.trim() && searchFolder && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            padding: '6px 14px', fontSize: 12, color: 'var(--text-tertiary)',
+            borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
+          }}>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {t('messageList.searchScopeNote', { folder: searchFolder })}
+            </span>
+            <button
+              onClick={() => setSearchAllFolders(true)}
+              style={{
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                color: 'var(--accent)', fontSize: 12, flexShrink: 0,
+              }}
+            >
+              {t('sidebar.searchAllFolders')}
+            </button>
+          </div>
+        )}
+
         {!loadingMessages && displayMessages.length === 0 && (
           <EmptyState
             folderSyncing={folderSyncing}
             searchQuery={searchQuery}
+            searchError={searchError}
             unreadOnly={unreadOnly}
             selectedFolder={selectedFolder}
             accounts={accounts}
             onClearSearch={() => { setSearchQuery(''); }}
+            onRetrySearch={() => setSearchReloadToken(token => token + 1)}
             onShowAll={() => setUnreadOnly(false)}
             onCompose={() => openCompose({ accountId: selectedAccountId || undefined })}
           />
@@ -3994,7 +4032,7 @@ function UndoBar({ notification, onDismiss, showTopBorder }) {
   );
 }
 
-function EmptyState({ folderSyncing, searchQuery, unreadOnly, selectedFolder, accounts, onClearSearch, onShowAll, onCompose }) {
+function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selectedFolder, accounts, onClearSearch, onRetrySearch, onShowAll, onCompose }) {
   const { t } = useTranslation();
 
   if (folderSyncing) {
@@ -4022,10 +4060,18 @@ function EmptyState({ folderSyncing, searchQuery, unreadOnly, selectedFolder, ac
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
         </div>
-        <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>{t('messageList.noSearchResults')}</div>
-        <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 20 }}>
-          {t('messageList.noSearchResultsDesc', { query: searchQuery })}
+        <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>
+          {searchError ? t('messageList.searchFailed') : t('messageList.noSearchResults')}
         </div>
+        <div style={{ fontSize: 13, color: searchError ? 'var(--red)' : 'var(--text-tertiary)', marginBottom: 20 }}>
+          {searchError || t('messageList.noSearchResultsDesc', { query: searchQuery })}
+        </div>
+        {searchError && (
+          <button onClick={onRetrySearch} style={{
+            padding: '7px 18px', borderRadius: 8, border: 'none', marginRight: 8,
+            background: 'var(--accent)', color: 'var(--accent-text)', cursor: 'pointer', fontSize: 13,
+          }}>{t('common.retry')}</button>
+        )}
         <button onClick={onClearSearch} style={{
           padding: '7px 18px', borderRadius: 8, border: '1px solid var(--border)',
           background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 13,

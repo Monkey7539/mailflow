@@ -327,6 +327,8 @@
     "releaseToSync": "Soltar para sincronizar",
     "noSearchResults": "No se encontraron resultados",
     "noSearchResultsDesc": "Sin resultados para {{query}}",
+    "searchScopeNote": "Buscando solo en \"{{folder}}\"",
+    "searchFailed": "Error en la búsqueda",
     "clearSearch": "Limpiar búsqueda",
     "searchHelp": {
       "title": "Operadores de búsqueda",
