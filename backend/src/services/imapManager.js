@@ -1,6 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
-import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata } from './messageParser.js';
+import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata, renderCalendarInvite } from './messageParser.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
@@ -581,6 +581,16 @@ export function walkStructure(node, results) {
   } else if (type === 'text/plain') {
     results.textParts.push({
       part: node.part || '1', type,
+      encoding: node.encoding || '',
+      charset: node.parameters?.charset || 'utf-8',
+    });
+  } else if (type === 'text/calendar') {
+    // Meeting invites (e.g. an Outlook forwarded meeting) can be the only
+    // body part — collected separately so fetchMessageBody can render a
+    // readable invite when no text/html or text/plain alternative exists.
+    results.calendarParts = results.calendarParts || [];
+    results.calendarParts.push({
+      part: node.part || '1',
       encoding: node.encoding || '',
       charset: node.parameters?.charset || 'utf-8',
     });
@@ -4273,11 +4283,13 @@ export class ImapManager {
           throw new Error('Command failed');
         }
 
-        const results = { textParts: [], attachments: [], inlineImages: [] };
+        const results = { textParts: [], attachments: [], inlineImages: [], calendarParts: [] };
         walkStructure(structure, results);
 
-        // Handle single-part root node (no childNodes, type is the content type)
-        if (results.textParts.length === 0) {
+        // Handle single-part root node (no childNodes, type is the content type).
+        // A collected calendar part suppresses the fallback — pulling the raw
+        // part as text/plain is what used to show VCALENDAR source in the UI.
+        if (results.textParts.length === 0 && results.calendarParts.length === 0) {
           const rootType = (structure.type || '').toLowerCase();
           results.textParts.push({
             part: structure.part || '1',
@@ -4289,11 +4301,16 @@ export class ImapManager {
 
         attachments = results.attachments;
 
+        // Calendar parts are only fetched when the message has no ordinary body —
+        // a multipart/alternative invite keeps its normal text/html rendering.
+        const calendarParts = results.textParts.length === 0 ? results.calendarParts : [];
+
         // Fetch any text/image parts not already obtained from the speculative fetch
         const inlineImages = results.inlineImages || [];
         const needed = [
           ...new Set([
             ...results.textParts.map(p => p.part),
+            ...calendarParts.map(p => p.part),
             ...inlineImages.map(p => p.part),
           ])
         ].filter(p => !prefetched.has(p));
@@ -4347,6 +4364,18 @@ export class ImapManager {
           const decoded = decodeBody(buf, part.encoding, part.charset);
           if (part.type === 'text/html' && !html) html = decoded;
           else if (part.type === 'text/plain' && !text) text = decoded;
+        }
+
+        // Calendar-only message (e.g. an Outlook forwarded meeting request):
+        // render a readable invite card instead of raw VCALENDAR source. The
+        // html rides the normal sanitizer path like any email HTML.
+        if (!html && !text && calendarParts.length) {
+          for (const part of calendarParts) {
+            const buf = prefetched.get(part.part);
+            if (!buf) continue;
+            const invite = renderCalendarInvite(decodeBody(buf, part.encoding, part.charset));
+            if (invite) { html = invite.html; text = invite.text; break; }
+          }
         }
 
         // Step 3: replace cid: references in HTML with data: URIs so inline
