@@ -4559,12 +4559,6 @@ export class ImapManager {
     throw lastErr;
   }
 
-  async createFolder(account, path) {
-    return withFreshClient(account, async (client) => {
-      await client.mailboxCreate(path);
-    });
-  }
-
   // Ensure a mailbox exists, returning { path, created }: `path` is the real server path
   // the mailbox has under this account's personal namespace (e.g. 'INBOX.Todo' on a
   // prefixed server), `created` is true only when THIS call made it. The "create missing
