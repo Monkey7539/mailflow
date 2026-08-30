@@ -616,7 +616,7 @@ MailFlow is free and open source. If it's useful to you, consider supporting dev
 ### GitHub Sponsors
 
 <!-- SPONSORS-START -->
-_No sponsors yet — be the first!_
+<a href="https://github.com/lindstrm" title="lindstrm"><img src="https://avatars.githubusercontent.com/u/321951?s=64&u=76e44fd34335455397911bf1e14e0d35a1053ec2&v=4" width="48" height="48" alt="lindstrm" style="border-radius:50%;margin:4px"></a>
 <!-- SPONSORS-END -->
 
 ---
