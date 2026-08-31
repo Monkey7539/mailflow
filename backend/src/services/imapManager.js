@@ -5067,6 +5067,14 @@ export class ImapManager {
             // No UIDPLUS: protect other \Deleted messages from the broad EXPUNGE.
             const ourSet = new Set(uids.map(Number));
             const allDeleted = await client.search({ deleted: true }, { uid: true });
+            // Without UIDPLUS the EXPUNGE below is mailbox-wide, so this search is the only
+            // thing protecting other messages that are already flagged for deletion. A
+            // non-array result (undefined: no mailbox selected, false: SEARCH failed) means
+            // we cannot know what to protect. Abort: carrying on with an empty list would
+            // read as "nothing else is flagged" and permanently destroy them.
+            if (!Array.isArray(allDeleted)) {
+              throw new Error(`deleted-flag SEARCH returned ${allDeleted} — cannot protect other flagged messages from a mailbox-wide EXPUNGE`);
+            }
             const othersDeleted = allDeleted.filter(uid => !ourSet.has(uid));
             if (othersDeleted.length > 0) {
               await client.messageFlagsRemove(othersDeleted.join(','), ['\\Deleted'], { uid: true });
@@ -5096,6 +5104,12 @@ export class ImapManager {
             lock.release();
           }
         });
+        // Same non-array contract as above. Throwing here lands in the catch below, which
+        // already reports every uid as failed — the conservative answer when we cannot tell
+        // what survived. This only replaces an opaque TypeError with a legible message.
+        if (!Array.isArray(remaining)) {
+          throw new Error(`verification SEARCH returned ${remaining}`, { cause: err });
+        }
         const remainingSet = new Set(remaining.map(Number));
         const succeeded = uids.filter(uid => !remainingSet.has(Number(uid)));
         const failed    = uids.filter(uid =>  remainingSet.has(Number(uid)));
@@ -5390,6 +5404,18 @@ export class ImapManager {
           } catch (err) {
             // Folder may no longer exist on server or be temporarily inaccessible — skip it.
             console.warn(`Reconcile: could not open ${logAccount(account)}/${folder}: ${extractImapError(err)}`);
+            continue;
+          }
+          // search() resolves rather than throws when it has nothing to report: undefined
+          // if no mailbox ended up selected, false if the SEARCH itself failed. Neither is
+          // iterable, so the catch above never sees it and new Set() threw here instead,
+          // surfacing as a bogus "connection error" that aborted the whole reconcile.
+          //
+          // Skip the folder rather than storing an empty set. Phase 2 only walks folders
+          // present in this map, so skipping leaves the folder untouched, whereas an empty
+          // set would mark every local row an orphan and delete the folder's contents.
+          if (!Array.isArray(serverUids)) {
+            console.warn(`Reconcile: no UID list for ${logAccount(account)}/${folder} (search returned ${serverUids}) — skipping folder`);
             continue;
           }
           serverUidsByFolder.set(folder, new Set(serverUids));
