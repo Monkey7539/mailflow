@@ -1563,6 +1563,19 @@ describe('_markSeenInFolder — chunked mark-all-read', () => {
 });
 
 describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
+  it('treats a non-array search result as "nothing confirmed", never as an empty source', () => {
+    // imapflow's search() resolves undefined (no mailbox selected) or false (SEARCH failed)
+    // rather than throwing. Reading either as an empty source would mean "every uid left the
+    // folder", i.e. the whole batch moved successfully, which is the dangerous conclusion.
+    for (const bad of [false, undefined, null]) {
+      const r = classifyMoveBySearch([4, 5, 6], bad, 3);
+      expect(r.succeeded).toEqual([]);
+      expect(r.failed).toEqual([4, 5, 6]);
+      expect(r.staleCount).toBeNull();
+      expect(r.mappable).toBe(false);
+    }
+  });
+
   it('clean move: all left source, all arrived -> succeeded + mappable', () => {
     const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [], /*destArrived*/ 3);
     expect(r.succeeded).toEqual([4, 5, 6]);

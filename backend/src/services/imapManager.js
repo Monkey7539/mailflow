@@ -1311,6 +1311,14 @@ async function resolveServerFolderCasing(client, knownPath) {
 // UID is in the batch, so the WHOLE batch is reported failed (nothing is deleted or misfiled
 // locally; the next sync reconciles) rather than guessing which UID was stale and losing the rest.
 export function classifyMoveBySearch(uids, remainingUids, destArrived) {
+  // Total in the non-array case as well. The caller guards this and logs, but search() can
+  // resolve to undefined or false rather than throwing, and this function moves mail: any
+  // future caller that forgets must not silently read a non-array as "the source is empty",
+  // which would mean the whole batch moved. Report everything failed and let the next sync
+  // reconcile, matching the caller's own failed-search path.
+  if (!Array.isArray(remainingUids)) {
+    return { succeeded: [], failed: uids.slice(), staleCount: null, mappable: false };
+  }
   const remaining = new Set(remainingUids.map(Number));
   const gone = uids.filter(u => !remaining.has(Number(u)));
   const stillPresent = uids.filter(u => remaining.has(Number(u)));
@@ -3377,6 +3385,15 @@ export class ImapManager {
       const existingUids = new Set(existingRows.rows.map(r => Number(r.uid)));
 
       // Step 3 — compute missing UIDs, newest-first so recent mail is accessible fast.
+      // Same non-array contract as the other search sites. Abandon this pass rather than
+      // treating it as an empty mailbox: an empty list reads as "nothing is missing", which
+      // would silently skip the backfill and write a 0 total_count over a folder that is not
+      // actually empty. The next scheduled backfill retries.
+      if (!Array.isArray(serverUids)) {
+        console.warn(`Backfill ${logAccount(account)}/${folder}: UID SEARCH returned ${serverUids} — skipping this pass`);
+        return;
+      }
+
       const missingUids = serverUids
         .filter(uid => !existingUids.has(uid))
         .sort((a, b) => b - a);
@@ -5030,6 +5047,16 @@ export class ImapManager {
       }
     }
 
+    // Same non-array contract as the other search sites: search() resolves undefined when no
+    // mailbox ended up selected and false when the SEARCH failed, neither of which throws, so
+    // the catch above never sees it and classifyMoveBySearch would die on remainingUids.map.
+    // Treat it exactly as a failed search: report everything failed and leave it for the next
+    // sync. Assuming an empty source would be the dangerous reading, since "no UIDs remain"
+    // means the entire batch moved successfully.
+    if (!Array.isArray(remaining)) {
+      console.error(`bulkMoveMessages: source UID SEARCH returned ${remaining} — leaving all ${uids.length} for next sync`);
+      return { uidMap: new Map(), succeeded: [], failed: uids, staleCount: null };
+    }
     const c = classifyMoveBySearch(uids, remaining, destArrived);
     if (c.staleCount) {
       console.warn(`bulkMoveMessages ${fromFolder} → ${toFolder}: ${c.staleCount} stale UID(s) in batch — reporting all ${uids.length} failed for the next sync to reconcile`);
