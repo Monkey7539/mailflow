@@ -568,6 +568,9 @@
         "label": "Mark Delegated",
         "description": "Classify the selected message as Delegated"
       },
+      "gtdUndo": {
+        "description": "Undo the latest GTD classification"
+      },
       "toggleRightSidebar": {
         "label": "Toggle right sidebar",
         "description": "Hide or show the right sidebar"
@@ -608,18 +611,23 @@
   "admin": {
     "cleanup": {
       "title": "Mailbox Cleanup",
-      "intro": "Find bulk mail cluttering your inbox and move it to Trash. Deleted mail goes to your Trash folder and can be recovered until you empty it.",
+      "intro": "Find bulk mail cluttering your inbox and clear it out. Choose whether to archive it (kept and searchable) or move it to Trash (recoverable until you empty it).",
       "account": "Account",
       "summary": "{{bulk}} of {{total}} inbox messages are bulk mail ({{pct}}%).",
       "tier1Title": "Top bulk senders",
-      "tier1Desc": "These are the highest-volume newsletter and marketing senders in your inbox. Moving one sends all of that sender's inbox mail to Trash.",
+      "tier1Desc": "These are the highest-volume newsletter and marketing senders in your inbox. Acting on one processes all of that sender's inbox mail with your chosen action.",
       "noneFound": "No bulk senders found.",
       "moveToTrash": "Move to Trash",
       "confirm": "Move all {{count}} inbox messages from {{sender}} to Trash? They can be recovered from Trash until you empty it.",
       "tier2Title": "Common promotional terms",
       "tier2Desc": "Search these terms to review and delete the rest yourself. They span many senders, so skim the results before deleting.",
       "tier3Title": "Cleaning up the rest",
-      "tier3Desc": "For everything else, search by sender or keyword, select all, and delete. Deletes always move to Trash first, so you can review before emptying it."
+      "tier3Desc": "For everything else, search by sender or keyword, select all, and delete. Deletes always move to Trash first, so you can review before emptying it.",
+      "action": "Cleanup action",
+      "actionArchive": "Archive (recommended)",
+      "archive": "Archive",
+      "confirmArchive": "Archive all {{count}} inbox messages from {{sender}}? They stay in your Archive folder and remain searchable.",
+      "noArchiveFolder": "This account has no archive folder, so only Move to Trash is available."
     },
     "title": "Settings",
     "close": "Close",
@@ -1536,6 +1544,7 @@
     "removeFrom": "Remove from {{state}}",
     "classified": "Label applied",
     "classifyFailed": "Couldn't apply label",
+    "undoFailed": "Couldn't undo label",
     "removed": "Label removed",
     "removeFailed": "Couldn't remove label",
     "done": "Mark done",
@@ -1552,5 +1561,18 @@
   "window": {
     "minimize": "Minimize",
     "close": "Close"
+  },
+  "diagnostics": {
+    "section": "Diagnostics",
+    "blurb": "A sanitized report you can share to help troubleshoot. It contains no email addresses, names, message content, or secrets.",
+    "generateReport": "Generate diagnostics report",
+    "title": "Diagnostics report",
+    "includes": "Includes: app versions, your environment, per-account and folder counts, sync error categories, and server health. Account IDs and custom folder names are replaced by one-time hashes.",
+    "excludes": "Excludes: email addresses, names, subjects, message content, passwords, and API keys or tokens.",
+    "download": "Download JSON",
+    "copied": "Report copied",
+    "copyFailed": "Copy failed",
+    "generating": "Generating report…",
+    "error": "Could not generate the report."
   }
 }

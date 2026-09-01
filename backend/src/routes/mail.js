@@ -10,6 +10,7 @@ import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMess
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { listMessages } from '../services/messageService.js';
+import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
@@ -156,6 +157,15 @@ router.get('/messages', async (req, res) => {
   if (resolvedAccountId && messages.length) {
     imapManager.prefetchFolderBodies(resolvedAccountId, messages.map(r => r.id))
       .catch(err => console.warn('Folder body prefetch error:', err.message));
+  }
+
+  // Phase 1 reliability instrumentation: count "ghost" rows served — a UID is known but
+  // its envelope hasn't been fetched, so the row renders as Unknown / (no subject). This is
+  // the visible #407 symptom; measuring it turns "sometimes there are ghost rows" into a rate.
+  if (resolvedAccountId && messages.length) {
+    const ghosts = messages.filter(m =>
+      !m.message_id && (!m.subject || m.subject === '(no subject)') && !m.snippet).length;
+    if (ghosts > 0) recordSyncSignal('ghost_rows_served', { accountId: resolvedAccountId, magnitude: ghosts });
   }
 
   res.json({ messages, total, ...(isThreaded ? { threaded: true } : {}) });
@@ -1340,8 +1350,11 @@ router.post('/messages/bulk-delete', async (req, res) => {
 router.get('/mailbox-usage', async (req, res) => {
   const { accountId } = req.query;
   if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'valid accountId required' });
-  const acct = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
+  const acct = await query('SELECT id, folder_mappings FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
   if (!acct.rows.length) return res.status(404).json({ error: 'Account not found' });
+  // Whether Archive is a usable cleanup action for this account (#403): the client
+  // offers Archive vs Trash and needs to know if an archive folder can be resolved.
+  const archiveFolder = await resolveArchiveFolder(accountId, acct.rows[0].folder_mappings);
 
   const summary = await query(
     `SELECT count(*)::int AS inbox_total, count(*) FILTER (WHERE is_bulk)::int AS bulk_total
@@ -1376,6 +1389,7 @@ router.get('/mailbox-usage', async (req, res) => {
     accountId,
     inboxTotal: summary.rows[0].inbox_total,
     bulkTotal: summary.rows[0].bulk_total,
+    archiveAvailable: Boolean(archiveFolder),
     tier1Senders: senders.rows.map(r => ({ fromEmail: r.from_email, fromName: r.from_name || '', count: r.count })),
     tier2Keywords: KEYWORDS.map((k, i) => ({ keyword: k, count: kw.rows[0][`k${i}`] })),
   });

@@ -587,6 +587,9 @@
       "toggleRightSidebar": {
         "label": "Przełącz prawy panel",
         "description": "Ukryj lub pokaż prawy panel boczny"
+      },
+      "gtdUndo": {
+        "description": "Cofnij ostatnią klasyfikację GTD"
       }
     }
   },
@@ -624,18 +627,23 @@
   "admin": {
     "cleanup": {
       "title": "Porządki w skrzynce",
-      "intro": "Znajdź masową pocztę zapychającą skrzynkę odbiorczą i przenieś ją do Kosza. Usunięta poczta trafia do Kosza i można ją odzyskać, dopóki go nie opróżnisz.",
+      "intro": "Znajdź masową pocztę zaśmiecającą skrzynkę odbiorczą i uporządkuj ją. Wybierz, czy ją zarchiwizować (zachowana i przeszukiwalna), czy przenieść do kosza (można ją odzyskać, dopóki go nie opróżnisz).",
       "account": "Konto",
       "summary": "{{bulk}} z {{total}} wiadomości w skrzynce to poczta masowa ({{pct}}%).",
       "tier1Title": "Najwięksi nadawcy masowi",
-      "tier1Desc": "To nadawcy newsletterów i marketingu o największej liczbie wiadomości w Twojej skrzynce. Przeniesienie jednego wysyła całą jego pocztę ze skrzynki do Kosza.",
+      "tier1Desc": "To nadawcy newsletterów i marketingu o największej liczbie wiadomości w Twojej skrzynce odbiorczej. Działanie na jednym przetwarza całą pocztę tego nadawcy w skrzynce odbiorczej wybraną akcją.",
       "noneFound": "Nie znaleziono nadawców masowych.",
       "moveToTrash": "Przenieś do Kosza",
       "confirm": "Przenieść wszystkie {{count}} wiadomości od {{sender}} do Kosza? Można je odzyskać z Kosza, dopóki go nie opróżnisz.",
       "tier2Title": "Typowe hasła promocyjne",
       "tier2Desc": "Wyszukaj te hasła, aby samodzielnie przejrzeć i usunąć resztę. Dotyczą wielu nadawców, więc przejrzyj wyniki przed usunięciem.",
       "tier3Title": "Sprzątanie reszty",
-      "tier3Desc": "W przypadku pozostałych wyszukaj według nadawcy lub słowa kluczowego, zaznacz wszystko i usuń. Usunięcia najpierw trafiają do Kosza, więc możesz sprawdzić przed jego opróżnieniem."
+      "tier3Desc": "W przypadku pozostałych wyszukaj według nadawcy lub słowa kluczowego, zaznacz wszystko i usuń. Usunięcia najpierw trafiają do Kosza, więc możesz sprawdzić przed jego opróżnieniem.",
+      "action": "Akcja porządkowania",
+      "actionArchive": "Archiwizuj (zalecane)",
+      "archive": "Archiwizuj",
+      "confirmArchive": "Zarchiwizować wszystkie {{count}} wiadomości od {{sender}} w skrzynce odbiorczej? Pozostaną w folderze Archiwum i nadal będą dostępne w wyszukiwaniu.",
+      "noArchiveFolder": "To konto nie ma folderu archiwum, więc dostępne jest tylko Przenieś do kosza."
     },
     "title": "Ustawienia",
     "close": "Zamknij",
@@ -1566,10 +1574,24 @@
       "delegated": "Delegowane",
       "someday": "Kiedyś",
       "reference": "Materiały"
-    }
+    },
+    "undoFailed": "Nie udało się cofnąć etykiety"
   },
   "window": {
     "minimize": "Minimalizuj",
     "close": "Zamknij"
+  },
+  "diagnostics": {
+    "section": "Diagnostyka",
+    "blurb": "Zanonimizowany raport, którym możesz się podzielić, aby pomóc w rozwiązywaniu problemów. Nie zawiera adresów e-mail, nazwisk, treści wiadomości ani danych poufnych.",
+    "generateReport": "Wygeneruj raport diagnostyczny",
+    "title": "Raport diagnostyczny",
+    "includes": "Zawiera: wersje aplikacji, Twoje środowisko, liczby wiadomości na konto i folder, kategorie błędów synchronizacji oraz stan serwera. Identyfikatory kont i nazwy folderów niestandardowych są zastępowane jednorazowymi skrótami.",
+    "excludes": "Nie zawiera: adresów e-mail, nazwisk, tematów, treści wiadomości, haseł ani kluczy lub tokenów API.",
+    "download": "Pobierz JSON",
+    "copied": "Skopiowano raport",
+    "copyFailed": "Kopiowanie nie powiodło się",
+    "generating": "Generowanie raportu…",
+    "error": "Nie udało się wygenerować raportu."
   }
 }

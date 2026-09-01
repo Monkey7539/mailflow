@@ -26,6 +26,7 @@ import { LAYOUTS, applyLayout } from '../layouts.js';
 import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudioContext } from '../utils/notificationSounds.js';
 import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
+import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { unifiedUnreadTotal } from '../utils/unifiedInbox.js';
 import { isValidForwardAddress } from '../utils/ruleActions.js';
@@ -3125,14 +3126,18 @@ function SSOTab() {
   const [internalAuthDisabled, setInternalAuthDisabled] = useState(false);
   const [internalAuthSaving, setInternalAuthSaving] = useState(false);
   const [internalAuthError, setInternalAuthError] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
+    // A failed load must never render as an empty list. Reporting only to console.error
+    // made a broken fetch indistinguishable from "no providers configured", which can
+    // hide a live SSO provider from the admin who believes it is gone.
     const fetchProviders = api.admin.oidc.getProviders()
       .then(d => setProviders(d.providers))
-      .catch(console.error);
+      .catch(err => setLoadError(err.message));
     const fetchSettings = api.admin.getSettings()
       .then(d => setInternalAuthDisabled(d.settings.internal_auth_disabled === 'true'))
-      .catch(console.error);
+      .catch(err => setLoadError(err.message));
     Promise.all([fetchProviders, fetchSettings]).finally(() => setLoading(false));
   }, []);
 
@@ -3304,7 +3309,15 @@ function SSOTab() {
 
       <div style={{ height: 1, background: 'var(--border-subtle)', marginBottom: 20 }} />
 
-      {providers.length === 0 && !editing && (
+      {loadError && (
+        <div style={{
+          padding: '12px 14px', marginBottom: 16, borderRadius: 8,
+          background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)',
+          color: 'var(--red)', fontSize: 13,
+        }}>{t('common.error', { message: loadError })}</div>
+      )}
+
+      {!loadError && providers.length === 0 && !editing && (
         <div style={{
           padding: '24px', borderRadius: 8, border: '1px dashed var(--border)',
           textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13, marginBottom: 16,
@@ -5425,7 +5438,34 @@ function NotificationsTab() {
 // ─── Shared confirm overlay (replaces window.confirm everywhere) ──────────────
 function ConfirmOverlay({ dialog, onClose }) {
   const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  // Clear transient state whenever a different dialog is opened, so a previous
+  // failure never leaks into the next confirmation.
+  useEffect(() => { setBusy(false); setError(''); }, [dialog]);
+
   if (!dialog) return null;
+
+  // Await the action rather than firing it into the void. This previously closed the
+  // overlay and then called onConfirm() unawaited with no catch, so a rejected request
+  // left no trace at all: the dialog was already gone and the rejection was unhandled.
+  // Every destructive action here (delete account, delete alias, delete user, disable
+  // a user's 2FA, delete an SSO provider, unlink an identity) therefore looked like it
+  // had succeeded while the server had refused it. Keep the dialog open on failure so
+  // the error is shown where the user is already looking; close only on success.
+  const runConfirm = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      await dialog.onConfirm();
+      onClose();
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 9100,
@@ -5434,7 +5474,7 @@ function ConfirmOverlay({ dialog, onClose }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: 24,
       animation: 'backdrop-enter var(--motion-fast) var(--ease-standard) both',
-    }} onClick={onClose}>
+    }} onClick={busy ? undefined : onClose}>
       <div style={{
         background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)',
         borderRadius: 12, padding: '24px 24px 20px', maxWidth: 360, width: '100%',
@@ -5447,15 +5487,24 @@ function ConfirmOverlay({ dialog, onClose }) {
         <p style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
           {dialog.message}
         </p>
+        {error && (
+          <div style={{
+            marginBottom: 14, padding: '8px 10px',
+            background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)',
+            borderRadius: 7, color: 'var(--red)', fontSize: 12,
+          }}>{t('common.error', { message: error })}</div>
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} className="btn-press" style={{
+          <button onClick={onClose} disabled={busy} className="btn-press" style={{
             padding: '7px 16px', borderRadius: 7, border: '1px solid var(--border-subtle)',
-            background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 13,
+            background: 'transparent', color: 'var(--text-secondary)',
+            cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, fontSize: 13,
           }}>{t('common.cancel')}</button>
-          <button onClick={() => { onClose(); dialog.onConfirm(); }} className="btn-press" style={{
+          <button onClick={runConfirm} disabled={busy} className="btn-press" style={{
             padding: '7px 16px', borderRadius: 7, border: 'none',
-            background: '#dc2626', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 500,
-          }}>{dialog.confirmLabel || t('common.delete')}</button>
+            background: '#dc2626', color: 'white',
+            cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1, fontSize: 13, fontWeight: 500,
+          }}>{busy ? t('common.loading') : (dialog.confirmLabel || t('common.delete'))}</button>
         </div>
       </div>
     </div>
@@ -5472,6 +5521,7 @@ const LANGUAGES = [
   { code: 'ru', nativeName: 'Русский' },
   { code: 'zhCN', nativeName: '简体中文'},
   { code: 'pl', nativeName: 'Polski' },
+  { code: 'cs', nativeName: 'Čeština' },
 ];
 
 function LanguageTab() {
@@ -5595,6 +5645,7 @@ function SecurityPrivacyTab({ initialSubTab }) {
 function AboutTab() {
   const { t } = useTranslation();
   const [info, setInfo] = useState(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   useEffect(() => {
     fetch('/api/version')
@@ -5664,6 +5715,21 @@ function AboutTab() {
           </div>
         ))}
       </div>
+
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '18px 0 8px 4px' }}>
+        {t('diagnostics.section')}
+      </div>
+      <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', margin: '0 4px 10px', lineHeight: 1.5 }}>
+        {t('diagnostics.blurb')}
+      </div>
+      <button
+        onClick={() => setShowDiagnostics(true)}
+        style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer' }}
+      >
+        {t('diagnostics.generateReport')}
+      </button>
+
+      {showDiagnostics && <DiagnosticsReportModal onClose={() => setShowDiagnostics(false)} />}
     </div>
   );
 }
@@ -6432,6 +6498,14 @@ function MailboxCleanupTab() {
   const [error, setError] = useState('');
   const [busySender, setBusySender] = useState('');
   const [progress, setProgress] = useState(null);
+  // Cleanup action for the whole view (#403): Archive is the default and recommended
+  // choice; Trash stays available as an explicit alternative. One selector governs
+  // every sender row, not a per-row pair of buttons.
+  const [action, setAction] = useState('archive');
+  const archiveAvailable = data ? data.archiveAvailable !== false : true;
+  // If the selected account has no archive folder, Archive isn't a usable action —
+  // fall back to Trash so the row button never runs an action the server can't honor.
+  useEffect(() => { if (data && data.archiveAvailable === false) setAction('trash'); }, [data]);
 
   // Re-fetch the summary/sender data without touching the error banner or the loading
   // spinner, so a caller that just wants fresh counts (after a cleanup, including a partial
@@ -6451,22 +6525,25 @@ function MailboxCleanupTab() {
   useEffect(() => { if (accountId) load(accountId); }, [accountId, load]);
 
   const cleanupSender = async (s) => {
+    const isArchive = action === 'archive';
     const label = s.fromName ? `${s.fromName} <${s.fromEmail}>` : s.fromEmail;
-    if (!window.confirm(t('admin.cleanup.confirm', { count: s.count, sender: label }))) return;
+    const confirmKey = isArchive ? 'admin.cleanup.confirmArchive' : 'admin.cleanup.confirm';
+    if (!window.confirm(t(confirmKey, { count: s.count, sender: label }))) return;
     setBusySender(s.fromEmail); setError(''); setProgress({ done: 0, total: s.count });
     try {
       const { ids } = await api.cleanupPreview(accountId, s.fromEmail);
+      const runBatch = isArchive ? api.bulkArchive : api.bulkDelete;
       let done = 0;
       for (let i = 0; i < ids.length; i += 500) {
         const batch = ids.slice(i, i + 500);
-        await api.bulkDelete(batch);
+        await runBatch(batch);
         done += batch.length;
         setProgress({ done, total: ids.length });
       }
     } catch (e) { setError(e.message); }
     finally {
-      // Always refresh counts so the summary reflects what actually got trashed, even on a
-      // partial failure; preserve any error already set (don't route through load()).
+      // Always refresh counts so the summary reflects what actually got archived or trashed,
+      // even on a partial failure; preserve any error already set (don't route through load()).
       try { await fetchUsage(accountId); } catch { /* keep the primary error and last-good data */ }
       setBusySender(''); setProgress(null);
     }
@@ -6500,6 +6577,38 @@ function MailboxCleanupTab() {
             </div>
           </div>
 
+          <Field label={t('admin.cleanup.action')}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {[
+                { key: 'archive', label: t('admin.cleanup.actionArchive'), disabled: !archiveAvailable },
+                { key: 'trash', label: t('admin.cleanup.moveToTrash'), disabled: false },
+              ].map(opt => {
+                const selected = action === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    disabled={opt.disabled || !!busySender}
+                    onClick={() => setAction(opt.key)}
+                    style={{
+                      padding: '7px 14px', borderRadius: 7, fontSize: 13, fontWeight: 500,
+                      cursor: (opt.disabled || busySender) ? 'not-allowed' : 'pointer',
+                      border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                      background: selected ? 'var(--accent)' : 'var(--bg-secondary)',
+                      color: selected ? 'var(--accent-text, white)' : 'var(--text-secondary)',
+                      opacity: opt.disabled ? 0.5 : 1,
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            {!archiveAvailable && (
+              <div style={{ ...muted, marginTop: 8 }}>{t('admin.cleanup.noArchiveFolder')}</div>
+            )}
+          </Field>
+
           <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 4px' }}>{t('admin.cleanup.tier1Title')}</h3>
           <p style={{ ...muted, marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>{t('admin.cleanup.tier1Desc')}</p>
           {data.tier1Senders.length === 0 ? (
@@ -6520,13 +6629,18 @@ function MailboxCleanupTab() {
                     style={{
                       flexShrink: 0, padding: '6px 12px', borderRadius: 7, fontSize: 12, fontWeight: 500,
                       border: '1px solid var(--border)', cursor: busySender ? 'not-allowed' : 'pointer',
-                      background: busySender === s.fromEmail ? 'var(--bg-tertiary)' : 'var(--amber, #d97706)',
-                      color: busySender === s.fromEmail ? 'var(--text-secondary)' : 'white', opacity: busySender && busySender !== s.fromEmail ? 0.5 : 1,
+                      background: busySender === s.fromEmail
+                        ? 'var(--bg-tertiary)'
+                        : (action === 'archive' ? 'var(--accent)' : 'var(--amber, #d97706)'),
+                      color: busySender === s.fromEmail
+                        ? 'var(--text-secondary)'
+                        : (action === 'archive' ? 'var(--accent-text, white)' : 'white'),
+                      opacity: busySender && busySender !== s.fromEmail ? 0.5 : 1,
                     }}
                   >
                     {busySender === s.fromEmail
                       ? (progress ? `${progress.done.toLocaleString()}/${progress.total.toLocaleString()}` : '...')
-                      : t('admin.cleanup.moveToTrash')}
+                      : t(action === 'archive' ? 'admin.cleanup.archive' : 'admin.cleanup.moveToTrash')}
                   </button>
                 </div>
               ))}
@@ -8084,7 +8198,7 @@ function makeSearchIndex(t) {
     { label: t('admin.messageList.defaultReplyAction'), keywords: ['reply', 'reply all', 'default reply'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.markReadBehavior'), keywords: ['mark read', 'mark as read', 'read delay', 'auto read', 'manual read', 'unread'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     // Appearance > Fonts & Language
-    { label: t('admin.appearance.language'), keywords: ['language', 'locale', 'french', 'english', 'spanish', 'german', 'deutsch', 'russian', 'chinese', 'italian', 'français', 'español'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
+    { label: t('admin.appearance.language'), keywords: ['language', 'locale', 'french', 'english', 'spanish', 'german', 'deutsch', 'russian', 'chinese', 'italian', 'czech', 'čeština', 'français', 'español'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     { label: t('admin.appearance.fontSize'), keywords: ['font size', 'text size', 'zoom', 'scale', 'accessibility', 'larger text'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     { label: t('admin.appearance.typography'), keywords: ['font', 'typography', 'typeface', 'serif', 'sans', 'monospace', 'reading font'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     // Integrations

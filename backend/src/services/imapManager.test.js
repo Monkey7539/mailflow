@@ -12,7 +12,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4 } from './imapManager.js';
+import { ImapManager, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -1559,5 +1559,191 @@ describe('_markSeenInFolder — chunked mark-all-read', () => {
     };
     await expect(run(client)).rejects.toThrow(/messageFlagsAdd could not be confirmed/);
     expect(client.messageFlagsAdd).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
+  it('treats a non-array search result as "nothing confirmed", never as an empty source', () => {
+    // imapflow's search() resolves undefined (no mailbox selected) or false (SEARCH failed)
+    // rather than throwing. Reading either as an empty source would mean "every uid left the
+    // folder", i.e. the whole batch moved successfully, which is the dangerous conclusion.
+    for (const bad of [false, undefined, null]) {
+      const r = classifyMoveBySearch([4, 5, 6], bad, 3);
+      expect(r.succeeded).toEqual([]);
+      expect(r.failed).toEqual([4, 5, 6]);
+      expect(r.staleCount).toBeNull();
+      expect(r.mappable).toBe(false);
+    }
+  });
+
+  it('clean move: all left source, all arrived -> succeeded + mappable', () => {
+    const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [], /*destArrived*/ 3);
+    expect(r.succeeded).toEqual([4, 5, 6]);
+    expect(r.failed).toEqual([]);
+    expect(r.staleCount).toBe(0);
+    expect(r.mappable).toBe(true);
+  });
+
+  it('stale UID in batch: fewer arrived than left -> ALL failed, no wrong-deletion', () => {
+    // 2,3 were stale (moved away earlier), 4,5,6 really moved. All 5 are gone from source,
+    // but only 3 arrived in the destination -> conservatively report all failed.
+    const r = classifyMoveBySearch([2, 3, 4, 5, 6], /*remaining*/ [], /*destArrived*/ 3);
+    expect(r.succeeded).toEqual([]);
+    expect(r.failed).toEqual([2, 3, 4, 5, 6]);
+    expect(r.staleCount).toBe(2);
+    expect(r.mappable).toBe(false);
+  });
+
+  it('partial move failure: some still in source -> those are failed, the rest succeeded', () => {
+    // 5,6 still in source (not moved), 4 moved and arrived.
+    const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [5, 6], /*destArrived*/ 1);
+    expect(r.succeeded).toEqual([4]);
+    expect(r.failed).toEqual([5, 6]);
+    expect(r.staleCount).toBe(0);
+    expect(r.mappable).toBe(true);
+  });
+
+  it('nothing left the source -> all failed (move did not happen)', () => {
+    const r = classifyMoveBySearch([7, 8], /*remaining*/ [7, 8], /*destArrived*/ 0);
+    expect(r.succeeded).toEqual([]);
+    expect(r.failed).toEqual([7, 8]);
+    expect(r.staleCount).toBe(0);
+  });
+
+  it('destination not verifiable (null) -> trust source-absence, not mappable, stale unknown', () => {
+    const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [], /*destArrived*/ null);
+    expect(r.succeeded).toEqual([4, 5, 6]);
+    expect(r.failed).toEqual([]);
+    expect(r.staleCount).toBeNull();
+    expect(r.mappable).toBe(false);
+  });
+});
+
+// ── sync_error recording — every path that gives up records, every success clears ──────────
+
+describe('_recordAccountError / _clearAccountError', () => {
+  const acct = { id: 'a1', user_id: 'u1', email_address: 'x@example.com' };
+
+  const mgr = () => {
+    const m = new ImapManager(null);
+    clearInterval(m._healthCheckTimer);
+    clearInterval(m._snippetSchedulerTimer);
+    m.broadcast = vi.fn();
+    return m;
+  };
+
+  beforeEach(() => {
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('persists the error and broadcasts it', async () => {
+    const m = mgr();
+    await m._recordAccountError(acct, 'IMAP connect timeout (30000ms)');
+    expect(query).toHaveBeenCalledWith(
+      'UPDATE email_accounts SET sync_error = $1 WHERE id = $2',
+      ['IMAP connect timeout (30000ms)', 'a1'],
+    );
+    expect(m.broadcast).toHaveBeenCalledWith(
+      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)' }, 'u1',
+    );
+  });
+
+  it('does not rewrite an unchanged error — a host down for hours writes once', async () => {
+    const m = mgr();
+    for (let i = 0; i < 5; i++) await m._recordAccountError(acct, 'read ETIMEDOUT');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(m.broadcast).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes again when the error text changes', async () => {
+    const m = mgr();
+    await m._recordAccountError(acct, 'read ETIMEDOUT');
+    await m._recordAccountError(acct, 'Reconnect timeout (30000ms)');
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears a recorded error and tells the client', async () => {
+    const m = mgr();
+    await m._recordAccountError(acct, 'read ETIMEDOUT');
+    m.broadcast.mockClear();
+    await m._clearAccountError(acct);
+    expect(query).toHaveBeenLastCalledWith(
+      'UPDATE email_accounts SET sync_error = NULL WHERE id = $1', ['a1'],
+    );
+    expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'a1' }, 'u1');
+  });
+
+  it('writes through on the first clear after a restart, when the DB may hold a stale error', async () => {
+    const m = mgr();
+    await m._clearAccountError(acct);
+    expect(query).toHaveBeenCalledTimes(1);
+    // ...but stays silent: nothing was showing, so there is no transition to announce.
+    expect(m.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('skips the redundant UPDATE once known-clear — the sync tick must not write every 10s', async () => {
+    const m = mgr();
+    await m._clearAccountError(acct);
+    query.mockClear();
+    for (let i = 0; i < 10; i++) await m._clearAccountError(acct);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('never throws when the DB write fails, and retries the write next time', async () => {
+    const m = mgr();
+    query.mockRejectedValueOnce(new Error('deadlock detected'));
+    await expect(m._recordAccountError(acct, 'read ETIMEDOUT')).resolves.toBeUndefined();
+    expect(m.broadcast).not.toHaveBeenCalled();
+    query.mockResolvedValue({ rows: [] });
+    await m._recordAccountError(acct, 'read ETIMEDOUT');
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets cached state on disconnect so a re-added account writes through', async () => {
+    const m = mgr();
+    await m._clearAccountError(acct);
+    await m.disconnectAccount('a1');
+    query.mockClear();
+    await m._clearAccountError(acct);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── last_sync is stamped on an empty mailbox too ────────────────────────────────────────────
+
+describe('syncMessages — empty mailbox still stamps last_sync', () => {
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [] }); });
+
+  const account = { id: 'acct-empty', user_id: 'user-1', email_address: 'new@example.com', imap_host: 'imap.example.com' };
+
+  it('stamps last_sync when the server reports an empty mailbox', async () => {
+    const client = {
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      mailbox: { exists: 0 },
+    };
+    const result = await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    expect(result).toEqual({ insertedCount: 0, broadcastedNewMessages: false });
+    const stamps = query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]));
+    expect(stamps).toHaveLength(1);
+    expect(stamps[0][1]).toEqual(['acct-empty']);
+  });
+
+  it('still releases the mailbox lock on the empty path', async () => {
+    const release = vi.fn();
+    const client = { getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { exists: 0 } };
+    await ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT stamp when the mailbox object is missing — unknown state, not a confirmed sync', async () => {
+    const client = { getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }), mailbox: null };
+    await expect(
+      ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true)
+    ).resolves.toEqual({ insertedCount: 0, broadcastedNewMessages: false });
+    expect(query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]))).toHaveLength(0);
   });
 });
