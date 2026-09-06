@@ -488,6 +488,51 @@ describe('messageIdentity', () => {
 });
 
 describe('appendMessagesByIdentity', () => {
+  it('does NOT let an incoming read twin replace the unread copy from another account', () => {
+    // The follow-up bug: one email delivered to two unified accounts. A background refresh or
+    // pagination merge replaced the displayed row unconditionally, so the already-read twin
+    // could evict the unread copy and hide mail the user had not seen.
+    const existing = [{ id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: false }];
+    const incoming = [{ id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: true }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'unread');
+    assert.equal(result[0].is_read, false);
+  });
+
+  it('DOES let an incoming unread twin replace a read copy from another account', () => {
+    const existing = [{ id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true }];
+    const incoming = [{ id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: false }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'unread');
+  });
+
+  it('still replaces a reindexed row in the SAME account even when read state is unchanged', () => {
+    // Must not regress the original #378 fix: the held row is stale and unclickable, so it has
+    // to be replaced regardless of how the two compare.
+    const existing = [{ id: 'old', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true }];
+    const incoming = [{ id: 'new', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true }];
+    const result = appendMessagesByIdentity(existing, incoming);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'new');
+  });
+
+  it('replaces a same-account reindexed row even when the incoming copy is now read', () => {
+    const existing = [{ id: 'old', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: false }];
+    const incoming = [{ id: 'new', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true }];
+    assert.equal(appendMessagesByIdentity(existing, incoming)[0].id, 'new');
+  });
+
+  it('agrees with dedupeByIdentity: both paths keep the same copy of a cross-account pair', () => {
+    // The three merge paths disagreeing is what let the row flip between refreshes.
+    const unread = { id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: false };
+    const read   = { id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: true };
+    assert.equal(dedupeByIdentity([read, unread])[0].id, 'unread');
+    assert.equal(appendMessagesByIdentity([read], [unread])[0].id, 'unread');
+    assert.equal(appendMessagesByIdentity([unread], [read])[0].id, 'unread');
+  });
+
   it('replaces a reindexed message in place instead of duplicating it (the #378 bug)', () => {
     // Existing list holds the message under its old DB id; the fetched page carries the same
     // Message-ID under a NEW id (purge+reinsert regenerated the UUID).
@@ -553,6 +598,55 @@ describe('dedupeByIdentity', () => {
     assert.equal(result.length, 1);
     assert.equal(result[0].id, 'a');       // INBOX copy wins regardless of order
     assert.equal(result[0].folder, 'INBOX');
+  });
+
+  it('keeps the UNREAD copy when the same message reached two unified accounts', () => {
+    // The reported bug: one GitHub notification delivered to two of the user's addresses.
+    // Same Message-ID, same Date, so the order they arrive in is arbitrary. Keeping the
+    // read copy hid an unread email from the default list while the unread filter, which
+    // drops the read copy server-side, still showed it.
+    const list = [
+      { id: 'read',   message_id: '<m1>', folder: 'INBOX', account_id: 'a', is_read: true },
+      { id: 'unread', message_id: '<m1>', folder: 'INBOX', account_id: 'b', is_read: false },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'unread');
+    assert.equal(result[0].is_read, false);
+  });
+
+  it('keeps the unread copy no matter which order the two rows arrive in', () => {
+    const unread = { id: 'unread', message_id: '<m1>', folder: 'INBOX', is_read: false };
+    const read   = { id: 'read',   message_id: '<m1>', folder: 'INBOX', is_read: true };
+    assert.equal(dedupeByIdentity([unread, read])[0].id, 'unread');
+    assert.equal(dedupeByIdentity([read, unread])[0].id, 'unread');
+  });
+
+  it('still prefers INBOX over another folder even when the other copy is unread', () => {
+    // Folder rank dominates: an unread Sent twin must not displace the INBOX row.
+    const list = [
+      { id: 'inbox', message_id: '<m1>', folder: 'INBOX', is_read: true },
+      { id: 'sent',  message_id: '<m1>', folder: 'Sent',  is_read: false },
+    ];
+    const result = dedupeByIdentity(list);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'inbox');
+  });
+
+  it('prefers the unread copy within a non-INBOX folder too', () => {
+    const list = [
+      { id: 'read',   message_id: '<m1>', folder: 'Archive', is_read: true },
+      { id: 'unread', message_id: '<m1>', folder: 'Archive', is_read: false },
+    ];
+    assert.equal(dedupeByIdentity(list)[0].id, 'unread');
+  });
+
+  it('leaves both rows alone when they are equally good, so ordering stays stable', () => {
+    const list = [
+      { id: 'first',  message_id: '<m1>', folder: 'INBOX', is_read: false },
+      { id: 'second', message_id: '<m1>', folder: 'INBOX', is_read: false },
+    ];
+    assert.equal(dedupeByIdentity(list)[0].id, 'first');
   });
 
   it('preserves order and keeps the first occurrence when no INBOX copy exists', () => {
