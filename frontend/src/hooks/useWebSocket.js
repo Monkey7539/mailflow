@@ -345,6 +345,21 @@ export function useWebSocket() {
         break;
       }
 
+      case 'rules_run_complete': {
+        // Background "Run rules on inbox" finished (see rules.js /run). Toast the outcome,
+        // hand the counts to the settings panel if it is open, and refresh views and
+        // counts — rules move messages between folders.
+        addNotification({
+          title: data.ok === false
+            ? t('admin.rules.runError')
+            : t('admin.rules.runResult', { matched: data.matched, processed: data.processed }),
+        });
+        window.dispatchEvent(new CustomEvent('mailflow:rules-run-complete', { detail: data }));
+        window.dispatchEvent(new Event('mailflow:rules-ran'));
+        api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        break;
+      }
+
       case 'snooze_wakeup': {
         window.dispatchEvent(new CustomEvent('mailflow:refresh'));
         api.getUnreadCounts().then(counts => {
