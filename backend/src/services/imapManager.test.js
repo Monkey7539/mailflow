@@ -9,10 +9,10 @@ vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
 vi.mock('./aiProvider.js', () => ({ getAiStatus: vi.fn(), completeText: vi.fn() }));
 vi.mock('./pushNotifications.js', () => ({ sendPushToUser: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
-vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn() }));
+vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
+import { ImapManager, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -1732,6 +1732,19 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
     expect(stamps[0][1]).toEqual(['acct-empty']);
   });
 
+  it('invalidates a previous UID epoch even when the rebuilt mailbox is empty', async () => {
+    query.mockImplementation(async sql => ({ rows: sql.includes('SELECT uid_validity') ? [{ uid_validity: '7' }] : [], rowCount: 0 }));
+    const mgr = { _bgConnSem: createKeyedSemaphore(2), backfillMessages: vi.fn().mockResolvedValue() };
+    const client = { getMailboxLock: async () => ({ release() {} }), mailbox: { exists: 0, uidValidity: 8n } };
+    await ImapManager.prototype.syncMessages.call(mgr, account, client, 'INBOX', 50, false, true);
+    await new Promise(resolve => setImmediate(resolve));
+    const purge = query.mock.calls.findIndex(([sql]) => sql.startsWith('DELETE FROM messages'));
+    const stamp = query.mock.calls.findIndex(([sql]) => sql.includes('uid_validity=COALESCE'));
+    expect(purge).toBeGreaterThanOrEqual(0);
+    expect(stamp).toBeGreaterThan(purge);
+    expect(query.mock.calls[stamp][1]).toEqual([account.id, 'INBOX', 8]);
+  });
+
   it('still releases the mailbox lock on the empty path', async () => {
     const release = vi.fn();
     const client = { getMailboxLock: vi.fn().mockResolvedValue({ release }), mailbox: { exists: 0 } };
@@ -1745,5 +1758,367 @@ describe('syncMessages — empty mailbox still stamps last_sync', () => {
       ImapManager.prototype.syncMessages.call({}, account, client, 'INBOX', 50, false, true)
     ).resolves.toEqual({ insertedCount: 0, broadcastedNewMessages: false });
     expect(query.mock.calls.filter(c => /UPDATE email_accounts SET last_sync/.test(c[0]))).toHaveLength(0);
+  });
+});
+
+describe('hung IMAP transport recovery', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  const acct = { id: 'recovery', user_id: 'u1', imap_host: 'imap.example.com' };
+  function setup() {
+    const mgr = new ImapManager(null);
+    for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer']) clearInterval(mgr[key]);
+    const client = { close: vi.fn(), logout: vi.fn(() => new Promise(() => {})) };
+    mgr.connections.set(acct.id, client);
+    return { mgr, client };
+  }
+  it('force-closes a timed-out sync and releases its guard', async () => {
+    const { mgr, client } = setup();
+    mgr.syncMessages = vi.fn(() => new Promise(() => {}));
+    const tick = mgr._syncTick(acct);
+    await vi.advanceTimersByTimeAsync(55000);
+    await tick;
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(client.logout).not.toHaveBeenCalled();
+    expect(mgr.connections.has(acct.id)).toBe(false);
+    expect(mgr.syncingAccounts.has(acct.id)).toBe(false);
+  });
+  it('does not close a replacement connection when an older sync times out', async () => {
+    const { mgr, client } = setup();
+    mgr.syncMessages = vi.fn(() => new Promise(() => {}));
+    const tick = mgr._syncTick(acct);
+    const successor = { close: vi.fn() };
+    mgr.connections.set(acct.id, successor);
+    await vi.advanceTimersByTimeAsync(55000);
+    await tick;
+    expect(successor.close).not.toHaveBeenCalled();
+    expect(mgr.connections.get(acct.id)).toBe(successor);
+    expect(client.logout).not.toHaveBeenCalled();
+  });
+  it('disconnect completes even when graceful logout would never settle', async () => {
+    const { mgr, client } = setup();
+    await mgr.disconnectAccount(acct.id);
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(client.logout).not.toHaveBeenCalled();
+    expect(mgr.connections.has(acct.id)).toBe(false);
+  });
+});
+
+describe('staleness probe connection recovery', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
+    resolveForConnection.mockResolvedValue({ host: '::1', addresses: ['::1', '127.0.0.1'] });
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  it('retries a stalled dual-stack login over IPv4 and closes both probe transports', async () => {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const mgr = new ImapManager(null);
+    const probeCycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
+    vi.clearAllTimers();
+    const acct = { id: 'probe-recovery', user_id: 'u1', imap_host: 'imap.example.com', imap_tls: true };
+    const persistent = { close: vi.fn() };
+    mgr.connections.set(acct.id, persistent);
+    query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [acct] }));
+    const clients = [];
+    ImapFlow.mockImplementation(function () {
+      const client = Object.assign(new EventEmitter(), {
+        connect: vi.fn(() => clients.length === 1 ? new Promise(() => {}) : Promise.resolve()),
+        close: vi.fn(),
+        getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+        search: vi.fn().mockResolvedValue([]),
+      });
+      clients.push(client);
+      return client;
+    });
+    const cycle = probeCycle();
+    await vi.advanceTimersByTimeAsync(25000);
+    await cycle;
+    expect(clients).toHaveLength(2);
+    expect(ImapFlow.mock.calls.at(-1)[0].host).toBe('127.0.0.1');
+    expect(clients[0].close).toHaveBeenCalledOnce();
+    expect(clients[1].search).toHaveBeenCalledWith({ uid: '101:*' }, { uid: true });
+    expect(clients[1].close).toHaveBeenCalledOnce();
+    expect(persistent.close).not.toHaveBeenCalled();
+    expect(mgr._stalenessCheckRunning).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('Gmail label memberships (#418)', () => {
+  let rows, acct, serverUids;
+  const sent = '[Gmail]/Sent Mail';
+  const parsed = uid => ({ uid, messageId: '<self@example.com>', subject: 'Self mail',
+    fromEmail: 'me@example.com', to: [], cc: [], replyTo: [], date: new Date('2026-09-01'),
+    isRead: true, flags: ['\\Seen'], parsedHeaders: {} });
+  function clientFor(folder) {
+    return Object.assign(new EventEmitter(), {
+      mailbox: { exists: serverUids.length, uidValidity: 1 },
+      connect: vi.fn().mockResolvedValue(), close: vi.fn(), logout: vi.fn().mockResolvedValue(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      search: vi.fn(async () => serverUids),
+      fetch: vi.fn(async function* (range) {
+        const uids = range.includes(':') ? serverUids : range.split(',').map(Number);
+        for (const uid of uids) yield { uid, folder };
+      }),
+    });
+  }
+  beforeEach(() => {
+    vi.useFakeTimers();
+    rows = []; serverUids = [1];
+    acct = { id: 'gmail-418', user_id: 'u418', enabled: true, imap_host: 'imap.gmail.com', imap_tls: true };
+    parseMessage.mockImplementation(async m => parsed(m.uid));
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'] });
+    query.mockReset();
+    query.mockImplementation(async (sql, params = []) => {
+      const local = rows.filter(r => r.folder === params[1]);
+      if (sql.includes('SELECT * FROM email_accounts') || sql.includes('SELECT id FROM email_accounts')) return { rows: [acct] };
+      if (sql.includes('SELECT uid_validity, total_count')) return { rows: [{ uid_validity: 1, total_count: local.length }] };
+      if (sql.includes('SELECT uid_validity')) return { rows: [{ uid_validity: 1 }] };
+      if (sql.includes('COUNT(*) as count')) return { rows: [{ count: local.length, max_uid: Math.max(0, ...local.map(r => r.uid)) }] };
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: Math.max(0, ...local.map(r => r.uid)) }] };
+      if (sql.trim().startsWith('SELECT') && sql.includes('COUNT(*)')) return { rows: [{ n: local.length }] };
+      if (sql.includes('SELECT uid FROM messages')) return { rows: local.map(r => ({ uid: r.uid })) };
+      if (sql.includes('AND 1 = (SELECT COUNT')) {
+        // Model the existing single-row relocation: whichever folder syncs last wins.
+        const same = rows.filter(r => r.messageId === params[3]);
+        if (same.length === 1 && (same[0].folder !== params[0] || same[0].uid !== params[1])) {
+          Object.assign(same[0], { folder: params[0], uid: params[1] });
+          return { rows: [{ id: 'relocated' }] };
+        }
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO messages')) {
+        const exists = rows.some(r => r.folder === params[2] && r.uid === params[1]);
+        if (!exists) rows.push({ folder: params[2], uid: params[1], messageId: params[3] });
+        return { rows: [{ id: `row-${rows.length}`, is_new: !exists }] };
+      }
+      return { rows: [] };
+    });
+  });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+  const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {} });
+  async function sync(mgr, folder) {
+    await ImapManager.prototype.syncMessages.call(mgr, acct, clientFor(folder), folder, 20, false, true);
+  }
+  async function backfill(mgr, folder) {
+    ImapFlow.mockImplementation(function () { return clientFor(folder); });
+    const pending = ImapManager.prototype.backfillMessages.call(mgr, acct, folder);
+    await vi.runAllTimersAsync();
+    await pending;
+  }
+  for (const mode of ['sync', 'backfill']) {
+    for (const order of [['INBOX', sent], [sent, 'INBOX'], ['INBOX', 'Projects']]) {
+      it(`${mode} preserves both memberships in order ${order.join(' -> ')}`, async () => {
+        const mgr = manager();
+        const run = mode === 'sync' ? sync : backfill;
+        for (const folder of order) await run(mgr, folder);
+        expect(rows.map(r => r.folder).sort()).toEqual([...order].sort());
+        for (const folder of order) await run(mgr, folder);
+        expect(rows).toHaveLength(2);
+      });
+    }
+  }
+  it('repairs an older INBOX hole even when cached counts and maximum UID look complete', async () => {
+    serverUids = [1, 2];
+    rows = [{ folder: 'INBOX', uid: 2 }, { folder: 'INBOX', uid: 3 },
+      { folder: sent, uid: 10, messageId: '<self@example.com>' }];
+    await backfill(manager(), 'INBOX');
+    expect(rows).toContainEqual(expect.objectContaining({ folder: 'INBOX', uid: 1 }));
+    expect(rows).toContainEqual(expect.objectContaining({ folder: sent, uid: 10 }));
+  });
+  for (const host of ['imap.example.com', 'imap.purelymail.com', 'imap.mail.me.com']) {
+    for (const mode of ['sync', 'backfill']) {
+      it(`${mode} preserves shared Message-IDs across folders on ${host}`, async () => {
+        acct.imap_host = host;
+        const mgr = manager();
+        const run = mode === 'sync' ? sync : backfill;
+        await run(mgr, 'INBOX');
+        await run(mgr, 'Sent');
+        expect(rows.map(r => r.folder).sort()).toEqual(['INBOX','Sent']);
+        await run(mgr,'INBOX');
+        expect(rows).toHaveLength(2);
+      });
+      it(`${mode} preserves two live UIDs with the same Message-ID inside one folder on ${host}`, async () => {
+        acct.imap_host = host;
+        serverUids = [1,2];
+        const mgr = manager();
+        const run = mode === 'sync' ? sync : backfill;
+        await run(mgr, 'INBOX');
+        expect(rows.map(r => r.uid).sort()).toEqual([1,2]);
+        await run(mgr, 'INBOX');
+        expect(rows).toHaveLength(2);
+      });
+    }
+  }
+});
+
+describe('Gmail staleness membership check (#418)', () => {
+  beforeEach(() => query.mockReset());
+  it('does not let a Sent copy mask a missing INBOX UID', async () => {
+    query.mockResolvedValue({ rows: [] });
+    const account = { id: 'a418', imap_host: 'imap.gmail.com' };
+    expect(await countMissingInboxCopies(account, [{ uid: 7, messageId: 'self@example.com' }])).toBe(1);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("folder = 'INBOX'"), ['a418', [7]]);
+  });
+  it('compares exact INBOX UIDs and handles pg bigint strings', async () => {
+    query.mockResolvedValue({ rows: [{ uid: '7' }] });
+    expect(await countMissingInboxCopies({ id: 'a418', imap_host: 'imap.gmail.com' }, [
+      { uid: 7, messageId: 'same' }, { uid: 8, messageId: 'same' },
+    ])).toBe(1);
+  });
+  it('uses exact UID membership on non-Gmail providers too', async () => {
+    query.mockResolvedValue({ rows: [{ uid: '7' }] });
+    expect(await countMissingInboxCopies({ id: 'a418', imap_host: 'imap.example.com' }, [
+      { uid: 7, messageId: 'same' }, { uid: 8, messageId: null },
+    ])).toBe(1);
+  });
+  it('does not count phantom search results that FETCH did not return', async () => {
+    expect(await countMissingInboxCopies({ imap_host: 'imap.gmail.com' }, [])).toBe(0);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('folder integrity reconciliation safety', () => {
+  const acct = { id: 'count-test', user_id: 'u', imap_host: 'imap.example.com' };
+  const observed = { uidValidity: 8n, uidNext: 20, highestModseq: 22n };
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 0 }); });
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+  function setup(uids, exists = uids.length) {
+    const lock = { release: vi.fn() };
+    const client = { mailbox: { exists, uidValidity: 8n }, getMailboxLock: async () => lock, search: async () => uids,
+      fetch: async function* () { for (const uid of uids) yield { uid, flags: new Set() }; } };
+    const mgr = Object.assign(Object.create(ImapManager.prototype), {
+      _withCountClient: async (_a, fn) => fn(client), syncMessages: vi.fn().mockResolvedValue({}),
+      _applyFlagUpdates: vi.fn().mockResolvedValue(0), _isMoveUidGuarded: () => false,
+      broadcast: vi.fn(), backfillMessages: vi.fn(), _bgConnSem: createKeyedSemaphore(2),
+    });
+    return { mgr, client, lock };
+  }
+  it('never deletes or checkpoints after a truncated flag fetch', async () => {
+    const { mgr, lock } = setup([1], 2);
+    await expect(mgr._refreshObservedFolder(acct, 'Sent', observed)).rejects.toThrow('Incomplete');
+    expect(query.mock.calls.some(([sql]) => /DELETE|status_synced_at/.test(sql))).toBe(false);
+    expect(lock.release).toHaveBeenCalledOnce();
+  });
+  it('rejects failed FETCH instead of treating the collected prefix as complete', async () => {
+    const { mgr, client } = setup([1], 2);
+    client.fetch = async function* () { yield { uid: 1, flags: new Set() }; throw new Error('Disconnected'); };
+    await expect(mgr._refreshObservedFolder(acct, 'Sent', observed)).rejects.toThrow('Disconnected');
+    expect(query).not.toHaveBeenCalled();
+  });
+  it.each([false, [2]])('does not delete on unavailable or equal-count changed membership (%s)', async response => {
+    const { mgr, client } = setup([1]);
+    client.search = async () => response;
+    await expect(mgr._refreshObservedFolder(acct, 'Sent', observed)).rejects.toThrow();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('a missing old UID schedules backfill without claiming a completed sync', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { mgr } = setup([1, 2]);
+    query.mockResolvedValue({ rows: [{ uid: '2' }] });
+    await mgr._refreshObservedFolder(acct, 'Sent', observed);
+    expect(mgr.backfillMessages).toHaveBeenCalledWith(acct, 'Sent');
+    expect(query.mock.calls.some(([sql]) => sql.includes('status_synced_at'))).toBe(false);
+    expect(mgr._bgConnSem.activeCount(acct.imap_host)).toBe(0);
+  });
+  it('checkpoints only after fully verified membership', async () => {
+    const { mgr } = setup([1, 2]);
+    query.mockResolvedValue({ rows: [{ uid: '1' }, { uid: '2' }] });
+    await mgr._refreshObservedFolder(acct, 'Sent', observed);
+    const checkpoint = query.mock.calls.find(([sql]) => sql.includes('status_synced_at'));
+    expect(checkpoint[1]).toEqual([acct.id, 'Sent', 20, '8', '22']);
+    expect(checkpoint[0]).toContain('uid_validity=$4');
+  });
+  it('a rebuilt mailbox cannot use the previous epoch observation as a checkpoint', async () => {
+    const { mgr, client } = setup([1]);
+    client.mailbox.uidValidity = 9n;
+    await mgr._refreshObservedFolder(acct, 'Sent', observed);
+    expect(query).not.toHaveBeenCalled();
+  });
+  it('only removes old unguarded cached rows from a verified empty folder and checks the UID epoch in SQL', async () => {
+    const { mgr } = setup([]);
+    mgr._isMoveUidGuarded = (_a, _f, uid) => uid === 2;
+    query.mockResolvedValue({ rows: [{ uid: '1', synced_at: new Date(0) }, { uid: '2', synced_at: new Date(0) }, { uid: '3', synced_at: new Date(Date.now() + 60000) }], rowCount: 1 });
+    await mgr._refreshObservedFolder(acct, 'Sent', observed);
+    const deletion = query.mock.calls.find(([sql]) => sql.startsWith('DELETE'));
+    expect(deletion[1][2]).toEqual([1]);
+    expect(deletion[0]).toContain('uid_validity=$5');
+  });
+  it('backs off unresolved membership without blocking other folders or advancing a checkpoint', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { mgr } = setup([]);
+    Object.assign(mgr, { _statusSyncBackoff: new Map(), _statusSyncRunning: new Set(), backfillRunning: new Set(), onDemandSyncing: new Set(),
+      _refreshObservedFolder: vi.fn().mockResolvedValue(false) });
+    expect(mgr._queueObservedFolder(acct, 'INBOX', observed)).toBe(true);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mgr._queueObservedFolder(acct, 'INBOX', observed)).toBe(false);
+    expect(mgr._queueObservedFolder(acct, 'Sent', observed)).toBe(true);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(query.mock.calls.some(([sql]) => sql.includes('status_synced_at'))).toBe(false);
+    const key = `${acct.id}:INBOX`;
+    for (let i = 0; i < 10; i++) mgr._noteIntegrityRetry(key);
+    expect(mgr._statusSyncBackoff.get(key).until-Date.now()).toBe(15*60000);
+  });
+
+  it('connection admission timeout removes its waiter without consuming a later released slot', async () => {
+    vi.useFakeTimers();
+    const sem = createKeyedSemaphore(1);
+    await sem.acquire('host');
+    const failed = expect(sem.acquire('host', { timeoutMs: 10 })).rejects.toThrow('admission timed out');
+    await vi.advanceTimersByTimeAsync(10);
+    await failed;
+    expect(sem.waitingCount('host')).toBe(0);
+    sem.release('host');
+    expect(sem.activeCount('host')).toBe(0);
+    await sem.acquire('host');
+    expect(sem.activeCount('host')).toBe(1);
+    sem.release('host');
+  });
+});
+
+
+describe('backfill optional metadata fallback', () => {
+  const query = { uid: true, flags: true, envelope: true, bodyStructure: true, headers: true };
+  const collect = async iterator => { const out=[]; for await (const item of iterator) out.push(item.uid); return out; };
+  it('retries only omitted UIDs after the full metadata fetch is drained', async () => {
+    let drained=false;
+    const client = { fetch: vi.fn((range) => (async function* () {
+      if (range==='1,2,3') { yield {uid:1}; drained=true; }
+      else { expect(drained).toBe(true); yield {uid:2}; yield {uid:3}; }
+    })()) };
+    expect(await collect(fetchBackfillBatch(client,[1,2,3],query))).toEqual([1,2,3]);
+    expect(client.fetch.mock.calls[1]).toEqual(['2,3',{uid:true,flags:true,envelope:true},{uid:true}]);
+  });
+  it('does not add another request for a complete metadata response', async () => {
+    const client = { fetch: vi.fn(async function* () { yield {uid:1}; }) };
+    expect(await collect(fetchBackfillBatch(client,[1],query))).toEqual([1]);
+    expect(client.fetch).toHaveBeenCalledTimes(1);
+  });
+  it('never invents rows for unfetchable UIDs or accepts unrequested/duplicate responses', async () => {
+    const client = { fetch: vi.fn(async function* () { yield {uid:1}; yield {uid:1}; yield {uid:99}; }) };
+    expect(await collect(fetchBackfillBatch(client,[1,2],query))).toEqual([1]);
+    expect(client.fetch).toHaveBeenCalledTimes(2);
+  });
+  it('propagates transport failure rather than declaring a partial batch complete', async () => {
+    const client = { fetch: vi.fn(async function* () { yield {uid:1}; throw new Error('Disconnected'); }) };
+    await expect(collect(fetchBackfillBatch(client,[1,2],query))).rejects.toThrow('Disconnected');
+    expect(client.fetch).toHaveBeenCalledTimes(1);
   });
 });

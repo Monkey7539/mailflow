@@ -439,10 +439,21 @@ export default function MailApp() {
         .catch(console.error);
     };
     refreshCounts();
-    // 5-minute fallback poll — WebSocket sync_complete events handle the common case;
-    // this covers stale counts when the WebSocket is temporarily disconnected.
-    const interval = setInterval(refreshCounts, 300000);
-    return () => clearInterval(interval);
+    // Also expire stale indicators when the socket is unavailable.
+    const interval = setInterval(() => {
+      refreshCounts();
+      const state = useStore.getState();
+      for (const accountId of Object.keys(state.folders)) {
+        api.getFolders(accountId).then(f => useStore.getState().setFolders(accountId, f)).catch(() => {});
+      }
+    }, 60000);
+    window.addEventListener('mailflow:counts_refresh', refreshCounts);
+    window.addEventListener('online', refreshCounts);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('mailflow:counts_refresh', refreshCounts);
+      window.removeEventListener('online', refreshCounts);
+    };
   }, [setAccounts, setUnreadCounts, setTodoistConnected]);
 
   // WebSocket-independent periodic refresh of the open message list, at the user's chosen sync
