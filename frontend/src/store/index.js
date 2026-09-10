@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../utils/api.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
+import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
 import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT } from '../fonts.js';
 import { applyLayout, normalizeLayout } from '../layouts.js';
@@ -190,8 +191,25 @@ export const useStore = create((set, get) => ({
   // Accounts
   accounts: [],
   accountsReady: false, // true once the initial getAccounts() call has resolved
-  setAccounts: (accounts) => set(state => ({ accounts, accountsReady: true,
-    unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts) })),
+  setAccounts: (accounts) => {
+    // Every refresh of the account list is also the moment to notice that the selected
+    // account has been deleted. Without this the client stays pinned to a dead id forever,
+    // because localStorage restores it on every load. See utils/accountScope.js.
+    const previous = get().selectedAccountId;
+    const selectedAccountId = resolveSelectedAccount(accounts, previous);
+    const reselected = selectedAccountId !== previous;
+    if (reselected) {
+      // Mirror setSelectedAccount's persistence so the fallback survives a reload.
+      localStorage.setItem('mailflow_selected_account', '');
+      localStorage.setItem('mailflow_selected_folder', 'INBOX');
+    }
+    set(state => ({
+      accounts, accountsReady: true, selectedAccountId,
+      ...(reselected ? { selectedFolder: 'INBOX' } : {}),
+      folders: pruneFolders(state.folders, accounts),
+      unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts),
+    }));
+  },
   updateAccount: (id, updates) => set(state => {
     const accounts = state.accounts.map(a => a.id === id ? { ...a, ...updates } : a);
     return { accounts, unreadCounts: displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, accounts) };
