@@ -260,6 +260,39 @@
       "error": "Classificazione IA fallita."
     }
   },
+  "trust": {
+    "ok": "Controlli sul mittente superati",
+    "caution": "Esamina con attenzione questo mittente",
+    "danger": "Questo messaggio sembra sospetto",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "superato",
+      "fail": "fallito",
+      "none": "nessuno",
+      "unknown": "sconosciuto"
+    },
+    "spamScore": "Punteggio spam {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "Il nome \"{{name}}\" non corrisponde all'indirizzo {{email}}",
+      "envelopeMismatch": "Inviato per conto di {{from}} da un altro dominio ({{envelope}})",
+      "replyToMismatch": "Le risposte andrebbero a un altro dominio ({{replyTo}})",
+      "firstTimeSender": "Primo messaggio da questo mittente",
+      "authFailed": "Autenticazione email non riuscita ({{checks}})",
+      "spamHigh": "Segnalato come spam dal server di posta ({{score}} / {{threshold}})",
+      "spamElevated": "Punteggio spam elevato sul server ({{score}} / {{threshold}})",
+      "phishSymbols": "Segnali di phishing o spoofing dal server: {{symbols}}",
+      "urgentUnfamiliar": "Oggetto dal tono urgente da un mittente sconosciuto"
+    },
+    "attachment": {
+      "block": "Tipo di file pericoloso (.{{ext}}): può eseguire codice sul computer",
+      "warn": "Tipo di file rischioso (.{{ext}}): può contenere macro o una pagina di accesso falsa",
+      "notice": "Archivio: il contenuto non può essere ispezionato",
+      "doubleExt": "Estensione nascosta: .{{ext}} — il tipo reale è l'ultimo",
+      "confirm": "fai di nuovo clic per scaricare comunque"
+    }
+  },
   "messageList": {
     "search": "Cerca…",
     "unread": "Non letti",

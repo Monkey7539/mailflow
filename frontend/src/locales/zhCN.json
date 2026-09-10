@@ -260,6 +260,39 @@
       "error": "AI 分类失败。"
     }
   },
+  "trust": {
+    "ok": "发件人检查通过",
+    "caution": "请仔细核实此发件人",
+    "danger": "此邮件看起来可疑",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "通过",
+      "fail": "失败",
+      "none": "无",
+      "unknown": "未知"
+    },
+    "spamScore": "垃圾邮件评分 {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "显示名称“{{name}}”与地址 {{email}} 不符",
+      "envelopeMismatch": "由另一个域名（{{envelope}}）代表 {{from}} 发送",
+      "replyToMismatch": "回复将发送到另一个域名（{{replyTo}}）",
+      "firstTimeSender": "此发件人的第一封邮件",
+      "authFailed": "邮件身份验证失败（{{checks}}）",
+      "spamHigh": "被邮件服务器标记为垃圾邮件（{{score}} / {{threshold}}）",
+      "spamElevated": "邮件服务器上的垃圾邮件评分偏高（{{score}} / {{threshold}}）",
+      "phishSymbols": "邮件服务器的钓鱼或伪造信号：{{symbols}}",
+      "urgentUnfamiliar": "来自陌生发件人的紧急语气主题"
+    },
+    "attachment": {
+      "block": "危险文件类型（.{{ext}}）— 可能在您的电脑上运行代码",
+      "warn": "有风险的文件类型（.{{ext}}）— 可能包含宏或伪造的登录页面",
+      "notice": "压缩包 — 无法检查其内容",
+      "doubleExt": "隐藏扩展名：.{{ext}} — 真实类型为最后一个",
+      "confirm": "再次点击仍然下载"
+    }
+  },
   "messageList": {
     "search": "搜索…",
     "unread": "未读",

@@ -304,6 +304,10 @@ const SAME_VALUE_ALLOWED = {
   // ── Email categorization ───────────────────────────────────────────────────
   // URL placeholder — identical in all locales
   'admin.categories.urlSubPh': 'any',
+  // SPF / DKIM / DMARC — protocol acronyms, identical in all locales
+  'trust.auth.spf': 'any',
+  'trust.auth.dkim': 'any',
+  'trust.auth.dmarc': 'any',
   // "Primary" — "Principal" in both es and fr
   'messageList.categories.primary': [['es', 'fr']],
   // "Newsletter(s)" — en and fr both use "Newsletters"; de and it both use "Newsletter"
@@ -417,6 +421,17 @@ const DYNAMIC_KEYS = new Set([
   // appear as literals; the other three do via the tab pills).
   'gtd.state.watch',
   'gtd.state.delegated',
+  // Sender-trust strip (MessagePane SenderTrustStrip): level, auth state and
+  // flag ids arrive from the backend assessment and are looked up as
+  // t(`trust.${level}`), t(`trust.auth.${k}`), t(`trust.flags.${f.id}`);
+  // attachment badges look up t(`trust.attachment.${risk.level}`).
+  'trust.ok', 'trust.caution', 'trust.danger',
+  'trust.auth.spf', 'trust.auth.dkim', 'trust.auth.dmarc',
+  'trust.auth.pass', 'trust.auth.fail', 'trust.auth.none', 'trust.auth.unknown',
+  'trust.flags.displayNameMismatch', 'trust.flags.envelopeMismatch', 'trust.flags.replyToMismatch',
+  'trust.flags.firstTimeSender', 'trust.flags.authFailed', 'trust.flags.spamHigh',
+  'trust.flags.spamElevated', 'trust.flags.phishSymbols', 'trust.flags.urgentUnfamiliar',
+  'trust.attachment.block', 'trust.attachment.warn', 'trust.attachment.notice',
 ]);
 
 // JSX attribute names whose values must never be plain strings — always t().

@@ -260,6 +260,39 @@
       "error": "AI classification failed."
     }
   },
+  "trust": {
+    "ok": "Sender checks passed",
+    "caution": "Review this sender carefully",
+    "danger": "This message looks suspicious",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "pass",
+      "fail": "fail",
+      "none": "none",
+      "unknown": "n/a"
+    },
+    "spamScore": "Spam score {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "Display name \"{{name}}\" does not match the address {{email}}",
+      "envelopeMismatch": "Sent on behalf of {{from}} by a different domain ({{envelope}})",
+      "replyToMismatch": "Replies would go to a different domain ({{replyTo}})",
+      "firstTimeSender": "First message from this sender",
+      "authFailed": "Email authentication failed ({{checks}})",
+      "spamHigh": "Flagged as spam by the mail server ({{score}} / {{threshold}})",
+      "spamElevated": "Elevated spam score on the mail server ({{score}} / {{threshold}})",
+      "phishSymbols": "Mail server phishing or spoofing signals: {{symbols}}",
+      "urgentUnfamiliar": "Urgent-sounding subject from an unfamiliar sender"
+    },
+    "attachment": {
+      "block": "Dangerous file type (.{{ext}}) — can run code on your computer",
+      "warn": "Risky file type (.{{ext}}) — may contain macros or a fake login page",
+      "notice": "Archive — contents cannot be inspected",
+      "doubleExt": "Hidden extension: .{{ext}} — the real type is the last one",
+      "confirm": "click again to download anyway"
+    }
+  },
   "messageList": {
     "search": "Search…",
     "unread": "Unread",

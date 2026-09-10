@@ -262,6 +262,39 @@
       "error": "Klasyfikowanie za pomocą AI nie powiodło się."
     }
   },
+  "trust": {
+    "ok": "Kontrole nadawcy zaliczone",
+    "caution": "Uważnie sprawdź tego nadawcę",
+    "danger": "Ta wiadomość wygląda podejrzanie",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "poprawny",
+      "fail": "błąd",
+      "none": "brak",
+      "unknown": "nieznany"
+    },
+    "spamScore": "Wynik spamu {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "Wyświetlana nazwa „{{name}}” nie pasuje do adresu {{email}}",
+      "envelopeMismatch": "Wysłano w imieniu {{from}} z innej domeny ({{envelope}})",
+      "replyToMismatch": "Odpowiedzi trafiłyby do innej domeny ({{replyTo}})",
+      "firstTimeSender": "Pierwsza wiadomość od tego nadawcy",
+      "authFailed": "Uwierzytelnianie e-maila nie powiodło się ({{checks}})",
+      "spamHigh": "Oznaczone jako spam przez serwer pocztowy ({{score}} / {{threshold}})",
+      "spamElevated": "Podwyższony wynik spamu na serwerze ({{score}} / {{threshold}})",
+      "phishSymbols": "Sygnały phishingu lub podszywania z serwera: {{symbols}}",
+      "urgentUnfamiliar": "Pilnie brzmiący temat od nieznanego nadawcy"
+    },
+    "attachment": {
+      "block": "Niebezpieczny typ pliku (.{{ext}}) — może uruchomić kod na komputerze",
+      "warn": "Ryzykowny typ pliku (.{{ext}}) — może zawierać makra lub fałszywą stronę logowania",
+      "notice": "Archiwum — zawartości nie można sprawdzić",
+      "doubleExt": "Ukryte rozszerzenie: .{{ext}} — prawdziwy typ to ostatni",
+      "confirm": "kliknij ponownie, aby mimo to pobrać"
+    }
+  },
   "messageList": {
     "search": "Szukaj…",
     "unread": "Nieprzeczytane",

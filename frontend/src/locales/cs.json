@@ -161,6 +161,39 @@
     "backToAccounts": "Zpět k účtům",
     "updateAvailable": "Je dostupná aktualizace: v{{version}}"
   },
+  "trust": {
+    "ok": "Kontroly odesílatele prošly",
+    "caution": "Tohoto odesílatele pečlivě prověřte",
+    "danger": "Tato zpráva vypadá podezřele",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "v pořádku",
+      "fail": "selhalo",
+      "none": "žádné",
+      "unknown": "neznámé"
+    },
+    "spamScore": "Skóre spamu {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "Zobrazované jméno „{{name}}“ neodpovídá adrese {{email}}",
+      "envelopeMismatch": "Odesláno jménem {{from}} z jiné domény ({{envelope}})",
+      "replyToMismatch": "Odpovědi by šly na jinou doménu ({{replyTo}})",
+      "firstTimeSender": "První zpráva od tohoto odesílatele",
+      "authFailed": "Ověření e-mailu selhalo ({{checks}})",
+      "spamHigh": "Označeno poštovním serverem jako spam ({{score}} / {{threshold}})",
+      "spamElevated": "Zvýšené skóre spamu na serveru ({{score}} / {{threshold}})",
+      "phishSymbols": "Signály phishingu nebo podvržení ze serveru: {{symbols}}",
+      "urgentUnfamiliar": "Naléhavě znějící předmět od neznámého odesílatele"
+    },
+    "attachment": {
+      "block": "Nebezpečný typ souboru (.{{ext}}) – může spustit kód v počítači",
+      "warn": "Rizikový typ souboru (.{{ext}}) – může obsahovat makra nebo falešnou přihlašovací stránku",
+      "notice": "Archiv – obsah nelze zkontrolovat",
+      "doubleExt": "Skrytá přípona: .{{ext}} – skutečný typ je ten poslední",
+      "confirm": "kliknutím znovu přesto stáhnete"
+    }
+  },
   "messageList": {
     "search": "Hledat…",
     "unread": "Nepřečtené",

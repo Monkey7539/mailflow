@@ -15,6 +15,7 @@ import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
+import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
@@ -23,6 +24,48 @@ const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 // Module-level regex so the spam-name heuristic isn't recompiled on every
 // render — same heuristic as ContextMenu.jsx, both files read this constant.
 const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|posta\s*indesiderata)/i;
+
+// Sender-trust strip: the mail server's own auth/spam verdicts plus header
+// heuristics (backend senderTrust.js). ok → one muted line; caution/danger →
+// a notice listing the specific flags so the concern is checkable, not vague.
+function SenderTrustStrip({ trust, t }) {
+  if (!trust) return null;
+  const { level, auth, spam, flags } = trust;
+  const authState = (v) => (
+    v === 'pass' ? 'pass'
+      : (v === 'fail' || v === 'softfail' || v === 'permerror') ? 'fail'
+        : v === 'none' ? 'none' : 'unknown'
+  );
+  const summary = ['spf', 'dkim', 'dmarc']
+    .map(k => `${t(`trust.auth.${k}`)} ${t(`trust.auth.${authState(auth[k])}`)}`)
+    .concat(spam ? [t('trust.spamScore', { score: spam.score, threshold: spam.threshold })] : [])
+    .join(' · ');
+  const flagText = (f) => t(`trust.flags.${f.id}`, { ...f, interpolation: { escapeValue: false } });
+  if (level === 'ok') {
+    return (
+      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 10, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ color: 'var(--green)' }}>✓</span>
+        <span>{t('trust.ok')}</span>
+        <span>· {summary}</span>
+        {flags.map(f => <span key={f.id}>· {flagText(f)}</span>)}
+      </div>
+    );
+  }
+  const color = level === 'danger' ? 'var(--red)' : 'var(--amber)';
+  return (
+    <div className="msg-notice" style={{
+      marginBottom: 10, padding: '9px 14px',
+      background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+      borderLeft: `3px solid ${color}`, borderRadius: 8, fontSize: 12,
+    }}>
+      <div style={{ fontWeight: 600, color, marginBottom: 4 }}>{t(`trust.${level}`)}</div>
+      <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
+        {flags.map(f => <li key={f.id}>{flagText(f)}</li>)}
+      </ul>
+      <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)' }}>{summary}</div>
+    </div>
+  );
+}
 
 // Lazy-load the div-renderer utilities so PostCSS is excluded from the flag-off
 // bundle. Rollup treats the import() calls inside this block as dead code when
@@ -1347,6 +1390,22 @@ ${bodyContent}
     return () => { Object.values(aiAbortRefs.current).forEach(c => c?.abort()); };
   }, []);
 
+  // Sender-trust assessment, fetched lazily per message (see SenderTrustStrip).
+  // riskArmed: a risky attachment needs a second click to download; the first
+  // arms the button and shows why.
+  const [senderTrust, setSenderTrust] = useState(null);
+  const [riskArmed, setRiskArmed] = useState(null);
+  useEffect(() => {
+    setSenderTrust(null);
+    setRiskArmed(null);
+    if (!selectedMessageId) return undefined;
+    let cancelled = false;
+    api.getSenderTrust(selectedMessageId)
+      .then(data => { if (!cancelled) setSenderTrust(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedMessageId]);
+
   const handleDownload = async (messageId, part, filename) => {
     setDownloadingPart(part);
     try {
@@ -2631,16 +2690,25 @@ ${bodyContent}
               )}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {attachments.map((att, i) => (
+              {attachments.map((att, i) => {
+                const risk = classifyAttachmentRisk(att.filename, att.type);
+                const risky = risk.level === 'block' || risk.level === 'warn';
+                const riskColor = risk.level === 'block' ? 'var(--red)' : risk.level === 'warn' ? 'var(--amber)' : 'var(--text-tertiary)';
+                const armed = riskArmed === att.part;
+                return (
                 <button
                   key={i}
-                  onClick={() => handleDownload(message.id, att.part, att.filename)}
+                  onClick={() => {
+                    if (risky && !armed) { setRiskArmed(att.part); return; }
+                    setRiskArmed(null);
+                    handleDownload(message.id, att.part, att.filename);
+                  }}
                   disabled={downloadingPart === att.part}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: '8px 12px', borderRadius: 8,
                     background: 'var(--bg-secondary)',
-                    border: '1px solid var(--border)',
+                    border: `1px solid ${risky ? riskColor : 'var(--border)'}`,
                     cursor: downloadingPart === att.part ? 'wait' : 'pointer',
                     color: 'var(--text-primary)',
                     transition: 'background 0.1s',
@@ -2660,6 +2728,14 @@ ${bodyContent}
                     <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                       {downloadingPart === att.part ? t('message.downloading') : formatBytes(att.size)}
                     </div>
+                    {risk.level !== 'ok' && (
+                      <div style={{ fontSize: 11, color: riskColor, fontWeight: risk.level === 'block' ? 600 : 400, whiteSpace: 'normal' }}>
+                        {risk.doubleExt
+                          ? t('trust.attachment.doubleExt', { ext: risk.doubleExt })
+                          : t(`trust.attachment.${risk.level}`, { ext: risk.ext })}
+                        {armed && ` — ${t('trust.attachment.confirm')}`}
+                      </div>
+                    )}
                   </div>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
                     stroke="var(--text-tertiary)" strokeWidth="2" style={{ flexShrink: 0 }}>
@@ -2668,7 +2744,8 @@ ${bodyContent}
                     <line x1="12" y1="15" x2="12" y2="3"/>
                   </svg>
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -2794,6 +2871,8 @@ ${bodyContent}
               </button>
             </div>
           )}
+
+          <SenderTrustStrip trust={senderTrust} t={t} />
 
           {/* AI classify banner — shown for messages with no category signal when AI is available */}
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
@@ -2977,6 +3056,7 @@ ${bodyContent}
               </button>
             </div>
           )}
+          <SenderTrustStrip trust={senderTrust} t={t} />
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
             <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',

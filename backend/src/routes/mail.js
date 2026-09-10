@@ -6,7 +6,8 @@ import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
-import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
+import { parseHeadersInput, snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
+import { assessSenderTrust } from '../services/senderTrust.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { listMessages } from '../services/messageService.js';
@@ -502,6 +503,51 @@ router.get('/messages/:id/body', async (req, res) => {
 });
 
 // Get full raw headers
+// Sender-trust assessment for the message pane: the mail server's own
+// authentication and spam verdicts (from the headers) plus header heuristics
+// and how often this sender has written before. Read-only; nothing is stored.
+router.get('/messages/:id/trust', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const result = await query(`
+    SELECT m.*, a.user_id, a.email_address AS account_email FROM messages m
+    JOIN email_accounts a ON m.account_id = a.id
+    WHERE m.id = $1 AND a.user_id = $2
+  `, [id, req.session.userId]);
+  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+  const message = result.rows[0];
+
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    let rawHeaders = '';
+    try {
+      rawHeaders = await imapManager.fetchHeaders(account, message.uid, message.folder);
+    } catch (fetchErr) {
+      console.warn('Trust headers IMAP fetch failed:', fetchErr.message);
+    }
+    if (!rawHeaders?.trim()) rawHeaders = buildHeadersFromMessage(message);
+
+    const prior = await query(
+      'SELECT COUNT(*) AS cnt FROM messages WHERE account_id = $1 AND lower(from_email) = lower($2) AND id <> $3 AND is_deleted = false',
+      [message.account_id, message.from_email || '', id]
+    );
+
+    res.json(assessSenderTrust({
+      headers: parseHeadersInput(rawHeaders),
+      fromName: message.from_name || '',
+      fromEmail: message.from_email || '',
+      subject: message.subject || '',
+      priorCount: parseInt(prior.rows[0]?.cnt ?? '0', 10),
+      accountEmail: message.account_email || '',
+    }));
+  } catch (err) {
+    console.error('Sender trust error:', err);
+    res.status(500).json({ error: 'Failed to assess sender' });
+  }
+});
+
 router.get('/messages/:id/headers', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });

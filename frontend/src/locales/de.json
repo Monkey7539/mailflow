@@ -260,6 +260,39 @@
       "error": "KI-Klassifizierung fehlgeschlagen."
     }
   },
+  "trust": {
+    "ok": "Absenderprüfungen bestanden",
+    "caution": "Diesen Absender sorgfältig prüfen",
+    "danger": "Diese Nachricht wirkt verdächtig",
+    "auth": {
+      "spf": "SPF",
+      "dkim": "DKIM",
+      "dmarc": "DMARC",
+      "pass": "bestanden",
+      "fail": "fehlgeschlagen",
+      "none": "keine",
+      "unknown": "unbekannt"
+    },
+    "spamScore": "Spam-Wert {{score}} / {{threshold}}",
+    "flags": {
+      "displayNameMismatch": "Anzeigename „{{name}}“ passt nicht zur Adresse {{email}}",
+      "envelopeMismatch": "Im Namen von {{from}} von einer anderen Domain gesendet ({{envelope}})",
+      "replyToMismatch": "Antworten gingen an eine andere Domain ({{replyTo}})",
+      "firstTimeSender": "Erste Nachricht dieses Absenders",
+      "authFailed": "E-Mail-Authentifizierung fehlgeschlagen ({{checks}})",
+      "spamHigh": "Vom Mailserver als Spam eingestuft ({{score}} / {{threshold}})",
+      "spamElevated": "Erhöhter Spam-Wert auf dem Mailserver ({{score}} / {{threshold}})",
+      "phishSymbols": "Phishing- oder Spoofing-Signale des Mailservers: {{symbols}}",
+      "urgentUnfamiliar": "Dringlich klingender Betreff von einem unbekannten Absender"
+    },
+    "attachment": {
+      "block": "Gefährlicher Dateityp (.{{ext}}) – kann Code auf Ihrem Computer ausführen",
+      "warn": "Riskanter Dateityp (.{{ext}}) – kann Makros oder eine gefälschte Anmeldeseite enthalten",
+      "notice": "Archiv – Inhalt kann nicht geprüft werden",
+      "doubleExt": "Versteckte Erweiterung: .{{ext}} – der echte Typ ist der letzte",
+      "confirm": "erneut klicken, um trotzdem herunterzuladen"
+    }
+  },
   "messageList": {
     "search": "Suchen…",
     "unread": "Ungelesen",
