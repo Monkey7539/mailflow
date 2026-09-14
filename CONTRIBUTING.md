@@ -54,7 +54,7 @@ chore: dependency updates, config changes, etc.
 - Default to no comments — only add one when the reason behind something would genuinely surprise a future reader
 - No half-finished implementations or feature flags for hypothetical future use
 - Backend: Node/Express with async/await; avoid adding new dependencies without discussion
-- Frontend: React with hooks; Tailwind for styling; avoid unnecessary abstraction
+- Frontend: React with hooks; styling is inline `style={{...}}` objects plus a few shared classes in `index.css` (Tailwind is configured but is not the prevailing convention); avoid unnecessary abstraction
 
 ## Reporting Bugs
 
