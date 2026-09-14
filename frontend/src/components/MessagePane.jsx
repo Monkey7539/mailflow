@@ -11,7 +11,7 @@ import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/p
 import DOMPurify from 'dompurify';
 import { BUILTIN_SUMMARIZE, summarizePromptForLocale } from '../aiActions.js';
 import { getResults, saveResult, removeResult } from '../aiResults.js';
-import { createAiRunRegistry } from '../utils/aiRunRegistry.js';
+import { aiRuns } from '../utils/aiRunRegistry.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
@@ -327,10 +327,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const moveBtnRef = useRef(null);
   const moreMenuRef = useRef(null);
   const aiMenuRef = useRef(null);
-  // In-flight AI actions, keyed by message AND action. Navigating away deliberately does not
-  // cancel them: the result is saved against the message it was started from, so letting the
-  // request finish is what makes it there when you come back (#428). See utils/aiRunRegistry.js.
-  const aiRunsRef = useRef(createAiRunRegistry());
+  // In-flight AI actions live in a module-level registry, keyed by message AND action, so they
+  // outlive this component. Navigating, closing a pop-out and changing layout all deliberately
+  // leave them running: the result is saved against the message it was started from, so letting
+  // the request finish is what puts it there when you return (#428). utils/aiRunRegistry.js.
   // The message currently on screen, read inside async callbacks that outlive a navigation.
   const viewingMsgIdRef = useRef(selectedMessageId);
   const scrollContainerRef = useRef(null);
@@ -1263,7 +1263,7 @@ ${bodyContent}
 
     const label = aiActionLabel(key, action.label);
     const msgId = selectedMessageId;
-    const ctrl = aiRunsRef.current.start(msgId, key, new AbortController());
+    const ctrl = aiRuns.start(msgId, key, new AbortController());
     // Only paint into the pane while the message this run belongs to is the one on screen.
     // A run that outlives a navigation still saves; the restore on return shows it.
     const applyIfViewing = (updater) => { if (viewingMsgIdRef.current === msgId) setAiResults(updater); };
@@ -1288,13 +1288,13 @@ ${bodyContent}
       if (err.name === 'AbortError') return;
       applyIfViewing(r => ({ ...r, [key]: { status: 'error', text: err.message, label } }));
     } finally {
-      aiRunsRef.current.finish(msgId, key);
+      aiRuns.finish(msgId, key);
     }
   };
 
   // Dismiss a pinned result box and drop its cached copy.
   const dismissAiResult = (key) => {
-    aiRunsRef.current.abort(selectedMessageId, key);
+    aiRuns.abort(selectedMessageId, key);
     removeResult(selectedMessageId, key);
     setAiResults(r => { const next = { ...r }; delete next[key]; return next; });
   };
@@ -1353,9 +1353,9 @@ ${bodyContent}
 
   useEffect(() => {
     api.ai.status().then(setAiStatus).catch(() => {});
-    // Unmount is the one place cancelling everything is right: nobody is waiting for it.
-    const runs = aiRunsRef.current;
-    return () => runs.abortAll();
+    // No abort on unmount: the pane also unmounts when a pop-out closes or the layout changes,
+    // and a run the user is still waiting for must survive that. Identity changes cancel runs
+    // instead, from the store, where logout and account switch are actually known about.
   }, []);
 
   const handleDownload = async (messageId, part, filename) => {

@@ -11,8 +11,10 @@
 //
 //   - re-running the SAME action on the SAME message supersedes the earlier run, so cancel it
 //   - dismissing a result cancels that run
-//   - closing the pane cancels everything, since nobody is waiting for it any more
-//   - merely looking at a different message cancels NOTHING
+//   - signing out or switching user cancels everything, because a run that outlived a logout
+//     would write the previous user's result into this device's cache
+//   - merely looking at a different message cancels NOTHING, and neither does closing a pop-out
+//     or changing layout: those unmount the pane, which is navigation wearing a different hat
 //
 // Keying by message AND action is what makes that possible. Keyed by action alone, starting
 // "summarize" on a second message would abort the first message's summarize, which is the same
@@ -44,7 +46,7 @@ export function createAiRunRegistry() {
       runs.delete(id);
     },
 
-    /** Cancel everything. Only correct on unmount: nobody can be waiting for the output. */
+    /** Cancel everything. For identity changes (logout, account switch, lock), not for unmount. */
     abortAll() {
       for (const controller of runs.values()) controller?.abort();
       runs.clear();
@@ -54,3 +56,7 @@ export function createAiRunRegistry() {
     get size() { return runs.size; },
   };
 }
+
+// Shared instance. Module-level on purpose: held in a component it would die with the pane, so
+// closing a pop-out or switching layout would cancel a run the user is still waiting for.
+export const aiRuns = createAiRunRegistry();

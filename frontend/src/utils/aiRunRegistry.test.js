@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAiRunRegistry } from './aiRunRegistry.js';
+import { createAiRunRegistry, aiRuns } from './aiRunRegistry.js';
 
 const ctrl = () => { const c = { aborted: false, abort() { this.aborted = true; } }; return c; };
 
@@ -47,7 +47,7 @@ describe('what must still be cancelled', () => {
     assert.equal(reg.size, 1);
   });
 
-  test('closing the pane cancels everything', () => {
+  test('signing out or locking cancels everything', () => {
     const reg = createAiRunRegistry();
     const a = reg.start('msg-1', 'summarize', ctrl());
     const b = reg.start('msg-2', 'translate', ctrl());
@@ -91,5 +91,23 @@ describe('bookkeeping', () => {
     reg.start('msg-1', 'summarize', null);
     reg.abortAll();
     assert.equal(reg.size, 0);
+  });
+});
+
+describe('the shared registry', () => {
+  test('is module-level, so a run outlives the pane that started it', () => {
+    // Held in a component ref it died on unmount, which happens when a pop-out closes or the
+    // layout changes — navigation wearing a different hat, and the same lost result.
+    const c = ctrl();
+    aiRuns.start('msg-1', 'summarize', c);
+    assert.equal(aiRuns.size, 1);
+    assert.equal(c.aborted, false);
+    aiRuns.abortAll();
+    assert.equal(aiRuns.size, 0);
+  });
+
+  test('the same instance is shared by every importer', async () => {
+    const again = await import('./aiRunRegistry.js');
+    assert.equal(again.aiRuns, aiRuns, 'the store and the pane must cancel the same runs');
   });
 });
