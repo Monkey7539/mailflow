@@ -209,7 +209,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   useEffect(() => {
     // Deliberately does NOT abort in-flight actions. They persist their own result against the
     // message they were started from, so leaving a message lets the work finish instead of
-    // discarding it (#428). Only dismissal, re-running the same action, and unmount cancel.
+    // discarding it (#428). Only dismissal, re-running the same action, and an identity change
+    // (logout, account switch, lock) cancel a run. Unmount deliberately does not.
     viewingMsgIdRef.current = selectedMessageId;
     setShowAiMenu(false);
     // Restore persisted results (#204) so they reappear instead of vanishing.
