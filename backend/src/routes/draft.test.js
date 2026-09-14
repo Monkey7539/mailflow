@@ -77,6 +77,39 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(meta.messageId).toMatch(/^<[0-9a-f]+@mailflow\.sh>$/);
   });
 
+  it('marks the signature block so reopening can lift it back out (#432)', async () => {
+    // Without the marker the signature stays in the body on reopen and compose renders a second
+    // one, so every save/reopen cycle added another copy.
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        accountId: ACCOUNT_ID, to: ['mike@scanlan.ai'], cc: [], subject: 's',
+        body: 'hello mike', bodyIsHtml: false, editedSignature: '<b>Matt</b>',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const [, , , meta] = imapManager.upsertDraftMessageRecord.mock.calls[0];
+    expect(meta.bodyHtml).toContain('data-mailflow-signature="1"');
+    expect(meta.bodyHtml).toContain('<b>Matt</b>');
+    // Exactly one marked block: the splitter refuses to lift an ambiguous draft.
+    expect(meta.bodyHtml.match(/data-mailflow-signature/g)).toHaveLength(1);
+  });
+
+  it('writes no signature block when the draft has no signature', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        accountId: ACCOUNT_ID, to: ['mike@scanlan.ai'], cc: [], subject: 's',
+        body: 'hello mike', bodyIsHtml: false, editedSignature: '',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const [, , , meta] = imapManager.upsertDraftMessageRecord.mock.calls[0];
+    expect(meta.bodyHtml).not.toContain('data-mailflow-signature');
+  });
+
   it('still returns success if the local row persistence throws (append already stored it)', async () => {
     imapManager.upsertDraftMessageRecord.mockRejectedValueOnce(new Error('db down'));
     const res = await fetch(`${base}/api/mail/draft`, {

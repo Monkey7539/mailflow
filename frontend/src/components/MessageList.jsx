@@ -8,6 +8,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
+import { splitDraftSignature } from '../utils/draftSignature.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
@@ -2327,6 +2328,14 @@ export default function MessageList() {
     if (isDraftsFolder) {
       try {
         const bodyData = await api.getMessageBody(message.id);
+        // A saved draft is one document: body, signature, then any quoted text. Handing all of
+        // it over as the body left the signature inline AND had compose render a fresh one, so
+        // every save/reopen cycle added another copy (#432). Lift the signature back out, or
+        // suppress compose's own when it is present but cannot be lifted safely.
+        const raw = bodyData.html || bodyData.text || '';
+        const { body, signature, inline } = bodyData.html
+          ? splitDraftSignature(raw)
+          : { body: raw, signature: null, inline: false };
         openCompose({
           accountId: message.account_id,
           draftUid: message.uid,
@@ -2334,8 +2343,9 @@ export default function MessageList() {
           to: formatAddressArray(message.to_addresses),
           cc: formatAddressArray(message.cc_addresses),
           subject: message.subject || '',
-          body: bodyData.html || bodyData.text || '',
+          body,
           bodyIsHtml: !!bodyData.html,
+          ...(signature !== null ? { signature } : inline ? { signature: '' } : {}),
         });
       } catch (err) {
         console.error('Failed to open draft:', err.message);
