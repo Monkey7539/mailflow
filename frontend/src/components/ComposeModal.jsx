@@ -610,6 +610,17 @@ export default function ComposeModal() {
       prevFromValueRef.current = fromValue;
       signatureInitializedRef.current = false;
     }
+    // A reopened draft supplies the signature it was saved with ('' meaning "already in the
+    // body, render none"). Honour it for the first initialisation only, so switching the From
+    // identity afterwards still swaps in that account's signature. See utils/draftSignature.js.
+    if (!signatureInitializedRef.current && !fromValueChanged && composeData?.signature !== undefined) {
+      signatureInitializedRef.current = true;
+      const draftSig = DOMPurify.sanitize(composeData.signature);
+      if (signatureRef.current) signatureRef.current.innerHTML = draftSig;
+      signatureContentRef.current = draftSig;
+      setPlainSig(stripHtml(composeData.signature));
+      return;
+    }
     if (!signatureInitializedRef.current && fromSignature != null) {
       signatureInitializedRef.current = true;
       const sanitized = DOMPurify.sanitize(fromSignature);
@@ -620,7 +631,7 @@ export default function ComposeModal() {
       signatureContentRef.current = '';
       setPlainSig('');
     }
-  }, [fromValue, fromSignature]);
+  }, [fromValue, fromSignature, composeData?.signature]);
 
   // Initialise quoted HTML contentEditable once on mount (ref-based to avoid React cursor conflicts)
   useEffect(() => {
