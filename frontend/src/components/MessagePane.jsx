@@ -11,6 +11,7 @@ import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/p
 import DOMPurify from 'dompurify';
 import { BUILTIN_SUMMARIZE, summarizePromptForLocale } from '../aiActions.js';
 import { getResults, saveResult, removeResult } from '../aiResults.js';
+import { createAiRunRegistry } from '../utils/aiRunRegistry.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
 import { measureContentHeight, createHeightController, forceEagerImages } from '../utils/emailFrameHeight.js';
@@ -206,9 +207,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [selectedMessageId]);
 
   useEffect(() => {
-    // Abort any actions still streaming for the previous message.
-    Object.values(aiAbortRefs.current).forEach(c => c?.abort());
-    aiAbortRefs.current = {};
+    // Deliberately does NOT abort in-flight actions. They persist their own result against the
+    // message they were started from, so leaving a message lets the work finish instead of
+    // discarding it (#428). Only dismissal, re-running the same action, and unmount cancel.
+    viewingMsgIdRef.current = selectedMessageId;
     setShowAiMenu(false);
     // Restore persisted results (#204) so they reappear instead of vanishing.
     const saved = getResults(selectedMessageId);
@@ -325,8 +327,12 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const moveBtnRef = useRef(null);
   const moreMenuRef = useRef(null);
   const aiMenuRef = useRef(null);
-  // One AbortController per in-flight action, keyed by action key.
-  const aiAbortRefs = useRef({});
+  // In-flight AI actions, keyed by message AND action. Navigating away deliberately does not
+  // cancel them: the result is saved against the message it was started from, so letting the
+  // request finish is what makes it there when you come back (#428). See utils/aiRunRegistry.js.
+  const aiRunsRef = useRef(createAiRunRegistry());
+  // The message currently on screen, read inside async callbacks that outlive a navigation.
+  const viewingMsgIdRef = useRef(selectedMessageId);
   const scrollContainerRef = useRef(null);
   const iframeRef = useRef(null);
   const roRef = useRef(null);
@@ -1256,11 +1262,12 @@ ${bodyContent}
     if (!textContent) return;
 
     const label = aiActionLabel(key, action.label);
-    aiAbortRefs.current[key]?.abort();
-    const ctrl = new AbortController();
-    aiAbortRefs.current[key] = ctrl;
     const msgId = selectedMessageId;
-    setAiResults(r => ({ ...r, [key]: { status: 'loading', text: '', label } }));
+    const ctrl = aiRunsRef.current.start(msgId, key, new AbortController());
+    // Only paint into the pane while the message this run belongs to is the one on screen.
+    // A run that outlives a navigation still saves; the restore on return shows it.
+    const applyIfViewing = (updater) => { if (viewingMsgIdRef.current === msgId) setAiResults(updater); };
+    applyIfViewing(r => ({ ...r, [key]: { status: 'loading', text: '', label } }));
     // The built-in Summarize prompt is uneditable, so steer its output to the
     // user's UI language (#255). Custom actions keep their author's prompt as-is.
     const promptText = action.builtin ? summarizePromptForLocale(i18n.language) : action.prompt;
@@ -1271,21 +1278,23 @@ ${bodyContent}
       }], {
         signal: ctrl.signal,
         onDelta: (text) => {
-          setAiResults(r => ({ ...r, [key]: { status: 'loading', text, label } }));
+          applyIfViewing(r => ({ ...r, [key]: { status: 'loading', text, label } }));
         },
       });
-      setAiResults(r => ({ ...r, [key]: { status: 'done', text: fullText, label } }));
-      // Persist only completed results, keyed to the message it ran against.
+      applyIfViewing(r => ({ ...r, [key]: { status: 'done', text: fullText, label } }));
+      // Persist unconditionally: this is the whole point when the user has navigated away.
       if (fullText) saveResult(msgId, key, fullText, label);
     } catch (err) {
       if (err.name === 'AbortError') return;
-      setAiResults(r => ({ ...r, [key]: { status: 'error', text: err.message, label } }));
+      applyIfViewing(r => ({ ...r, [key]: { status: 'error', text: err.message, label } }));
+    } finally {
+      aiRunsRef.current.finish(msgId, key);
     }
   };
 
   // Dismiss a pinned result box and drop its cached copy.
   const dismissAiResult = (key) => {
-    aiAbortRefs.current[key]?.abort();
+    aiRunsRef.current.abort(selectedMessageId, key);
     removeResult(selectedMessageId, key);
     setAiResults(r => { const next = { ...r }; delete next[key]; return next; });
   };
@@ -1344,7 +1353,9 @@ ${bodyContent}
 
   useEffect(() => {
     api.ai.status().then(setAiStatus).catch(() => {});
-    return () => { Object.values(aiAbortRefs.current).forEach(c => c?.abort()); };
+    // Unmount is the one place cancelling everything is right: nobody is waiting for it.
+    const runs = aiRunsRef.current;
+    return () => runs.abortAll();
   }, []);
 
   const handleDownload = async (messageId, part, filename) => {
