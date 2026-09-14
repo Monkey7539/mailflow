@@ -719,9 +719,36 @@ function unfoldIcsLines(raw) {
   return lines;
 }
 
-// RFC 5545 TEXT unescaping: \n → newline, and \\ \; \, → the literal char.
+// Splits a content line into name, parameters and value. Parameter values may
+// be quoted and contain ':' or ';' (TZID="(UTC-05:00) Eastern Time"), so only
+// separators outside quotes count. Returns null for a line with no value.
+function parseIcsLine(line) {
+  const segments = [];
+  let from = 0;
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') { inQuote = !inQuote; continue; }
+    if (inQuote || (c !== ';' && c !== ':')) continue;
+    segments.push(line.slice(from, i));
+    from = i + 1;
+    if (c === ':') {
+      const [name, ...paramParts] = segments;
+      const params = {};
+      for (const p of paramParts) {
+        const eq = p.indexOf('=');
+        if (eq > 0) params[p.slice(0, eq).trim().toUpperCase()] = p.slice(eq + 1).replace(/^"|"$/g, '');
+      }
+      return { name: name.trim().toUpperCase(), params, value: line.slice(from) };
+    }
+  }
+  return null;
+}
+
+// RFC 5545 TEXT unescaping in a single pass: \n or \N is a line break and \\ \;
+// \, are the literal character, so an escaped backslash before "n" stays "\n".
 function unescapeIcsText(value) {
-  return String(value || '').replace(/\\n/gi, '\n').replace(/\\([\\;,])/g, '$1');
+  return String(value || '').replace(/\\([nN\\;,])/g, (_, c) => (c === 'n' || c === 'N' ? '\n' : c));
 }
 
 function escapeHtml(s) {
@@ -752,6 +779,14 @@ function formatIcsDate(value) {
   return `${datePart}, ${formatIcsTime(Number(hh), Number(mm))}${/Z$/i.test(value) ? ' UTC' : ''}`;
 }
 
+// The day before a date-only value ("20260902" → "20260901").
+function previousIcsDay(value) {
+  const m = ICS_DT_RE.exec(value || '');
+  if (!m) return value || '';
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) - 1));
+  return day.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
 const ICS_METHOD_LABELS = {
   REQUEST: 'Meeting invitation',
   CANCEL: 'Meeting cancelled',
@@ -763,30 +798,39 @@ const ICS_METHOD_LABELS = {
 export function renderCalendarInvite(ics) {
   if (!/BEGIN:VCALENDAR/i.test(ics || '')) return null;
 
-  const props = {};
+  const props = Object.create(null);
   let method = '';
   let inEvent = false;
   let eventDone = false;
+  let nested = 0; // depth of sub-components (VALARM) inside the VEVENT
   for (const line of unfoldIcsLines(ics)) {
-    if (/^BEGIN:VEVENT/i.test(line)) { if (eventDone) break; inEvent = true; continue; }
-    if (/^END:VEVENT/i.test(line)) { inEvent = false; eventDone = true; continue; }
-    const colon = line.indexOf(':');
-    if (colon === -1) continue;
-    const head = line.slice(0, colon);
-    const value = line.slice(colon + 1);
-    const [name, ...paramParts] = head.split(';');
-    const key = name.toUpperCase().trim();
-    if (!inEvent) {
-      if (key === 'METHOD' && !method) method = value.trim().toUpperCase();
+    const prop = parseIcsLine(line);
+    if (!prop) continue;
+    const { name, params, value } = prop;
+    if (name === 'BEGIN' || name === 'END') {
+      const component = value.trim().toUpperCase();
+      if (component === 'VEVENT') {
+        if (name === 'BEGIN') {
+          if (eventDone) break;
+          inEvent = true;
+        } else if (inEvent) {
+          inEvent = false;
+          eventDone = true;
+        }
+        nested = 0;
+      } else if (inEvent) {
+        nested = Math.max(0, nested + (name === 'BEGIN' ? 1 : -1));
+      }
       continue;
     }
-    if (key in props) continue; // first VEVENT occurrence wins
-    const params = {};
-    for (const p of paramParts) {
-      const eq = p.indexOf('=');
-      if (eq > 0) params[p.slice(0, eq).toUpperCase().trim()] = p.slice(eq + 1).replace(/^"|"$/g, '');
+    if (!inEvent) {
+      if (name === 'METHOD' && !method) method = value.trim().toUpperCase();
+      continue;
     }
-    props[key] = { value, params };
+    // A VALARM's properties are not the event's (its DESCRIPTION is usually
+    // just "REMINDER"); within the event itself the first occurrence wins.
+    if (nested > 0 || name in props) continue;
+    props[name] = { value, params };
   }
   if (!eventDone) return null;
 
@@ -803,15 +847,22 @@ export function renderCalendarInvite(ics) {
   const end = props.DTEND;
   if (start?.value) {
     when = formatIcsDate(start.value);
-    if (end?.value) {
+    const startDt = ICS_DT_RE.exec(start.value);
+    const endDt = ICS_DT_RE.exec(end?.value || '');
+    if (startDt && endDt && startDt[4] === undefined && endDt[4] === undefined) {
+      // All-day events: a date-only DTEND is exclusive, so show through the
+      // day before it, and give a one-day event a single date.
+      const lastDay = previousIcsDay(end.value);
+      if (lastDay > start.value.slice(0, 8)) when += ` – ${formatIcsDate(lastDay)}`;
+    } else if (end?.value) {
       const sameDay = start.value.slice(0, 8) === end.value.slice(0, 8);
-      const endDt = ICS_DT_RE.exec(end.value);
       when += sameDay && endDt?.[4] !== undefined
         ? ` – ${formatIcsTime(Number(endDt[4]), Number(endDt[5]))}`
         : ` – ${formatIcsDate(end.value)}`;
     }
-    const tzid = start.params?.TZID;
-    if (tzid) when += ` (${tzid})`;
+    // Exchange TZIDs can carry their own parentheses: "(UTC-05:00) Eastern Time".
+    const tzid = (start.params?.TZID || '').trim();
+    if (tzid) when += tzid.startsWith('(') ? ` ${tzid}` : ` (${tzid})`;
   }
 
   const methodLabel = ICS_METHOD_LABELS[method] || '';
