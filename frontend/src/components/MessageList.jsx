@@ -7,6 +7,7 @@ import { senderColor } from '../themes.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { isAccountInUnifiedInbox } from '../utils/unifiedInbox.js';
 import { shouldSyncFolder, folderSyncKey } from '../utils/folderSync.js';
+import { resolveThreadMessages } from '../utils/threadActions.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
@@ -782,15 +783,20 @@ export default function MessageList() {
     return threadedView && !searchQuery.trim() && message.thread_id && messageCount > 1;
   }, [threadedView, searchQuery]);
 
-  const resolveMessagesForThreadAction = useCallback(async (message, { forceRefresh = false } = {}) => {
+  // Resolves the sub-messages a thread-wide action applies to. Defaults to the server rather
+  // than the expansion-time cache: a thread gains messages while you look at it, and acting on
+  // the snapshot left newer ones unread (unreachable, since the row then rendered as read) or,
+  // on the delete and move paths, silently untouched. See utils/threadActions.js.
+  const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false } = {}) => {
     const tid = message.thread_id || message.id;
-    if (!isThreadListRow(message)) return [message];
-    if (!forceRefresh && Array.isArray(threadMessages[tid]) && threadMessages[tid].length > 0) {
-      return threadMessages[tid];
-    }
     const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
-    const data = await api.getThread(tid, effectiveFolder, isUnified);
-    return data.messages?.length ? data.messages : [message];
+    return resolveThreadMessages({
+      message,
+      isThreadRow: isThreadListRow(message),
+      cached: threadMessages[tid],
+      allowCache,
+      fetchThread: () => api.getThread(tid, effectiveFolder, isUnified),
+    });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
 
   const invalidateThreadCache = useCallback((threadId) => {
@@ -1077,41 +1083,10 @@ export default function MessageList() {
     messages.forEach(m => removeMessage(m.id));
     if (unreadCount > 0) decrementUnread(accountId, unreadCount);
 
-    // Folder-aware unread badge updates for the sidebar.
-    //
-    // For spam (move INTO the junk folder) we decrement whichever folder the
-    // messages came from (typically INBOX, but possibly some other folder the
-    // user is in). For ham (move OUT of junk into inbox) we decrement the
-    // source folder (junk) and increment the destination folder (inbox).
-    //
-    // We aggregate by folder path because a bulk action may touch messages
-    // from different folders in theory (the UI currently only selects from
-    // one folder at a time, but the data model allows otherwise).
-    const { adjustFolderUnread } = useStore.getState();
-    const account = accounts.find(a => a.id === accountId);
-    const spamDest = account?.folder_mappings?.spam;
-    const inboxDest = account?.folder_mappings?.inbox || 'INBOX';
-    const unreadBySource = new Map();
-    const unreadByHamSource = new Map(); // for ham: track source folder
-    messages.forEach(m => {
-      if (m.is_read) return;
-      const src = m.folder;
-      if (!src) return;
-      if (label === 'spam') {
-        unreadBySource.set(src, (unreadBySource.get(src) || 0) + 1);
-      } else if (label === 'ham') {
-        unreadByHamSource.set(src, (unreadByHamSource.get(src) || 0) + 1);
-      }
-    });
-    if (label === 'spam') {
-      // origin folder loses its unread messages; junk gains them
-      for (const [src, n] of unreadBySource) adjustFolderUnread(accountId, src, -n);
-      if (spamDest && unreadCount > 0) adjustFolderUnread(accountId, spamDest, +unreadCount);
-    } else if (label === 'ham') {
-      // junk loses them; inbox gains them
-      for (const [src, n] of unreadByHamSource) adjustFolderUnread(accountId, src, -n);
-      if (inboxDest && unreadCount > 0) adjustFolderUnread(accountId, inboxDest, +unreadCount);
-    }
+    // Sidebar folder badges are not adjusted here. They render the counts the IMAP server
+    // reported for each folder, so a local guess would be overwritten by the next observation
+    // and could not be reconciled against it. The account badge above keeps its bounded
+    // optimistic window; folder badges follow the status poll.
 
     // Per-id timer map so Undo can cancel any pending API call.
     const timers = new Map();
@@ -1123,15 +1098,6 @@ export default function MessageList() {
       // Restore the messages in their original position (re-sort by date).
       useStore.getState().restoreMessages(messages);
       if (unreadCount > 0) incrementUnread(accountId, unreadCount);
-      // Reverse the folder badge adjustments so undo behaves like the move
-      // never happened.
-      if (label === 'spam') {
-        for (const [src, n] of unreadBySource) adjustFolderUnread(accountId, src, +n);
-        if (spamDest && unreadCount > 0) adjustFolderUnread(accountId, spamDest, -unreadCount);
-      } else if (label === 'ham') {
-        for (const [src, n] of unreadByHamSource) adjustFolderUnread(accountId, src, +n);
-        if (inboxDest && unreadCount > 0) adjustFolderUnread(accountId, inboxDest, -unreadCount);
-      }
     };
 
     const performCall = (id) => {
@@ -1176,7 +1142,7 @@ export default function MessageList() {
       body: messages[0].subject || t('common.noSubject'),
       onUndo: undo,
     });
-  }, [removeMessage, decrementUnread, incrementUnread, addNotification, t, accounts]);
+  }, [removeMessage, decrementUnread, incrementUnread, addNotification, t]);
 
   // On page unload (refresh/close), fire pending deletes with keepalive:true so the
   // browser completes the request even after the page tears down. Clears the map so
@@ -1665,7 +1631,7 @@ export default function MessageList() {
         try {
           groups = await archiveTargetGroupsForRows(
             msgs,
-            message => resolveMessagesForThreadAction(message, { forceRefresh: true }),
+            message => resolveMessagesForThreadAction(message),
             activeFolder,
             isThreadListRow,
             selectedAccountId,
@@ -1777,7 +1743,7 @@ export default function MessageList() {
 
     let targets;
     try {
-      const resolved = await resolveMessagesForThreadAction(message, { forceRefresh: true });
+      const resolved = await resolveMessagesForThreadAction(message);
       targets = archiveTargetsForFolder(message, resolved, activeFolder, threadRow, selectedAccountId);
 
       const resolvedUnreadByAccount = unreadCountsByAccount(targets);
@@ -2396,9 +2362,6 @@ export default function MessageList() {
       updateMessage(message.id, { is_read: true, unread_count: 0 });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
-      // Also decrement the sidebar folder badge, so INBOX (etc.) updates immediately on open
-      // rather than lagging until the next folder-count refresh.
-      useStore.getState().adjustFolderUnread(message.account_id, message.folder, -1);
       setPending(message.id, message.account_id);
       api.bulkRead([message.id], true)
         .catch(() => api.bulkRead([message.id], true))
@@ -2412,7 +2375,6 @@ export default function MessageList() {
           updateMessage(message.id, { is_read: false, unread_count: prevUnread });
           incrementUnread(message.account_id);
           adjustCategoryCount(message.category, 1);
-          useStore.getState().adjustFolderUnread(message.account_id, message.folder, +1);
           pendingMarkReadMap.delete(message.id);
         });
     };
@@ -2475,10 +2437,20 @@ export default function MessageList() {
     ? `Search: "${searchQuery}"`
     : isUnified ? t('sidebar.allInboxes') : selectedFolder;
 
-  // Non-INBOX folders omitted: byAccount is account-total, not folder-specific, so it would mislead.
-  const headerUnread = isUnified
-    ? unreadCounts.total
-    : (selectedFolder === 'INBOX' ? (unreadCounts.byAccount[selectedAccountId] ?? 0) : 0);
+  const selectedFolderCounts = folders[selectedAccountId]?.find(f => f.path === selectedFolder);
+  const headerUnread = isUnified ? unreadCounts.total
+    : selectedFolder === 'INBOX' ? unreadCounts.byAccount[selectedAccountId] ?? 0
+      : selectedFolderCounts?.unread_count ?? 0;
+  // Paging totals count cached results (threads/categories can be subsets). The
+  // unfiltered mailbox header instead shows independently observed server membership.
+  const headerSamples = isUnified
+    ? accounts.filter(isAccountInUnifiedInbox).map(a => unreadCounts.snapshots?.[a.id])
+    : selectedFolder === 'INBOX' ? [unreadCounts.snapshots?.[selectedAccountId]]
+      : [{ totalCount: selectedFolderCounts?.total_count, known: selectedFolderCounts?.counts_known, stale: selectedFolderCounts?.counts_stale }];
+  const headerCountKnown = headerSamples.length > 0 && headerSamples.every(s => s?.known && s.totalCount != null);
+  const headerCountStale = headerSamples.some(s => !s?.known || s?.stale);
+  const headerServerTotal = headerSamples.reduce((sum, s) => sum + (s?.totalCount || 0), 0);
+  const filteredCount = unreadOnly || (activeCategory && categorizationEnabled);
 
   // Derived bulk-selection values (computed fresh each render, no stale closure risk)
   const selectionMode = selectedIds.size > 0 || selectionModeActive;
@@ -2682,9 +2654,9 @@ export default function MessageList() {
             ) : label}
           </h2>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
-            {messagesTotal > 0 && !searchQuery && (
-              <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                {messagesTotal}
+            {!searchQuery && (
+              <span title={filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                {filteredCount ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
               </span>
             )}
             {/* Sync button */}

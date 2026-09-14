@@ -5,6 +5,7 @@ import {
   folderDelimiter,
   folderMatchesQuery,
   folderParentLabel,
+  folderParentPath,
 } from './folderDisplay.js';
 
 describe('folderDelimiter', () => {
@@ -13,6 +14,14 @@ describe('folderDelimiter', () => {
     assert.equal(folderDelimiter({ delimiter: '' }), '/');
     assert.equal(folderDelimiter({}), '/');
     assert.equal(folderDelimiter(null), '/');
+  });
+});
+
+describe('folderParentPath', () => {
+  it('returns the parent path and null at the root', () => {
+    assert.equal(folderParentPath('Projects/Alpha', '/'), 'Projects');
+    assert.equal(folderParentPath('INBOX.Receipts.Amazon', '.'), 'INBOX.Receipts');
+    assert.equal(folderParentPath('Archive', '/'), null);
   });
 });
 
@@ -78,5 +87,25 @@ describe('folderMatchesQuery', () => {
 
   it('rejects folders that match nowhere', () => {
     assert.equal(folderMatchesQuery(folder, 'taxes'), false);
+  });
+
+  it('does not false-match a slash query against a name containing a dot', () => {
+    // '/'-delimited account whose folder NAME contains a '.' — the '.' is part
+    // of the name, not hierarchy, so a '/'-separated query must not split it.
+    const dotted = { path: 'Reports/2024.05', name: '2024.05', delimiter: '/' };
+    assert.equal(folderMatchesQuery(dotted, '2024/05'), false);
+    assert.equal(folderMatchesQuery(dotted, '2024.05'), true);
+    assert.equal(folderMatchesQuery(dotted, 'reports/2024'), true);
+    assert.equal(folderParentLabel(dotted), 'Reports');
+  });
+
+  it('matches the literal name of a folder whose name contains a slash', () => {
+    // '.'-delimited account whose folder NAME contains a '/'. Its literal name
+    // must stay searchable, and the parent chain must come from the real
+    // delimiter, not the slash inside the name.
+    const slashed = { path: 'INBOX.a/b', name: 'a/b', delimiter: '.' };
+    assert.equal(folderMatchesQuery(slashed, 'a/b'), true);
+    assert.equal(folderMatchesQuery(slashed, 'inbox.a'), true);
+    assert.equal(folderParentLabel(slashed), 'INBOX');
   });
 });

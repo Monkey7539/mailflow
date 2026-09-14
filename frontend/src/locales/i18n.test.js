@@ -130,6 +130,9 @@ const SAME_VALUE_ALLOWED = {
   'admin.appearance.customCssPlaceholder':   'any', // CSS code snippet, same in all locales
   'admin.integrations.microsoft.clientIdPh':'any', // xxxxxxxx-xxxx-…
   'admin.integrations.microsoft.title':     'any', // Microsoft 365 / Outlook.com
+  'admin.integrations.google.title':        'any', // Gmail / Google Workspace — brand names
+  'admin.integrations.google.clientIdPh':   'any', // xxxxxxxx.apps.googleusercontent.com
+  'admin.integrations.google.clientSecretPh':'any', // GOCSPX-…
   'admin.security.totpVerifyPh':            'any', // 000000
   'admin.sso.adminGroupClaimPh':            'any', // groups
   'admin.sso.adminGroupValuePh':            'any', // mailflow-admins
@@ -157,6 +160,9 @@ const SAME_VALUE_ALLOWED = {
   // "Alias" — Latin origin, same spelling in es, fr, it
   'admin.accounts.aliases': [['es', 'fr', 'it'], ['cs', 'pl']],
   'admin.aliases.title':     [['es', 'fr', 'it'], ['cs', 'pl']],
+
+  // "ID client" — the OAuth term "client" is left untranslated in both fr and it
+  'admin.integrations.google.clientId': [['fr', 'it']],
 
 
   // email placeholder — example.com address looks the same in en, ru, zhCN
