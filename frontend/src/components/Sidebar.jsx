@@ -9,6 +9,7 @@ import {
   collapsedTooltip,
   FOLDER_ORDER_DRAG_TYPE,
   folderDropPosition,
+  hasRenderedInbox,
   resolveFolderOrderDrop,
 } from '../utils/sidebar.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1114,10 +1115,18 @@ export default function Sidebar() {
           const expanded = expandedAccounts[account.id];
           const isSelected = selectedAccountId === account.id;
           const accountFolders = folders[account.id] || [];
+          const accountHiddenPaths = hiddenFolders[account.id] || [];
+          const showingHidden = showHiddenFor.has(account.id);
 
           const selectInbox = () => setSelectedAccount(account.id, 'INBOX');
           const rowLabel = collapsedTooltip(account.email_address, sidebarCollapsed);
-          const isAccountActive = (sidebarCollapsed || !expanded) && isSelected && selectedFolder === 'INBOX';
+          const hasInbox = hasRenderedInbox(accountFolders, {
+            expanded,
+            sidebarCollapsed,
+            hiddenPaths: accountHiddenPaths,
+            showingHidden,
+          });
+          const isAccountActive = isSelected && selectedFolder === 'INBOX' && !hasInbox;
 
           return (
             <div key={account.id}>
@@ -1261,9 +1270,6 @@ export default function Sidebar() {
                     </div>
                   </div>
                 );
-
-                const accountHiddenPaths = hiddenFolders[account.id] || [];
-                const showingHidden = showHiddenFor.has(account.id);
 
                 const handleFolderOrderDragStart = (event, path) => {
                   event.stopPropagation();
