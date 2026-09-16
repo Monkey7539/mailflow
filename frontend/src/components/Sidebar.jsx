@@ -1391,7 +1391,12 @@ export default function Sidebar() {
                         style={{
                           display: 'flex', alignItems: 'center', gap: 6,
                           padding: `6px 10px 6px ${indent}px`, borderRadius: 7,
-                          margin: '1px 0',
+                          // The separation is a transparent border rather than a margin:
+                          // these rows are drop targets for dragged messages, and a margin
+                          // would put a band between them that belongs to no row, where the
+                          // cursor turns to "cannot drop" and a release lands nowhere.
+                          borderBottom: '1px solid transparent',
+                          backgroundClip: 'padding-box',
                           cursor: isRenaming ? 'default' : 'pointer',
                           background: (msgDragTarget === `${account.id}:${folder.path}`) ? 'var(--accent-dim)' : isFolderSelected ? 'var(--bg-hover)' : 'transparent',
                           transition: 'background 0.1s',
