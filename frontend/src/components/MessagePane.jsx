@@ -19,131 +19,12 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
-import { useUiScale, descale } from '../hooks/useUiScale.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 
 // Module-level regex so the spam-name heuristic isn't recompiled on every
 // render — same heuristic as ContextMenu.jsx, both files read this constant.
 const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|posta\s*indesiderata)/i;
-
-// Sender-trust badge: a dot in the message header carrying the mail server's own
-// auth/spam verdicts plus header heuristics (backend senderTrust.js). Clicking it
-// opens the specific findings, so a warning stays checkable rather than vague.
-function SenderTrustBadge({ trust, t }) {
-  const [anchor, setAnchor] = useState(null);
-  const buttonRef = useRef(null);
-  const panelRef = useRef(null);
-  const uiScale = useUiScale();
-
-  useEffect(() => { setAnchor(null); }, [trust]);
-
-  useEffect(() => {
-    if (!anchor) return;
-    const close = (refocus) => {
-      setAnchor(null);
-      if (refocus) buttonRef.current?.focus({ preventScroll: true });
-    };
-    const onKey = e => { if (e.key === 'Escape') close(true); };
-    const onResize = () => close(false);
-    // Capture phase: the pane scrolls in its own container, not the window. That
-    // also hears the panel's own scrollbar, which must not dismiss it.
-    const onScroll = e => { if (!panelRef.current?.contains(e.target)) close(false); };
-    document.addEventListener('keydown', onKey);
-    window.addEventListener('resize', onResize);
-    window.addEventListener('scroll', onScroll, true);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('scroll', onScroll, true);
-    };
-  }, [anchor]);
-
-  if (!trust?.level) return null;
-  const { level, auth = {}, spam, flags = [] } = trust;
-  const color = level === 'danger' ? 'var(--red)' : level === 'caution' ? 'var(--amber)' : 'var(--green)';
-  const authState = (v) => (
-    v === 'pass' ? 'pass'
-      : (v === 'fail' || v === 'softfail' || v === 'permerror') ? 'fail'
-        : v === 'none' ? 'none' : 'unknown'
-  );
-  const summary = ['spf', 'dkim', 'dmarc']
-    .map(k => `${t(`trust.auth.${k}`)} ${t(`trust.auth.${authState(auth[k])}`)}`)
-    .concat(spam ? [t('trust.spamScore', { score: spam.score, threshold: spam.threshold })] : [])
-    .join(' · ');
-  const flagText = (f) => t(`trust.flags.${f.id}`, { ...f, interpolation: { escapeValue: false } });
-
-  const toggle = () => {
-    if (anchor) { setAnchor(null); return; }
-    // The header card clips its overflow, so the panel is placed in the viewport
-    // from the badge's own box instead of nested inside the card. The caps come off
-    // the same measurement: an assessment carrying every flag then scrolls inside
-    // the panel rather than running past a short viewport.
-    const r = buttonRef.current?.getBoundingClientRect();
-    const top = (r?.bottom ?? 0) + 6;
-    setAnchor({
-      top,
-      right: Math.max(8, window.innerWidth - (r?.right ?? window.innerWidth)),
-      maxHeight: Math.max(120, window.innerHeight - top - 8),
-      maxWidth: window.innerWidth - 16,
-    });
-  };
-
-  return (
-    <>
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={toggle}
-        aria-expanded={!!anchor}
-        aria-haspopup="dialog"
-        aria-label={`${t(`trust.badge.${level}`)}: ${t(`trust.${level}`)}`}
-        data-trust={level}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
-          background: 'none', border: '1px solid var(--border)', borderRadius: 999,
-          padding: '3px 10px', cursor: 'pointer', whiteSpace: 'nowrap',
-          fontFamily: 'var(--font-sans, "DM Sans", sans-serif)', fontSize: 11, fontWeight: 500,
-          color: 'var(--text-secondary)',
-        }}
-      >
-        <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: color }} />
-        {t(`trust.badge.${level}`)}
-      </button>
-      {anchor && (
-        <>
-          <div
-            onClick={() => { setAnchor(null); buttonRef.current?.focus({ preventScroll: true }); }}
-            aria-hidden
-            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
-          />
-          <div ref={panelRef} role="dialog" aria-label={t(`trust.${level}`)} tabIndex={-1} style={{
-            // Measured coordinates are in visual space; the app renders inside a
-            // scaled wrapper, so they are converted back (see useUiScale).
-            position: 'fixed', zIndex: 1000,
-            top: descale(anchor.top, uiScale), right: descale(anchor.right, uiScale),
-            width: 320, maxWidth: descale(anchor.maxWidth, uiScale),
-            maxHeight: descale(anchor.maxHeight, uiScale),
-            overflowY: 'auto', overscrollBehavior: 'contain',
-            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-            borderLeft: `3px solid ${color}`, borderRadius: 8,
-            boxShadow: 'var(--shadow-popover)', padding: '9px 14px', textAlign: 'left',
-            fontFamily: 'var(--font-sans, "DM Sans", sans-serif)', fontSize: 12, fontWeight: 400,
-            color: 'var(--text-secondary)',
-          }}>
-            <div style={{ fontWeight: 600, color, marginBottom: 4 }}>{t(`trust.${level}`)}</div>
-            {flags.length > 0 && (
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {flags.map(f => <li key={f.id}>{flagText(f)}</li>)}
-              </ul>
-            )}
-            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)' }}>{summary}</div>
-          </div>
-        </>
-      )}
-    </>
-  );
-}
 
 // Lazy-load the div-renderer utilities so PostCSS is excluded from the flag-off
 // bundle. Rollup treats the import() calls inside this block as dead code when
@@ -1479,21 +1360,10 @@ ${bodyContent}
     // instead, from the store, where logout and account switch are actually known about.
   }, []);
 
-  // Sender-trust assessment, fetched lazily per message (see SenderTrustBadge).
   // riskArmed: a risky attachment needs a second click to download; the first
   // arms the button and shows why.
-  const [senderTrust, setSenderTrust] = useState(null);
   const [riskArmed, setRiskArmed] = useState(null);
-  useEffect(() => {
-    setSenderTrust(null);
-    setRiskArmed(null);
-    if (!selectedMessageId) return undefined;
-    let cancelled = false;
-    api.getSenderTrust(selectedMessageId)
-      .then(data => { if (!cancelled) setSenderTrust(data); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [selectedMessageId]);
+  useEffect(() => { setRiskArmed(null); }, [selectedMessageId]);
 
   const handleDownload = async (messageId, part, filename) => {
     setDownloadingPart(part);
@@ -2621,17 +2491,13 @@ ${bodyContent}
             fontSize: 17, fontWeight: 600,
             color: 'var(--text-primary)', lineHeight: 1.3,
             fontFamily: 'var(--font-display)',
-            display: 'flex', alignItems: 'flex-start', gap: 12,
           }}>
-            <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-              {(() => {
-                const paneSubject = resolvedSubject || message.subject;
-                return (paneSubject && paneSubject !== '(no subject)')
-                  ? paneSubject
-                  : t('message.noSubject');
-              })()}
-            </span>
-            <SenderTrustBadge trust={senderTrust} t={t} />
+            {(() => {
+              const paneSubject = resolvedSubject || message.subject;
+              return (paneSubject && paneSubject !== '(no subject)')
+                ? paneSubject
+                : t('message.noSubject');
+            })()}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 16px' }}>

@@ -261,35 +261,6 @@
     }
   },
   "trust": {
-    "badge": {
-      "ok": "Limpio",
-      "caution": "Sospechoso",
-      "danger": "Malicioso"
-    },
-    "ok": "Comprobaciones del remitente superadas",
-    "caution": "Revise este remitente con cuidado",
-    "danger": "Este mensaje parece malicioso",
-    "auth": {
-      "spf": "SPF",
-      "dkim": "DKIM",
-      "dmarc": "DMARC",
-      "pass": "correcto",
-      "fail": "fallo",
-      "none": "ninguno",
-      "unknown": "desconocido"
-    },
-    "spamScore": "Puntuación de spam {{score}} / {{threshold}}",
-    "flags": {
-      "displayNameMismatch": "El nombre \"{{name}}\" no coincide con la dirección {{email}}",
-      "envelopeMismatch": "Enviado en nombre de {{from}} por otro dominio ({{envelope}})",
-      "replyToMismatch": "Las respuestas irían a otro dominio ({{replyTo}})",
-      "firstTimeSender": "Primer mensaje de este remitente",
-      "authFailed": "Falló la autenticación del correo ({{checks}})",
-      "spamHigh": "Marcado como spam por el servidor de correo ({{score}} / {{threshold}})",
-      "spamElevated": "Puntuación de spam elevada en el servidor ({{score}} / {{threshold}})",
-      "phishSymbols": "Señales de phishing o suplantación del servidor: {{symbols}}",
-      "urgentUnfamiliar": "Asunto con tono urgente de un remitente desconocido"
-    },
     "attachment": {
       "block": "Tipo de archivo peligroso (.{{ext}}): puede ejecutar código en su equipo",
       "warn": "Tipo de archivo arriesgado (.{{ext}}): puede contener macros o una página de acceso falsa",
