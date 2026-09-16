@@ -87,7 +87,8 @@ const MSG = {
 };
 
 const html = () => document.getElementById('root').innerHTML;
-const badge = () => document.querySelector('button[aria-expanded]');
+const badge = () => document.querySelector('button[data-trust]');
+const panel = () => document.querySelector('[role="dialog"]');
 
 let root;
 before(async () => {
@@ -120,12 +121,57 @@ describe('sender-trust badge', () => {
     assert.equal(badge().getAttribute('aria-expanded'), 'true');
   });
 
-  test('Escape closes it again', async () => {
+  test('Escape closes it again and puts focus back on the badge', async () => {
     await React.act(async () => {
       document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
     assert.doesNotMatch(html(), /trust\.flags\.phishSymbols/);
     assert.equal(badge().getAttribute('aria-expanded'), 'false');
+    assert.equal(document.activeElement, badge(), 'focus returns to the trigger');
+  });
+
+  test('its own scrollbar does not dismiss it, but scrolling the pane does', async () => {
+    // The listener runs in the capture phase, because the pane scrolls in its own
+    // container rather than the window — which means it also hears the panel.
+    await React.act(async () => {
+      badge().dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    });
+    assert.ok(panel(), 'open');
+    await React.act(async () => {
+      panel().dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+    });
+    assert.ok(panel(), 'scrolling a long finding list inside the panel keeps it open');
+    await React.act(async () => {
+      document.body.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+    });
+    assert.equal(panel(), null, 'scrolling the message pane closes it');
+  });
+
+  test('the panel is placed in the scaled wrapper\'s space, not visual space', async () => {
+    // The app renders inside a transform: scale() wrapper, so a coordinate measured
+    // from getBoundingClientRect has to be divided back out or the panel drifts off
+    // its badge. jsdom lays nothing out, so the measured top is 0 + the 6px gap.
+    await React.act(async () => { badge().dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(panel().style.top, '6px', 'at 100% the conversion is a no-op');
+    await React.act(async () => {
+      document.body.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+      useStore.getState().setFontSize(150);
+    });
+    await React.act(async () => { badge().dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(panel().style.top, '4px', 'at 150% it is divided by the scale');
+    await React.act(async () => {
+      document.body.dispatchEvent(new dom.window.Event('scroll', { bubbles: true }));
+      useStore.getState().setFontSize(100);
+    });
+  });
+
+  test('a dangerous assessment carries the red level through to the badge', async () => {
+    trustPayload = { ...TRUST, level: 'danger', flags: [{ id: 'spamHigh', severity: 'danger', score: 18, threshold: 15 }] };
+    await React.act(async () => { useStore.getState().setSelectedMessage(null); });
+    await React.act(async () => { useStore.getState().setSelectedMessage('a1'); });
+    assert.equal(badge().getAttribute('data-trust'), 'danger');
+    assert.match(html(), /trust\.badge\.danger/);
+    trustPayload = TRUST;
   });
 
   test('an assessment with no level renders no badge at all', async () => {

@@ -19,6 +19,7 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
+import { useUiScale, descale } from '../hooks/useUiScale.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 
@@ -32,21 +33,29 @@ const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|p
 function SenderTrustBadge({ trust, t }) {
   const [anchor, setAnchor] = useState(null);
   const buttonRef = useRef(null);
+  const panelRef = useRef(null);
+  const uiScale = useUiScale();
 
   useEffect(() => { setAnchor(null); }, [trust]);
 
   useEffect(() => {
     if (!anchor) return;
-    const close = () => setAnchor(null);
-    const onKey = e => { if (e.key === 'Escape') close(); };
+    const close = (refocus) => {
+      setAnchor(null);
+      if (refocus) buttonRef.current?.focus({ preventScroll: true });
+    };
+    const onKey = e => { if (e.key === 'Escape') close(true); };
+    const onResize = () => close(false);
+    // Capture phase: the pane scrolls in its own container, not the window. That
+    // also hears the panel's own scrollbar, which must not dismiss it.
+    const onScroll = e => { if (!panelRef.current?.contains(e.target)) close(false); };
     document.addEventListener('keydown', onKey);
-    window.addEventListener('resize', close);
-    // Capture phase: the pane scrolls in its own container, not the window.
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('keydown', onKey);
-      window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [anchor]);
 
@@ -67,11 +76,16 @@ function SenderTrustBadge({ trust, t }) {
   const toggle = () => {
     if (anchor) { setAnchor(null); return; }
     // The header card clips its overflow, so the panel is placed in the viewport
-    // from the badge's own box instead of nested inside the card.
+    // from the badge's own box instead of nested inside the card. The caps come off
+    // the same measurement: an assessment carrying every flag then scrolls inside
+    // the panel rather than running past a short viewport.
     const r = buttonRef.current?.getBoundingClientRect();
+    const top = (r?.bottom ?? 0) + 6;
     setAnchor({
-      top: (r?.bottom ?? 0) + 6,
+      top,
       right: Math.max(8, window.innerWidth - (r?.right ?? window.innerWidth)),
+      maxHeight: Math.max(120, window.innerHeight - top - 8),
+      maxWidth: window.innerWidth - 16,
     });
   };
 
@@ -79,9 +93,12 @@ function SenderTrustBadge({ trust, t }) {
     <>
       <button
         ref={buttonRef}
+        type="button"
         onClick={toggle}
         aria-expanded={!!anchor}
+        aria-haspopup="dialog"
         aria-label={`${t(`trust.badge.${level}`)}: ${t(`trust.${level}`)}`}
+        data-trust={level}
         style={{
           display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
           background: 'none', border: '1px solid var(--border)', borderRadius: 999,
@@ -90,18 +107,27 @@ function SenderTrustBadge({ trust, t }) {
           color: 'var(--text-secondary)',
         }}
       >
-        <span style={{ width: 7, height: 7, borderRadius: '50%', background: color }} />
+        <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: color }} />
         {t(`trust.badge.${level}`)}
       </button>
       {anchor && (
         <>
-          <div onClick={() => setAnchor(null)} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 3999 }} />
-          <div className="msg-notice" style={{
-            position: 'fixed', top: anchor.top, right: anchor.right, zIndex: 4000,
-            width: 320, maxWidth: 'calc(100vw - 16px)',
-            background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+          <div
+            onClick={() => { setAnchor(null); buttonRef.current?.focus({ preventScroll: true }); }}
+            aria-hidden
+            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
+          />
+          <div ref={panelRef} role="dialog" aria-label={t(`trust.${level}`)} tabIndex={-1} style={{
+            // Measured coordinates are in visual space; the app renders inside a
+            // scaled wrapper, so they are converted back (see useUiScale).
+            position: 'fixed', zIndex: 1000,
+            top: descale(anchor.top, uiScale), right: descale(anchor.right, uiScale),
+            width: 320, maxWidth: descale(anchor.maxWidth, uiScale),
+            maxHeight: descale(anchor.maxHeight, uiScale),
+            overflowY: 'auto', overscrollBehavior: 'contain',
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
             borderLeft: `3px solid ${color}`, borderRadius: 8,
-            boxShadow: 'var(--shadow-soft)', padding: '9px 14px', textAlign: 'left',
+            boxShadow: 'var(--shadow-popover)', padding: '9px 14px', textAlign: 'left',
             fontFamily: 'var(--font-sans, "DM Sans", sans-serif)', fontSize: 12, fontWeight: 400,
             color: 'var(--text-secondary)',
           }}>
@@ -2597,7 +2623,7 @@ ${bodyContent}
             fontFamily: 'var(--font-display)',
             display: 'flex', alignItems: 'flex-start', gap: 12,
           }}>
-            <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
               {(() => {
                 const paneSubject = resolvedSubject || message.subject;
                 return (paneSubject && paneSubject !== '(no subject)')
