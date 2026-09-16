@@ -1387,11 +1387,11 @@ export default function Sidebar() {
                   ) ? folderDropTarget.position : null;
 
                   return (
-                    // The wrapper takes no pointer events of its own. Row boundaries land on
-                    // fractional pixels under fractional display scaling (a 175% Windows
-                    // desktop), and at that seam this element, which has no drag handling,
-                    // won the hit test: one stray "cannot drop" frame while dragging past.
-                    // Its interactive descendants opt back in below.
+                    // The wrapper takes no pointer events of its own. Under fractional display
+                    // scaling (a 175% Windows desktop) row boundaries land on fractional pixels,
+                    // and at that seam this element, which has no drag handling, won the hit
+                    // test: a one-frame "cannot drop" while dragging past. Its interactive
+                    // descendants opt back in.
                     <div key={folder.path} style={{ pointerEvents: 'none', ...(isHidden ? { opacity: 0.45 } : null) }}>
                       <div
                         style={{
