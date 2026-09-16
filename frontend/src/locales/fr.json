@@ -264,11 +264,11 @@
     "badge": {
       "ok": "Sain",
       "caution": "Suspect",
-      "danger": "Dangereux"
+      "danger": "Malveillant"
     },
     "ok": "Vérifications de l'expéditeur réussies",
     "caution": "Examinez cet expéditeur avec attention",
-    "danger": "Ce message semble suspect",
+    "danger": "Ce message semble malveillant",
     "auth": {
       "spf": "SPF",
       "dkim": "DKIM",

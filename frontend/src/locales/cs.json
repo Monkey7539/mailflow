@@ -165,11 +165,11 @@
     "badge": {
       "ok": "V pořádku",
       "caution": "Podezřelé",
-      "danger": "Nebezpečné"
+      "danger": "Škodlivé"
     },
     "ok": "Kontroly odesílatele prošly",
     "caution": "Tohoto odesílatele pečlivě prověřte",
-    "danger": "Tato zpráva vypadá podezřele",
+    "danger": "Tato zpráva vypadá škodlivě",
     "auth": {
       "spf": "SPF",
       "dkim": "DKIM",

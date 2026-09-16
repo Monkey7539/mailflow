@@ -264,11 +264,11 @@
     "badge": {
       "ok": "安全",
       "caution": "可疑",
-      "danger": "危险"
+      "danger": "恶意"
     },
     "ok": "发件人检查通过",
     "caution": "请仔细核实此发件人",
-    "danger": "此邮件看起来可疑",
+    "danger": "此邮件看起来是恶意的",
     "auth": {
       "spf": "SPF",
       "dkim": "DKIM",

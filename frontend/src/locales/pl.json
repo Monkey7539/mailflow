@@ -266,11 +266,11 @@
     "badge": {
       "ok": "Bezpieczna",
       "caution": "Podejrzana",
-      "danger": "Niebezpieczna"
+      "danger": "Złośliwa"
     },
     "ok": "Kontrole nadawcy zaliczone",
     "caution": "Uważnie sprawdź tego nadawcę",
-    "danger": "Ta wiadomość wygląda podejrzanie",
+    "danger": "Ta wiadomość wygląda złośliwie",
     "auth": {
       "spf": "SPF",
       "dkim": "DKIM",
