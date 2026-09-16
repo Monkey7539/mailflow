@@ -2698,9 +2698,9 @@ ${bodyContent}
                     {risk.level !== 'ok' && (
                       <div style={{ fontSize: 11, color: riskColor, fontWeight: risk.level === 'block' ? 600 : 400, whiteSpace: 'normal' }}>
                         {risk.doubleExt
-                          ? t('trust.attachment.doubleExt', { ext: risk.doubleExt })
-                          : t(`trust.attachment.${risk.level}`, { ext: risk.ext })}
-                        {armed && ` — ${t('trust.attachment.confirm')}`}
+                          ? t('message.attachmentRisk.doubleExt', { ext: risk.doubleExt })
+                          : t(`message.attachmentRisk.${risk.level}`, { ext: risk.ext })}
+                        {armed && ` — ${t('message.attachmentRisk.confirm')}`}
                       </div>
                     )}
                   </div>
