@@ -21,6 +21,7 @@ import { ComposerLink } from '../utils/editorLink.js';
 import { editorTextForAi, sharedTextStyle, aiTextToDoc } from '../utils/aiComposeText.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
+import { aiSenderNote, signatureText } from '../utils/aiSenderNote.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -705,8 +706,16 @@ export default function ComposeModal() {
       },
     };
     const { system, user } = PROMPTS[action] || PROMPTS.draft;
+    // The signature handleSend will add, and the sender's name, so the model neither adds a
+    // sign-off above the real signature nor invents a [Your Name]. See utils/aiSenderNote.js.
+    // The name skips the account's display name, which is a label such as "Work Gmail".
+    const senderNote = aiSenderNote({
+      name: fromAlias ? fromAlias.name : fromAccount?.sender_name,
+      signature: plaintextEmail ? plainSig : signatureText(signatureContentRef.current),
+      rewriting: action !== 'draft',
+    });
     const messages = [
-      { role: 'system', content: system },
+      { role: 'system', content: `${system}\n\n${senderNote}` },
       { role: 'user', content: user.slice(0, 16000) },
     ];
 
