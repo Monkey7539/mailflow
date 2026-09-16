@@ -261,6 +261,11 @@
     }
   },
   "trust": {
+    "badge": {
+      "ok": "Unbedenklich",
+      "caution": "Verdächtig",
+      "danger": "Gefährlich"
+    },
     "ok": "Absenderprüfungen bestanden",
     "caution": "Diesen Absender sorgfältig prüfen",
     "danger": "Diese Nachricht wirkt verdächtig",

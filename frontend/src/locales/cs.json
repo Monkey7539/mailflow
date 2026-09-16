@@ -162,6 +162,11 @@
     "updateAvailable": "Je dostupná aktualizace: v{{version}}"
   },
   "trust": {
+    "badge": {
+      "ok": "V pořádku",
+      "caution": "Podezřelé",
+      "danger": "Nebezpečné"
+    },
     "ok": "Kontroly odesílatele prošly",
     "caution": "Tohoto odesílatele pečlivě prověřte",
     "danger": "Tato zpráva vypadá podezřele",

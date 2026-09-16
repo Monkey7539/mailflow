@@ -261,6 +261,11 @@
     }
   },
   "trust": {
+    "badge": {
+      "ok": "Clean",
+      "caution": "Suspicious",
+      "danger": "Dangerous"
+    },
     "ok": "Sender checks passed",
     "caution": "Review this sender carefully",
     "danger": "This message looks suspicious",

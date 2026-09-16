@@ -263,6 +263,11 @@
     }
   },
   "trust": {
+    "badge": {
+      "ok": "Bezpieczna",
+      "caution": "Podejrzana",
+      "danger": "Niebezpieczna"
+    },
     "ok": "Kontrole nadawcy zaliczone",
     "caution": "Uważnie sprawdź tego nadawcę",
     "danger": "Ta wiadomość wygląda podejrzanie",

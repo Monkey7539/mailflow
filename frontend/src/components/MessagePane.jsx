@@ -26,12 +26,33 @@ const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
 // render — same heuristic as ContextMenu.jsx, both files read this constant.
 const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|posta\s*indesiderata)/i;
 
-// Sender-trust strip: the mail server's own auth/spam verdicts plus header
-// heuristics (backend senderTrust.js). ok → one muted line; caution/danger →
-// a notice listing the specific flags so the concern is checkable, not vague.
-function SenderTrustStrip({ trust, t }) {
-  if (!trust) return null;
-  const { level, auth, spam, flags } = trust;
+// Sender-trust badge: a dot in the message header carrying the mail server's own
+// auth/spam verdicts plus header heuristics (backend senderTrust.js). Clicking it
+// opens the specific findings, so a warning stays checkable rather than vague.
+function SenderTrustBadge({ trust, t }) {
+  const [anchor, setAnchor] = useState(null);
+  const buttonRef = useRef(null);
+
+  useEffect(() => { setAnchor(null); }, [trust]);
+
+  useEffect(() => {
+    if (!anchor) return;
+    const close = () => setAnchor(null);
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', close);
+    // Capture phase: the pane scrolls in its own container, not the window.
+    window.addEventListener('scroll', close, true);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [anchor]);
+
+  if (!trust?.level) return null;
+  const { level, auth = {}, spam, flags = [] } = trust;
+  const color = level === 'danger' ? 'var(--red)' : level === 'caution' ? 'var(--amber)' : 'var(--green)';
   const authState = (v) => (
     v === 'pass' ? 'pass'
       : (v === 'fail' || v === 'softfail' || v === 'permerror') ? 'fail'
@@ -42,29 +63,59 @@ function SenderTrustStrip({ trust, t }) {
     .concat(spam ? [t('trust.spamScore', { score: spam.score, threshold: spam.threshold })] : [])
     .join(' · ');
   const flagText = (f) => t(`trust.flags.${f.id}`, { ...f, interpolation: { escapeValue: false } });
-  if (level === 'ok') {
-    return (
-      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 10, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-        <span style={{ color: 'var(--green)' }}>✓</span>
-        <span>{t('trust.ok')}</span>
-        <span>· {summary}</span>
-        {flags.map(f => <span key={f.id}>· {flagText(f)}</span>)}
-      </div>
-    );
-  }
-  const color = level === 'danger' ? 'var(--red)' : 'var(--amber)';
+
+  const toggle = () => {
+    if (anchor) { setAnchor(null); return; }
+    // The header card clips its overflow, so the panel is placed in the viewport
+    // from the badge's own box instead of nested inside the card.
+    const r = buttonRef.current?.getBoundingClientRect();
+    setAnchor({
+      top: (r?.bottom ?? 0) + 6,
+      right: Math.max(8, window.innerWidth - (r?.right ?? window.innerWidth)),
+    });
+  };
+
   return (
-    <div className="msg-notice" style={{
-      marginBottom: 10, padding: '9px 14px',
-      background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-      borderLeft: `3px solid ${color}`, borderRadius: 8, fontSize: 12,
-    }}>
-      <div style={{ fontWeight: 600, color, marginBottom: 4 }}>{t(`trust.${level}`)}</div>
-      <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)' }}>
-        {flags.map(f => <li key={f.id}>{flagText(f)}</li>)}
-      </ul>
-      <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)' }}>{summary}</div>
-    </div>
+    <>
+      <button
+        ref={buttonRef}
+        onClick={toggle}
+        aria-expanded={!!anchor}
+        aria-label={`${t(`trust.badge.${level}`)}: ${t(`trust.${level}`)}`}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+          background: 'none', border: '1px solid var(--border)', borderRadius: 999,
+          padding: '3px 10px', cursor: 'pointer', whiteSpace: 'nowrap',
+          fontFamily: 'var(--font-sans, "DM Sans", sans-serif)', fontSize: 11, fontWeight: 500,
+          color: 'var(--text-secondary)',
+        }}
+      >
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: color }} />
+        {t(`trust.badge.${level}`)}
+      </button>
+      {anchor && (
+        <>
+          <div onClick={() => setAnchor(null)} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 3999 }} />
+          <div className="msg-notice" style={{
+            position: 'fixed', top: anchor.top, right: anchor.right, zIndex: 4000,
+            width: 320, maxWidth: 'calc(100vw - 16px)',
+            background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+            borderLeft: `3px solid ${color}`, borderRadius: 8,
+            boxShadow: 'var(--shadow-soft)', padding: '9px 14px', textAlign: 'left',
+            fontFamily: 'var(--font-sans, "DM Sans", sans-serif)', fontSize: 12, fontWeight: 400,
+            color: 'var(--text-secondary)',
+          }}>
+            <div style={{ fontWeight: 600, color, marginBottom: 4 }}>{t(`trust.${level}`)}</div>
+            {flags.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {flags.map(f => <li key={f.id}>{flagText(f)}</li>)}
+              </ul>
+            )}
+            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)' }}>{summary}</div>
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
@@ -1402,7 +1453,7 @@ ${bodyContent}
     // instead, from the store, where logout and account switch are actually known about.
   }, []);
 
-  // Sender-trust assessment, fetched lazily per message (see SenderTrustStrip).
+  // Sender-trust assessment, fetched lazily per message (see SenderTrustBadge).
   // riskArmed: a risky attachment needs a second click to download; the first
   // arms the button and shows why.
   const [senderTrust, setSenderTrust] = useState(null);
@@ -2544,13 +2595,17 @@ ${bodyContent}
             fontSize: 17, fontWeight: 600,
             color: 'var(--text-primary)', lineHeight: 1.3,
             fontFamily: 'var(--font-display)',
+            display: 'flex', alignItems: 'flex-start', gap: 12,
           }}>
-            {(() => {
-              const paneSubject = resolvedSubject || message.subject;
-              return (paneSubject && paneSubject !== '(no subject)')
-                ? paneSubject
-                : t('message.noSubject');
-            })()}
+            <span style={{ flex: 1, minWidth: 0 }}>
+              {(() => {
+                const paneSubject = resolvedSubject || message.subject;
+                return (paneSubject && paneSubject !== '(no subject)')
+                  ? paneSubject
+                  : t('message.noSubject');
+              })()}
+            </span>
+            <SenderTrustBadge trust={senderTrust} t={t} />
           </div>
 
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 16px' }}>
@@ -2884,8 +2939,6 @@ ${bodyContent}
             </div>
           )}
 
-          <SenderTrustStrip trust={senderTrust} t={t} />
-
           {/* AI classify banner — shown for messages with no category signal when AI is available */}
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
             <div className="msg-notice" style={{
@@ -3068,7 +3121,6 @@ ${bodyContent}
               </button>
             </div>
           )}
-          <SenderTrustStrip trust={senderTrust} t={t} />
           {!message.category && (categorizationEnabled || accounts.find(a => a.id === message.account_id)?.categorization_enabled) && aiStatus?.enabled && (
             <div className="msg-notice" style={{
               marginBottom: 10, padding: '9px 14px',

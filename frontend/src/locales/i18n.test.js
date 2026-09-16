@@ -427,10 +427,12 @@ const DYNAMIC_KEYS = new Set([
   // appear as literals; the other three do via the tab pills).
   'gtd.state.watch',
   'gtd.state.delegated',
-  // Sender-trust strip (MessagePane SenderTrustStrip): level, auth state and
+  // Sender-trust badge (MessagePane SenderTrustBadge): level, auth state and
   // flag ids arrive from the backend assessment and are looked up as
-  // t(`trust.${level}`), t(`trust.auth.${k}`), t(`trust.flags.${f.id}`);
-  // attachment badges look up t(`trust.attachment.${risk.level}`).
+  // t(`trust.badge.${level}`), t(`trust.${level}`), t(`trust.auth.${k}`),
+  // t(`trust.flags.${f.id}`); attachment badges look up
+  // t(`trust.attachment.${risk.level}`).
+  'trust.badge.ok', 'trust.badge.caution', 'trust.badge.danger',
   'trust.ok', 'trust.caution', 'trust.danger',
   'trust.auth.spf', 'trust.auth.dkim', 'trust.auth.dmarc',
   'trust.auth.pass', 'trust.auth.fail', 'trust.auth.none', 'trust.auth.unknown',

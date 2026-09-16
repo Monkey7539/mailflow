@@ -261,6 +261,11 @@
     }
   },
   "trust": {
+    "badge": {
+      "ok": "Sain",
+      "caution": "Suspect",
+      "danger": "Dangereux"
+    },
     "ok": "Vérifications de l'expéditeur réussies",
     "caution": "Examinez cet expéditeur avec attention",
     "danger": "Ce message semble suspect",
