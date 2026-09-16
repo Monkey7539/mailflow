@@ -1396,18 +1396,23 @@ export default function Sidebar() {
                           // would put a band between them that belongs to no row, where the
                           // cursor turns to "cannot drop" and a release lands nowhere.
                           borderBottom: '1px solid transparent',
-                          backgroundClip: 'padding-box',
                           cursor: isRenaming ? 'default' : 'pointer',
-                          background: (msgDragTarget === `${account.id}:${folder.path}`) ? 'var(--accent-dim)' : isFolderSelected ? 'var(--bg-hover)' : 'transparent',
-                          transition: 'background 0.1s',
+                          // backgroundColor, not the background shorthand, and declared
+                          // before the clip: the shorthand resets background-clip, which
+                          // would paint the row's highlight over the transparent border
+                          // and close the gap again. The hover handlers below set the
+                          // colour the same way, for the same reason.
+                          backgroundColor: (msgDragTarget === `${account.id}:${folder.path}`) ? 'var(--accent-dim)' : isFolderSelected ? 'var(--bg-hover)' : 'transparent',
+                          backgroundClip: 'padding-box',
+                          transition: 'background-color 0.1s',
                           boxShadow: dropPosition === 'before'
                             ? 'inset 0 2px var(--accent)'
                             : dropPosition === 'after'
                               ? 'inset 0 -2px var(--accent)'
                               : 'none',
                         }}
-                        onMouseEnter={e => { if (!isFolderSelected && !isRenaming) e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
-                        onMouseLeave={e => { if (!isFolderSelected) e.currentTarget.style.background = 'transparent'; }}
+                        onMouseEnter={e => { if (!isFolderSelected && !isRenaming) e.currentTarget.style.backgroundColor = 'var(--bg-tertiary)'; }}
+                        onMouseLeave={e => { if (!isFolderSelected) e.currentTarget.style.backgroundColor = 'transparent'; }}
                         onClick={() => !isRenaming && setSelectedAccount(account.id, folder.path)}
                         onContextMenu={e => openFolderCtxMenu(e, account.id, folder)}
                         onDragOver={event => {
