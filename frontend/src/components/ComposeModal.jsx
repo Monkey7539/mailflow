@@ -18,6 +18,7 @@ import { TableRow } from '@tiptap/extension-table-row';
 import { TableHeader } from '@tiptap/extension-table-header';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
+import { editorTextForAi, sharedTextStyle, aiTextToDoc } from '../utils/aiComposeText.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
 
@@ -682,7 +683,7 @@ export default function ComposeModal() {
     aiAbortRef.current = controller;
 
     const currentText = plaintextEmail ? body
-      : (htmlMode ? htmlSource.replace(/<[^>]+>/g, ' ') : (editor?.getText() ?? ''));
+      : (htmlMode ? htmlSource.replace(/<[^>]+>/g, ' ') : (editor ? editorTextForAi(editor.state.doc) : ''));
 
     const toStr = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])].join(', ');
     const PROMPTS = {
@@ -726,8 +727,10 @@ export default function ComposeModal() {
 
   const applyAiText = () => {
     if (!aiPanel?.text || !editor) return;
-    const html = '<p>' + aiPanel.text.trim().replace(/\n\n+/g, '</p><p>').replace(/\n/g, '<br>') + '</p>';
-    editor.commands.setContent(html);
+    // Line for line, as a document rather than HTML, so blank lines, the font and text such as
+    // "<jane@example.com>" all survive. See utils/aiComposeText.js.
+    const { doc, storedMarks } = editor.state;
+    editor.commands.setContent(aiTextToDoc(aiPanel.text, sharedTextStyle(doc, storedMarks)));
     setAiPanel(null);
   };
 
