@@ -20,7 +20,8 @@ registerHooks({
   load(url, context, nextLoad) {
     if (url.endsWith('react-i18next/dist/es/index.js') || url.endsWith('/react-i18next')) {
       return { format: 'module', shortCircuit: true, source: [
-        'export const useTranslation = () => ({ t: (k) => k, i18n: { language: "en", changeLanguage: () => {} } });',
+        // A {{label}} value is shown in brackets, so a test can see which text a string wraps.
+        'export const useTranslation = () => ({ t: (k, o) => (o && o.label !== undefined ? k + "[" + o.label + "]" : k), i18n: { language: "en", changeLanguage: () => {} } });',
         'export const initReactI18next = { type: "3rdParty", init: () => {} };',
         'export const Trans = ({ children }) => children ?? null;',
         'export const I18nextProvider = ({ children }) => children ?? null;',
@@ -134,7 +135,13 @@ describe('Download all asks first when an attachment is risky', () => {
       { filename: 'photo.jpg', type: 'image/jpeg', part: '2', size: 10 },
       { filename: 'account-login.html', type: 'text/html', part: '3', size: 10 },
     ],
+    // A part that spells the old string sentinel, to prove Download all's armed state is not a part.
+    f6: [
+      { filename: 'setup.exe', type: 'application/octet-stream', part: 'all', size: 10 },
+      { filename: 'rink-3.jpg', type: 'image/jpeg', part: '3', size: 10 },
+    ],
   };
+  const MSG_PART_ALL = { ...MSG_A, id: 'f6', uid: 6, subject: 'Installer' };
   const downloads = [];
   let originalFetch, originalClick;
   before(() => {
@@ -145,6 +152,8 @@ describe('Download all asks first when an attachment is risky', () => {
     dom.window.cancelAnimationFrame ??= globalThis.cancelAnimationFrame;
     originalFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
+      // A single attachment downloads through fetch, not an anchor, so record that request too.
+      if (String(url).includes('/attachments/')) downloads.push(String(url));
       const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
       const json = ATTACHMENTS[id] ? { html: '<p>hi</p>', text: 'hi', attachments: ATTACHMENTS[id] } : {};
       return { ok: true, status: 200, json: async () => json, text: async () => '' };
@@ -152,7 +161,7 @@ describe('Download all asks first when an attachment is risky', () => {
     // jsdom cannot download. Record the downloads the component starts itself instead.
     originalClick = dom.window.HTMLAnchorElement.prototype.click;
     dom.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.getAttribute('href')); };
-    useStore.getState().setMessages?.([MSG_A, MSG_B, MSG_BLOCK, MSG_SAFE, MSG_WARN]);
+    useStore.getState().setMessages?.([MSG_A, MSG_B, MSG_BLOCK, MSG_SAFE, MSG_WARN, MSG_PART_ALL]);
   });
   after(() => {
     globalThis.fetch = originalFetch;
@@ -179,7 +188,16 @@ describe('Download all asks first when an attachment is risky', () => {
     return downloadAllLink();
   }
   const click = () => fire(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
-  const armedNote = /message\.attachmentRisk\.confirm/;
+  // The armed text is one translated string wrapping the link's own label, so a locale controls the
+  // punctuation between them.
+  const armedNote = /message\.attachmentRisk\.armed\[message\.downloadAll\]/;
+  const attachmentButton = filename => [...document.querySelectorAll('button')].find(b => b.textContent.includes(filename));
+  async function clickAttachment(filename) {
+    await React.act(async () => {
+      attachmentButton(filename).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+    });
+    return attachmentButton(filename);
+  }
 
   test('with a blocked file, the link has nothing to fetch until a second click downloads', async () => {
     await open('c3');
@@ -213,6 +231,22 @@ describe('Download all asks first when an attachment is risky', () => {
     assert.match((await click()).textContent, armedNote);
     await open('d4');
     await open('c3');
+    assert.doesNotMatch(downloadAllLink().textContent, armedNote);
+  });
+
+  test("a risky file's own confirm wraps its warning in the same translated string", async () => {
+    await open('c3');
+    downloads.length = 0;
+    const button = await clickAttachment('invoice.pdf.exe');
+    assert.match(button.textContent, /message\.attachmentRisk\.armed\[message\.attachmentRisk\.doubleExt\]/);
+    assert.doesNotMatch(downloadAllLink().textContent, armedNote, 'arming one file does not arm Download all');
+    assert.deepEqual(downloads, []);
+  });
+
+  test('an attachment whose part is literally "all" does not arm Download all', async () => {
+    await open('f6');
+    const button = await clickAttachment('setup.exe');
+    assert.match(button.textContent, /message\.attachmentRisk\.armed\[/, 'the file itself is armed');
     assert.doesNotMatch(downloadAllLink().textContent, armedNote);
   });
 
