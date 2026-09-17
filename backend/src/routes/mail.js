@@ -535,15 +535,20 @@ router.get('/messages/:id/headers', async (req, res) => {
       headers = buildHeadersFromMessage(message);
     }
 
+    // This exists only to REPAIR a subject we never stored, so it is gated on the stored one
+    // being missing. It used to re-derive the subject every time and hand it back
+    // unconditionally; MessageHeaderModal pushes that value up through onSubjectResolved, so
+    // any flaw in header decoding silently rewrote the list and the open message with a worse
+    // value than the one already on screen. That is how #454 became visible. Never replacing
+    // a subject we already have keeps a decoding bug contained to this modal.
     let resolvedSubject = message.subject;
-    if (headers?.trim()) {
+    const storedSubjectMissing = !message.subject || message.subject === '(no subject)';
+    if (storedSubjectMissing && headers?.trim()) {
       const parsed = parseRawHeaders(headers);
       const imapSubject = decodeMimeWords(parsed.subject || '').trim();
       if (imapSubject && imapSubject !== '(no subject)') {
         resolvedSubject = imapSubject;
-        if (!message.subject || message.subject === '(no subject)') {
-          await query('UPDATE messages SET subject = $1 WHERE id = $2', [imapSubject, id]);
-        }
+        await query('UPDATE messages SET subject = $1 WHERE id = $2', [imapSubject, id]);
       }
     }
 
