@@ -11,6 +11,7 @@
 
 import { parseAuthResults, hasTrustedAuthResults } from './spamParser.js';
 import { EXECUTABLE_EXTENSIONS } from './spamTokenizer.js';
+import { DECOY } from './attachmentExtensions.js';
 
 // ---------------------------------------------------------------------------
 // Rule 3 — pharmaceutical spam keywords (highest-confidence rule, ~zero FP)
@@ -120,15 +121,6 @@ const URL_SHORTENERS = new Set([
   'is.gd', 'buff.ly', 'rebrand.ly', 'cutt.ly', 'shorturl.at',
   'rb.gy', 'trib.al', 'short.io', 'lnkd.in', 'fb.me',
   'youtu.be', 'tiny.cc', 'bl.ink', 'soo.gd', 's.id', 'v.gd',
-]);
-
-// ---------------------------------------------------------------------------
-// Rule 8/9 — attachment extensions
-// ---------------------------------------------------------------------------
-const PRESENTATION_EXTENSIONS = new Set([
-  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-  'txt', 'rtf', 'odt', 'ods', 'odp', 'jpg', 'jpeg', 'png', 'gif',
-  'mp3', 'mp4', 'mov', 'avi', 'wav',
 ]);
 
 // Rule 10-12 — negative auth result sets (per rules-detail doc)
@@ -336,7 +328,7 @@ const RULES = [
         if (parts.length < 3) return false; // need name + 2 extensions
         const last = parts[parts.length - 1].toLowerCase();
         const penultimate = parts[parts.length - 2].toLowerCase();
-        return EXECUTABLE_EXTENSIONS.has(last) && PRESENTATION_EXTENSIONS.has(penultimate);
+        return EXECUTABLE_EXTENSIONS.has(last) && DECOY.has(penultimate);
       });
     },
   },
