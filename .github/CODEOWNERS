@@ -3,8 +3,36 @@
 #
 # NOTE: this only *requests* review. To *require* it, enable branch protection on `main`
 # → "Require review from Code Owners" (and keep the plugin-boundary CI check required).
+#
+# There is deliberately NO catch-all rule. Most PRs need only the single approving review
+# branch protection asks for, which any maintainer with write access can give. The entries
+# below are the exceptions: paths where a mistake is expensive, hard to catch in review, or
+# both.
+#
+# An owner without write access to this repository is silently ignored by GitHub and shows
+# up as an error on the file, so only add someone here once they have that access.
 
-# GTD plugin — owned by its maintainer. The backend boundary (eslint.plugins-boundary.js,
-# run in CI as `npm run lint:plugins`) structurally keeps this code out of core.
-/backend/src/plugins/gtd/   @salmonumbrella
-/frontend/src/plugins/gtd/  @salmonumbrella
+# --- Security boundaries -------------------------------------------------------------
+# emailSanitizer is what stops untrusted mail executing script in the reading pane.
+/backend/src/services/emailSanitizer.js   @maathimself
+# Credentials at rest, sessions, and every authentication path.
+/backend/src/services/encryption.js       @maathimself
+/backend/src/middleware/auth.js           @maathimself
+/backend/src/routes/auth.js               @maathimself
+/backend/src/routes/oauth.js              @maathimself
+/backend/src/routes/oidc.js               @maathimself
+
+# --- Things that are hard to undo ----------------------------------------------------
+# Migrations run against live user data and are not reversible in practice.
+/backend/migrations/                      @maathimself
+# IMAP connection lifecycle: budgets, IDLE, reconnect and health checks. Repeated rounds of
+# subtle bugs here, and the failure mode is silent degradation that tests do not catch.
+/backend/src/services/imapManager.js      @maathimself
+
+# --- Release and supply chain --------------------------------------------------------
+# These decide what ships to every self-hosted install.
+/.github/workflows/                       @maathimself
+/scripts/release.sh                       @maathimself
+/backend/Dockerfile                       @maathimself
+/frontend/Dockerfile                      @maathimself
+/docker-compose.yml                       @maathimself
