@@ -303,18 +303,84 @@ export function decodeMimeWords(str) {
   } while (s !== prev);
   return s.replace(/=\?([^?]+)\?([BQbq])\?([^?]*)\?=/g, (match, charset, enc, text) => {
     try {
-      if (enc.toUpperCase() === 'Q') {
-        const bytes = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-        return Buffer.from(bytes, 'binary').toString('utf8');
-      }
-      return Buffer.from(text, 'base64').toString('utf8');
+      const bytes = enc.toUpperCase() === 'Q'
+        ? Buffer.from(
+          text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))),
+          'binary',
+        )
+        : Buffer.from(text, 'base64');
+      // An encoded-word's charset may carry a language tag: =?utf-8*en?Q?...?= (RFC 2231 §5).
+      return decodeEncodedWordBytes(bytes, String(charset).split('*')[0]);
     } catch { return match; }
   });
 }
 
+// An RFC 2047 encoded-word names its own charset, and that charset is frequently not UTF-8:
+// ISO-8859-1 and windows-1252 are still common from older mailers, and Scandinavian and
+// Central European senders hit them constantly. Decoding those bytes as UTF-8 turns every
+// non-ASCII character into U+FFFD, which is what #454 reported.
+function decodeEncodedWordBytes(bytes, charset) {
+  const label = String(charset || '').trim().toLowerCase() || 'utf-8';
+  try {
+    return new TextDecoder(label).decode(bytes);
+  } catch {
+    // An unknown or bogus label (x-unknown, unknown-8bit, a plain typo). Same policy as raw
+    // header bytes: prefer UTF-8, fall back to windows-1252 only when UTF-8 comes back
+    // damaged, so this degrades to wrong-but-readable rather than to U+FFFD.
+    return decodeBytesPreferUtf8(bytes);
+  }
+}
+
+// Reused rather than constructed per call: parseRawHeaders runs for every message during
+// sync, and decodeHeaderBytes calls this once per header line. decode() is stateless when
+// not streaming, so sharing an instance is safe.
+const UTF8_DECODER = new TextDecoder('utf-8'); // utf-8 exists in every Node build
+// windows-1252 needs ICU. Node ships full ICU by default and the runtime image has it, but
+// this is self-hosted software and a small-icu build must not fail to boot over a fallback
+// decoder, so its absence is tolerated and simply disables the fallback.
+const WINDOWS_1252_DECODER = (() => {
+  try {
+    return new TextDecoder('windows-1252');
+  } catch {
+    return null;
+  }
+})();
+const REPLACEMENT_CHAR = '\uFFFD';
+
+// Prefer UTF-8, and only reinterpret as windows-1252 when UTF-8 comes back damaged. Every
+// byte is representable in windows-1252, so this degrades to wrong-but-readable rather than
+// to a row of U+FFFD.
+function decodeBytesPreferUtf8(bytes) {
+  const utf8 = UTF8_DECODER.decode(bytes);
+  if (!utf8.includes(REPLACEMENT_CHAR) || !WINDOWS_1252_DECODER) return utf8;
+  return WINDOWS_1252_DECODER.decode(bytes);
+}
+
+// Header bytes are meant to be ASCII, with anything else carried in RFC 2047 encoded-words.
+// Plenty of senders ignore that and put raw 8-bit bytes in a Subject or a display name.
+// Decoding those as UTF-8 destroys them before encoded-word decoding ever runs, producing
+// the same replacement characters as #454 by a different route.
+//
+// The choice is made per line rather than per block. Applying it to the whole block let one
+// sender's stray 8-bit byte decide how every other header was read, so a block holding a
+// genuinely UTF-8 subject alongside one latin1 display name turned that subject into
+// mojibake: a worse result than the single replacement character it replaced. A UTF-8
+// sequence never contains 0x0A, so splitting on it cannot cut one in half.
+function decodeHeaderBytes(buf) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i <= buf.length; i++) {
+    if (i !== buf.length && buf[i] !== 0x0A) continue;
+    out.push(decodeBytesPreferUtf8(buf.subarray(start, i)));
+    if (i < buf.length) out.push('\n');
+    start = i + 1;
+  }
+  return out.join('');
+}
+
 export function parseRawHeaders(buf) {
   if (!buf) return {};
-  const text = Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf);
+  const text = Buffer.isBuffer(buf) ? decodeHeaderBytes(buf) : String(buf);
   const result = {};
   // Headers can be folded (continuation lines start with whitespace)
   const unfolded = text.replace(/\r\n([ \t])/g, ' ').replace(/\n([ \t])/g, ' ');
@@ -355,7 +421,7 @@ export function parseHeadersInput(headers) {
 
 export function headersToRawString(headers) {
   if (!headers) return '';
-  if (Buffer.isBuffer(headers)) return headers.toString('utf8');
+  if (Buffer.isBuffer(headers)) return decodeHeaderBytes(headers);
   const parsed = parseHeadersInput(headers);
   if (Object.keys(parsed).length) {
     return Object.entries(parsed)

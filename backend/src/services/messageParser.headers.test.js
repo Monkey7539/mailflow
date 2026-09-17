@@ -8,6 +8,8 @@ import {
   parseDeliveryAddresses,
   snippetFromBody,
   parseMessage,
+  decodeMimeWords,
+  parseRawHeaders,
 } from './messageParser.js';
 
 describe('snippetFromBody', () => {
@@ -198,5 +200,87 @@ describe('buildHeadersFromMessage', () => {
     expect(raw).toContain('To: "Bob" <bob@example.com>');
     expect(raw).toContain('Subject: TEST');
     expect(raw).toContain('Message-ID: <abc@mail>');
+  });
+});
+
+describe('decodeMimeWords charsets (#454)', () => {
+  it('honors the charset an encoded-word declares instead of assuming UTF-8', () => {
+    // The exact shape reported in #454: a Finnish subject in ISO-8859-1 came back as
+    // replacement characters because every encoded-word was decoded as UTF-8.
+    expect(decodeMimeWords('=?iso-8859-1?Q?Hyv=E4=E4_p=E4iv=E4=E4?=')).toBe('Hyvää päivää');
+    expect(decodeMimeWords('=?windows-1252?Q?Caf=E9?=')).toBe('Café');
+    expect(decodeMimeWords('=?ISO-8859-1?B?SHl24Q==?=')).toBe('Hyvá');
+  });
+
+  it('distinguishes charsets that differ on the same byte', () => {
+    // 0xA4 is the currency sign in ISO-8859-1 and the euro sign in ISO-8859-15. Getting
+    // both right is what proves the label is read rather than latin1 being hardcoded.
+    expect(decodeMimeWords('=?iso-8859-15?Q?100_=A4?=')).toBe('100 €');
+    expect(decodeMimeWords('=?iso-8859-1?Q?100_=A4?=')).toBe('100 ¤');
+  });
+
+  it('still decodes UTF-8 and leaves unencoded text alone', () => {
+    expect(decodeMimeWords('=?UTF-8?Q?Hyv=C3=A4=C3=A4?=')).toBe('Hyvää');
+    expect(decodeMimeWords('=?utf-8?B?SHl2w6TDpA==?=')).toBe('Hyvää');
+    expect(decodeMimeWords('Plain ASCII subject')).toBe('Plain ASCII subject');
+  });
+
+  it('strips an RFC 2231 language tag from the charset', () => {
+    expect(decodeMimeWords('=?iso-8859-1*fi?Q?Hyv=E4?=')).toBe('Hyvä');
+  });
+
+  it('falls back to readable text for an unknown charset label', () => {
+    // "unknown-8bit" and friends are not TextDecoder labels. Single-byte Western text is
+    // the common case, so these should degrade to readable rather than to U+FFFD.
+    expect(decodeMimeWords('=?unknown-8bit?Q?Caf=E9?=')).toBe('Café');
+    // A bogus label carrying genuine UTF-8 bytes still decodes as UTF-8.
+    expect(decodeMimeWords('=?x-nonsense?Q?Hyv=C3=A4?=')).toBe('Hyvä');
+  });
+
+  it('joins adjacent encoded-words that use a non-UTF-8 charset', () => {
+    expect(decodeMimeWords('=?iso-8859-1?Q?Hyv=E4=E4?= =?iso-8859-1?Q?_p=E4iv=E4=E4?='))
+      .toBe('Hyvää päivää');
+  });
+});
+
+describe('raw 8-bit header bytes (#454)', () => {
+  const latin1Header = Buffer.concat([
+    Buffer.from('From: test@example.com\r\nSubject: Hyv', 'ascii'),
+    Buffer.from([0xE4, 0xE4]),
+    Buffer.from(' p', 'ascii'),
+    Buffer.from([0xE4]),
+    Buffer.from('iv', 'ascii'),
+    Buffer.from([0xE4, 0xE4]),
+    Buffer.from('\r\n', 'ascii'),
+  ]);
+
+  it('recovers raw 8-bit bytes that carry no encoded-word at all', () => {
+    // Non-conformant but common. Decoding the block as UTF-8 destroyed these bytes before
+    // any encoded-word decoding could run, giving the same symptom by a different route.
+    expect(parseRawHeaders(latin1Header).subject).toBe('Hyvää päivää');
+  });
+
+  it('keeps valid UTF-8 header bytes as UTF-8', () => {
+    const utf8Header = Buffer.from('Subject: Hyvää päivää\r\n', 'utf8');
+    expect(parseRawHeaders(utf8Header).subject).toBe('Hyvää päivää');
+  });
+
+  it('applies the same recovery to the raw header string', () => {
+    expect(headersToRawString(latin1Header)).toContain('Hyvää päivää');
+  });
+
+  it('scopes the fallback per line so one bad header cannot spoil the rest', () => {
+    // A block holding a genuinely UTF-8 subject next to one latin1 display name. Choosing
+    // the encoding for the whole block at once turned that subject into mojibake
+    // ("SÃ¤hkÃ¶posti"), which is worse than the single replacement character it replaced.
+    const mixed = Buffer.concat([
+      Buffer.from('Subject: Sähköposti toimii\r\n', 'utf8'),
+      Buffer.from('From: "J', 'ascii'),
+      Buffer.from([0xF6]),
+      Buffer.from('rgen" <j@example.com>\r\n', 'ascii'),
+    ]);
+    const parsed = parseRawHeaders(mixed);
+    expect(parsed.subject).toBe('Sähköposti toimii');
+    expect(parsed.from).toBe('"Jörgen" <j@example.com>');
   });
 });
