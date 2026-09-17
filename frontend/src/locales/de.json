@@ -207,7 +207,7 @@
       "warn": "Riskanter Dateityp (.{{ext}}) – kann Makros oder eine gefälschte Anmeldeseite enthalten",
       "notice": "Archiv – Inhalt kann nicht geprüft werden",
       "doubleExt": "Versteckte Erweiterung: .{{ext}} – der echte Typ ist der letzte",
-      "confirm": "erneut klicken, um trotzdem herunterzuladen"
+      "armed": "{{label}} — erneut klicken, um trotzdem herunterzuladen"
     },
     "downloadAll": "Alle herunterladen",
     "reply": "Antworten",

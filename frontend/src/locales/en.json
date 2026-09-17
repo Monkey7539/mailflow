@@ -207,7 +207,7 @@
       "warn": "Risky file type (.{{ext}}) — may contain macros or a fake login page",
       "notice": "Archive — contents cannot be inspected",
       "doubleExt": "Hidden extension: .{{ext}} — the real type is the last one",
-      "confirm": "click again to download anyway"
+      "armed": "{{label}} — click again to download anyway"
     },
     "downloadAll": "Download all",
     "reply": "Reply",

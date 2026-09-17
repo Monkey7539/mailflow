@@ -23,8 +23,8 @@ import SpamExplainModal from './SpamExplainModal.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailflow:message-opening';
-// riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
-const DOWNLOAD_ALL = 'all';
+// riskArmed value for the "Download all" link. A Symbol, so no attachment part can ever equal it.
+const DOWNLOAD_ALL = Symbol('downloadAll');
 
 // Module-level regex so the spam-name heuristic isn't recompiled on every
 // render — same heuristic as ContextMenu.jsx, both files read this constant.
@@ -2675,8 +2675,9 @@ ${bodyContent}
                     <polyline points="7 10 12 15 17 10"/>
                     <line x1="12" y1="15" x2="12" y2="3"/>
                   </svg>
-                  {t('message.downloadAll')}
-                  {downloadAllArmed && ` — ${t('message.attachmentRisk.confirm')}`}
+                  {downloadAllArmed
+                    ? t('message.attachmentRisk.armed', { label: t('message.downloadAll') })
+                    : t('message.downloadAll')}
                 </a>
               )}
             </div>
@@ -2686,6 +2687,9 @@ ${bodyContent}
                 const risky = risk.level === 'block' || risk.level === 'warn';
                 const riskColor = risk.level === 'block' ? 'var(--red)' : risk.level === 'warn' ? 'var(--amber)' : 'var(--text-tertiary)';
                 const armed = riskArmed === att.part;
+                const riskText = risk.level === 'ok' ? '' : risk.doubleExt
+                  ? t('message.attachmentRisk.doubleExt', { ext: risk.doubleExt })
+                  : t(`message.attachmentRisk.${risk.level}`, { ext: risk.ext });
                 return (
                 <button
                   key={i}
@@ -2721,10 +2725,7 @@ ${bodyContent}
                     </div>
                     {risk.level !== 'ok' && (
                       <div style={{ fontSize: 11, color: riskColor, fontWeight: risk.level === 'block' ? 600 : 400, whiteSpace: 'normal' }}>
-                        {risk.doubleExt
-                          ? t('message.attachmentRisk.doubleExt', { ext: risk.doubleExt })
-                          : t(`message.attachmentRisk.${risk.level}`, { ext: risk.ext })}
-                        {armed && ` — ${t('message.attachmentRisk.confirm')}`}
+                        {armed ? t('message.attachmentRisk.armed', { label: riskText }) : riskText}
                       </div>
                     )}
                   </div>

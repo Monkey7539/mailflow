@@ -207,7 +207,7 @@
       "warn": "Type de fichier risqué (.{{ext}}) — peut contenir des macros ou une fausse page de connexion",
       "notice": "Archive — le contenu ne peut pas être inspecté",
       "doubleExt": "Extension masquée : .{{ext}} — le vrai type est le dernier",
-      "confirm": "cliquez à nouveau pour télécharger quand même"
+      "armed": "{{label}} — cliquez à nouveau pour télécharger quand même"
     },
     "downloadAll": "Tout télécharger",
     "reply": "Répondre",

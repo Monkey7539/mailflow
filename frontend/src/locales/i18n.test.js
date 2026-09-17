@@ -730,6 +730,23 @@ describe('i18n locale files', () => {
     }
   });
 
+  describe('placeholders — a translation keeps the {{placeholders}} en.json uses', () => {
+    // A dropped placeholder silently drops text: message.attachmentRisk.armed, for one, carries a
+    // risky attachment's whole warning in {{label}}.
+    it('every locale uses the same {{...}} names as en.json for the keys they share', () => {
+      const names = value => [...new Set([...String(value).matchAll(/\{\{\s*([^\s},]+)[^}]*\}\}/g)].map(m => m[1]))].sort().join(', ');
+      const mismatches = [];
+      for (const lang of langs) {
+        if (lang === 'en') continue;
+        for (const [key, value] of Object.entries(locales[lang])) {
+          if (!(key in locales.en) || names(value) === names(locales.en[key])) continue;
+          mismatches.push(`  ${lang} ${key}: {{${names(value)}}} but en has {{${names(locales.en[key])}}}`);
+        }
+      }
+      assert.equal(mismatches.length, 0, `Placeholders differ from en.json:\n${mismatches.join('\n')}`);
+    });
+  });
+
   describe('hardcoded strings — user-visible text must go through t()', () => {
     it('no hardcoded user-facing strings', () => {
       const violations = scanHardcodedStrings();

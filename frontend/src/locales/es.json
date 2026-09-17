@@ -207,7 +207,7 @@
       "warn": "Tipo de archivo arriesgado (.{{ext}}): puede contener macros o una página de acceso falsa",
       "notice": "Archivo comprimido: no se puede inspeccionar el contenido",
       "doubleExt": "Extensión oculta: .{{ext}} — el tipo real es el último",
-      "confirm": "haga clic de nuevo para descargar de todos modos"
+      "armed": "{{label}} — haga clic de nuevo para descargar de todos modos"
     },
     "downloadAll": "Descargar todo",
     "reply": "Responder",
