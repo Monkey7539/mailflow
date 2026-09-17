@@ -14,6 +14,9 @@ import { STOP_WORDS, STOP_WORDS_DEFAULT } from './stopWords.js';
 
 // File extensions associated with executable code (shared with
 // spamRules.js rules ATTACHMENT_EXECUTABLE / ATTACHMENT_DOUBLE_EXT).
+// Not yet the BLOCK tier in attachmentExtensions.js, which leaves macro Office
+// out and blocks more types: switching changes what these rules score, so it
+// lands with their weight re-tune (#457).
 export const EXECUTABLE_EXTENSIONS = new Set([
   // Windows executables
   'exe', 'scr', 'msi', 'com', 'cpl', 'hta', 'pif', 'gadget',

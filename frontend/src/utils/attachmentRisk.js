@@ -4,21 +4,11 @@
 //   warn   — macro-enabled Office, HTML/SVG (credential-harvesting pages)
 //   notice — archives, whose contents nothing here can inspect
 // A double extension ("invoice.pdf.exe") is classified by its real (last)
-// extension and reports the hidden tail so the disguise is visible.
+// extension and reports the hidden tail so the disguise is visible. The tiers
+// themselves live in attachmentExtensions.js.
 
-const BLOCK = new Set(['exe', 'scr', 'com', 'pif', 'bat', 'cmd', 'ps1', 'psm1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh',
-  'msi', 'msp', 'mst', 'jar', 'hta', 'cpl', 'reg', 'lnk', 'iso', 'img', 'vhd', 'vhdx', 'dll', 'apk', 'application', 'appx',
-  'sh', 'run', 'dmg', 'pkg', 'deb', 'rpm', 'chm', 'inf', 'scf', 'url', 'ade', 'adp', 'gadget', 'ws',
-  'msc', 'xll', 'py', 'pyw', 'pyz', 'pyzw', 'pyc', 'pyo', 'pl', 'ksh', 'csh', 'jnlp', 'app', 'appref-ms', 'msu',
-  'diagcab', 'sct', 'wsc', 'settingcontent-ms', 'search-ms', 'library-ms', 'website', 'rdp']);
-const WARN = new Set(['docm', 'xlsm', 'xlsb', 'pptm', 'xlam', 'dotm', 'xltm', 'potm', 'ppam', 'sldm', 'html', 'htm', 'shtml', 'xhtml', 'svg', 'mht', 'mhtml', 'one', 'pub', 'rtf']);
-const NOTICE = new Set(['zip', 'rar', '7z', 'gz', 'tgz', 'tar', 'bz2', 'xz', 'z', 'cab', 'arj', 'ace', 'lz', 'lzh']);
-// The ordinary document and media types a disguise borrows. Only these count as the
-// fake half of a double extension, so a dotted date or version number in a name
-// ("Statement 09.15.2026.html", "P&L v2.1.xlsm") is not reported as hidden. Same
-// list as PRESENTATION_EXTENSIONS behind the backend's ATTACHMENT_DOUBLE_EXT rule.
-const DECOY = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf', 'odt', 'ods', 'odp',
-  'jpg', 'jpeg', 'png', 'gif', 'mp3', 'mp4', 'mov', 'avi', 'wav']);
+import { BLOCK, WARN, NOTICE, DECOY } from './attachmentExtensions.js';
+
 // Word-processing formats a document is converted from when it goes out as RTF under its old name
 // ("Letter.doc.rtf"). The hidden .rtf opens in the same kind of program the visible half promises, so
 // that is not reported as a disguise; a PDF, picture or media name in front of .rtf still is.
