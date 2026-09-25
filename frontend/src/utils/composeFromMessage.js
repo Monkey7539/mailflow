@@ -1,3 +1,14 @@
+import { pickReplyAlias } from './replyAlias.js';
+
+export function initialComposeFocus({ isReply = false, isForward = false } = {}) {
+  return isReply && !isForward ? 'editor' : 'to';
+}
+
+export function isComposeSendShortcut(event) {
+  return event?.key === 'Enter' && !event.repeat && !event.shiftKey && !event.altKey
+    && (!!event.ctrlKey !== !!event.metaKey);
+}
+
 function parseAddressField(raw) {
   try {
     const arr = Array.isArray(raw) ? raw : JSON.parse(raw || '[]');
@@ -21,25 +32,16 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
   ]);
 
-  const replyAliasId = (() => {
-    const aliases = myAccount?.aliases || [];
-    if (!aliases.length) return null;
-    try {
-      const toArr = Array.isArray(message.to_addresses)
-        ? message.to_addresses
-        : JSON.parse(message.to_addresses || '[]');
-      const ccArr = Array.isArray(message.cc_addresses)
-        ? message.cc_addresses
-        : JSON.parse(message.cc_addresses || '[]');
-      const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-      const fromEmail = (message.from_email || '').toLowerCase();
-      const match = aliases.find(al => {
-        const aliasEmail = al.email.toLowerCase();
-        return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-      });
-      return match ? match.id : null;
-    } catch { return null; }
-  })();
+  // Delivered-To first, then the same To/Cc/From scan this used to do inline. Replying
+  // from the list and from the reading pane must choose the same alias, and the pane's
+  // version was the one that had been fixed.
+  const replyAliasId = pickReplyAlias({
+    aliases: myAccount?.aliases || [],
+    deliveryAddresses: message.delivery_addresses,
+    toAddresses: message.to_addresses,
+    ccAddresses: message.cc_addresses,
+    fromEmail: message.from_email,
+  });
 
   const allRecipients = (() => {
     try {
@@ -87,6 +89,7 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     isReplyAll: replyAll,
     originalFrom: sender,
     allRecipients,
+    threadId: message.thread_id,
   });
 }
 

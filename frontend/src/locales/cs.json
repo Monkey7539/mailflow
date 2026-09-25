@@ -192,7 +192,8 @@
       "title": "Zpráva smazána",
       "body": "Odstraněno.",
       "failTitle": "Smazání se nezdařilo",
-      "failBody": "Zprávu se nepodařilo smazat."
+      "failBody": "Zprávu se nepodařilo smazat.",
+      "conversationTitle": "Konverzace smazána"
     },
     "bulkDeleted": {
       "title_one": "Smazána {{count}} zpráva",
@@ -270,6 +271,29 @@
       "promotion": "Propagace",
       "automated": "Automatické",
       "social": "Sociální sítě"
+    },
+    "changeLayout": "Změnit rozvržení",
+    "layouts": {
+      "focused": {
+        "label": "Soustředěné",
+        "description": "Minimální panel se seznamem, maximum prostoru pro čtení"
+      },
+      "compact": {
+        "label": "Kompaktní",
+        "description": "Husté řádky — více zpráv najednou"
+      },
+      "comfortable": {
+        "label": "Pohodlné",
+        "description": "Prostorné řádky s velkorysým odsazením"
+      },
+      "wide": {
+        "label": "Široké",
+        "description": "Široký seznam ukáže delší předměty a náhledy"
+      },
+      "vertical": {
+        "label": "Svislé rozdělení",
+        "description": "Seznam zpráv nad čtecím podoknem"
+      }
     }
   },
   "message": {
@@ -286,6 +310,7 @@
     "noSubject": "(bez předmětu)",
     "to": "Komu:",
     "via": "prostřednictvím",
+    "forwardedFrom": "Původní odesílatel (podle {{service}}):",
     "attachment_one": "{{count}} příloha",
     "attachment_few": "{{count}} přílohy",
     "attachment_many": "{{count}} přílohy",
@@ -331,17 +356,20 @@
       "failTitle": "Archivace se nezdařila",
       "failBody": "Zprávu se nepodařilo archivovat.",
       "noFolderTitle": "Chybí složka archivu",
-      "noFolderBody": "Pro tento účet není nastavena složka archivu. Nastavte ji v Nastavení → Účty → Mapování složek."
+      "noFolderBody": "Pro tento účet není nastavena složka archivu. Nastavte ji v Nastavení → Účty → Mapování složek.",
+      "conversationTitle": "Konverzace archivována"
     },
     "moved": {
       "title": "Zpráva přesunuta",
       "failTitle": "Přesunutí se nezdařilo",
-      "failBody": "Zprávu se nepodařilo přesunout."
+      "failBody": "Zprávu se nepodařilo přesunout.",
+      "conversationTitle": "Konverzace přesunuta"
     },
     "snoozed": {
       "title": "Zpráva odložena",
       "failTitle": "Odložení se nezdařilo",
-      "failBody": "Tuto zprávu se nepodařilo odložit."
+      "failBody": "Tuto zprávu se nepodařilo odložit.",
+      "conversationTitle": "Konverzace odložena"
     },
     "whitelistFail": {
       "title": "Předvolbu se nepodařilo uložit",
@@ -415,8 +443,11 @@
     },
     "toolbar": {
       "removeTable": "Odebrat tabulku",
+      "typography": "Formátování písma",
       "textColor": "Barva textu",
       "removeColor": "Odebrat barvu",
+      "customColor": "Vlastní barva…",
+      "noColor": "Bez barvy",
       "insertImage": "Vložit obrázek",
       "minimize": "Minimalizovat",
       "maximize": "Maximalizovat",
@@ -577,6 +608,11 @@
     "customizeHint": "Zkratky můžete upravit v Nastavení → Zkratky",
     "closeHint": "Zavřete stisknutím ? nebo Esc",
     "then": "potom",
+    "browserMailboxFallback": "V prohlížeči: g a potom 1–9 otevře viditelnou schránku; g a potom l otevře výběr složky.",
+    "visibleMailbox": {
+      "label": "Viditelná schránka {{number}}",
+      "description": "Otevřít viditelnou schránku {{number}}"
+    },
     "groups": {
       "composeSearch": "Psaní a hledání",
       "navigation": "Navigace",
@@ -584,6 +620,30 @@
       "gtd": "GTD"
     },
     "actions": {
+      "toggleLeftSidebar": {
+        "label": "Přepnout levý postranní panel",
+        "description": "Zobrazit nebo skrýt levý postranní panel"
+      },
+      "openLabelPicker": {
+        "label": "Otevřít výběr složky",
+        "description": "Zkopírovat vybranou zprávu do složky"
+      },
+      "replyAllFromSelection": {
+        "label": "Odpovědět všem z výběru",
+        "description": "Odpovědět všem příjemcům vybrané zprávy"
+      },
+      "markUnread": {
+        "label": "Označit jako nepřečtené",
+        "description": "Označit vybranou zprávu jako nepřečtenou"
+      },
+      "unsubscribe": {
+        "label": "Odhlásit odběr",
+        "description": "Odhlásit odběr seznamu z vybrané zprávy"
+      },
+      "loadRemoteImages": {
+        "label": "Načíst vzdálené obrázky",
+        "description": "Načíst obrázky ve vybrané zprávě"
+      },
       "compose": {
         "label": "Napsat",
         "description": "Otevřít okno nové zprávy"
@@ -757,7 +817,8 @@
     "rulesFiredTitle": "Aktivovaná pravidla",
     "noRulesFired": "Neaktivovalo se žádné pravidlo",
     "mlTokensTitle": "Nejvýznamnější tokeny",
-    "noMlTokens": "Žádné ML tokeny"
+    "noMlTokens": "Žádné ML tokeny",
+    "conversationMovedToSpam": "Konverzace přesunuta do spamu"
   },
   "todoist": {
     "title": "Vytvořit úkol v Todoistu",
@@ -788,6 +849,11 @@
     "errorAdd": "Odesílatele se nepodařilo zablokovat"
   },
   "commandPalette": {
+    "labelPicker": {
+      "copyTo": "Kopírovat do {{folder}}",
+      "error": "Zprávu se nepodařilo označit štítkem",
+      "placeholder": "Zkopírovat nebo označit vybranou zprávu štítkem…"
+    },
     "placeholder": "Hledat akce…",
     "noResults": "Nebyly nalezeny žádné akce",
     "hint": {
@@ -1197,6 +1263,8 @@
       "threadingOffDesc": "Každá zpráva se zobrazuje samostatně",
       "threadingOn": "Zapnuto",
       "threadingOnDesc": "Odpovědi se seskupují do konverzací",
+      "threadingPane": "Podokno čtení",
+      "threadingPaneDesc": "Celá konverzace se otevře najednou",
       "composeFormat": "Formát zpráv",
       "composeRichText": "Formátovaný text",
       "composeRichTextDesc": "Odesílá HTML — podporuje formátování a stylované podpisy",
@@ -1224,9 +1292,6 @@
       "defaultMailAppError": "Prohlížeč požadavek zablokoval.",
       "markReadDelayLabel": "Prodleva",
       "markReadDelaySeconds": "{{count}} sekunda",
-      "markReadDelaySeconds_one": "{{count}} sekunda",
-      "markReadDelaySeconds_few": "{{count}} sekundy",
-      "markReadDelaySeconds_many": "{{count}} sekundy",
       "markReadDelaySeconds_other": "{{count}} sekund",
       "hoverQuickActionsMode": "Rychlé akce při najetí",
       "hoverQuickActionsOff": "Vypnuto",
@@ -1247,7 +1312,10 @@
       "gravatarOff": "Vypnuto",
       "gravatarOffDesc": "Soukromé — nikdy nekontaktuje třetí stranu.",
       "gravatarOn": "Zapnuto",
-      "gravatarOnDesc": "Načítat fotografie odesílatelů z Gravataru — sdílí hashované adresy odesílatelů s třetí stranou."
+      "gravatarOnDesc": "Načítat fotografie odesílatelů z Gravataru — sdílí hashované adresy odesílatelů s třetí stranou.",
+      "markReadDelaySeconds_one": "{{count}} sekunda",
+      "markReadDelaySeconds_few": "{{count}} sekundy",
+      "markReadDelaySeconds_many": "{{count}} sekundy"
     },
     "gtd": {
       "description": "Proměňte MailFlow v systém GTD. Zapněte jej pro jednotlivé účty a potom přiřaďte každý stav ke složce IMAP, která obsahuje jeho štítek.",
@@ -1702,5 +1770,13 @@
     "copyFailed": "Kopírování selhalo",
     "generating": "Generuji zprávu…",
     "error": "Zprávu se nepodařilo vytvořit."
+  },
+  "folders": {
+    "inbox": "Doručená pošta",
+    "sent": "Odeslané",
+    "drafts": "Koncepty",
+    "trash": "Koš",
+    "spam": "Spam",
+    "archive": "Archiv"
   }
 }

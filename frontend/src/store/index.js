@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { resolveConversationMode, groupsMessageList, conversationModeTransition, isConversationMode } from '../utils/conversationMode.js';
 import { api } from '../utils/api.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
@@ -258,10 +259,11 @@ export const useStore = create((set, get) => ({
 
   // Messages
   messages: [],
-  // Dedupe by stable identity on every raw list load: the same email can arrive as two rows
-  // (same message delivered to two unified accounts, or a received copy + its Sent twin) and
-  // must render once, matching isSelectedRow's identity model (#378). appendMessages/restore
-  // dedupe on their own paths; this covers the initial/refresh/page loads that replace wholesale.
+  // Dedupe by delivery on every raw list load: one email can arrive as two rows (a received copy
+  // plus its Sent twin, or an INBOX copy plus its label-folder copy) and must render once,
+  // matching isSelectedRow's identity model (#378). Copies in two different accounts are separate
+  // mail and both render (#476). appendMessages/restore dedupe on their own paths; this covers the
+  // initial/refresh/page loads that replace wholesale.
   setMessages: (messages) => set({ messages: dedupeByIdentity(messages) }),
   appendMessages: (newMessages) => set(state => {
     // Merge by stable identity (Message-ID when present, else id): a same-id row is dropped so the
@@ -565,12 +567,33 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ language: lng });
   },
 
-  // Threaded view
-  threadedView: localStorage.getItem('mailflow_threaded_view') === 'true',
+  // How conversations are shown: 'off', 'list' (threads expand inline in the list) or
+  // 'pane' (a selected row opens the whole conversation in the reading area).
+  //
+  // threadedView is kept as a derived flag rather than a second source of truth: it is what
+  // the list-loading code already asks for when deciding to request threaded results, and
+  // both grouping modes want that. Deriving it means none of those call sites change, and an
+  // install that only ever knew the old boolean keeps working (resolveConversationMode
+  // migrates it).
+  conversationMode: resolveConversationMode({
+    conversationMode: localStorage.getItem('mailflow_conversation_mode'),
+    threadedView: localStorage.getItem('mailflow_threaded_view') === 'true',
+  }),
+  threadedView: groupsMessageList(resolveConversationMode({
+    conversationMode: localStorage.getItem('mailflow_conversation_mode'),
+    threadedView: localStorage.getItem('mailflow_threaded_view') === 'true',
+  })),
+  setConversationMode: (mode) => {
+    const next = conversationModeTransition(mode, get().conversationMode);
+    if (!next) return;
+    localStorage.setItem('mailflow_conversation_mode', next.conversationMode);
+    localStorage.setItem('mailflow_threaded_view', String(groupsMessageList(next.conversationMode)));
+    set({ ...next, threadedView: groupsMessageList(next.conversationMode) });
+    schedulePrefSave({ conversationMode: next.conversationMode, threadedView: groupsMessageList(next.conversationMode) });
+  },
   setThreadedView: (val) => {
-    localStorage.setItem('mailflow_threaded_view', String(val));
-    set({ threadedView: val, expandedThreadId: null, threadMessages: {} });
-    schedulePrefSave({ threadedView: val });
+    // Retained for callers that still speak the old boolean.
+    get().setConversationMode(val ? 'list' : 'off');
   },
 
   // Compose format
@@ -1145,9 +1168,11 @@ export const useStore = create((set, get) => ({
         set({ language: prefs.language });
         i18n.changeLanguage(prefs.language);
       }
-      if (typeof prefs.threadedView === 'boolean') {
-        localStorage.setItem('mailflow_threaded_view', String(prefs.threadedView));
-        set({ threadedView: prefs.threadedView });
+      if (isConversationMode(prefs.conversationMode) || typeof prefs.threadedView === 'boolean') {
+        const mode = resolveConversationMode(prefs);
+        localStorage.setItem('mailflow_conversation_mode', mode);
+        localStorage.setItem('mailflow_threaded_view', String(groupsMessageList(mode)));
+        set({ conversationMode: mode, threadedView: groupsMessageList(mode) });
       }
       if (typeof prefs.plaintextEmail === 'boolean') {
         localStorage.setItem('mailflow_plaintext_email', String(prefs.plaintextEmail));
@@ -1235,10 +1260,21 @@ export const useStore = create((set, get) => ({
 // a state field, so it stays in sync with the list automatically; returns a primitive so a
 // useStore(selectSelectedMessageMid) subscription only re-renders when the value changes.
 export function selectSelectedMessageMid(s) {
+  return findSelectedMessage(s)?.message_id ?? null;
+}
+
+// The selected message's account, the companion to selectSelectedMessageMid. isSelectedRow needs
+// both to scope an identity match to one account, so that two accounts' copies of one email
+// (separate rows since #476) do not highlight together. Also a primitive, for the same reason.
+export function selectSelectedMessageAccountId(s) {
+  return findSelectedMessage(s)?.account_id ?? null;
+}
+
+function findSelectedMessage(s) {
   const id = s.selectedMessageId;
   if (id == null) return null;
   const pool = s.searchQuery?.trim() ? s.searchResults : s.messages;
-  const msg = pool.find(m => m.id === id)
-    ?? Object.values(s.threadMessages).flat().find(m => m.id === id);
-  return msg?.message_id ?? null;
+  return pool.find(m => m.id === id)
+    ?? Object.values(s.threadMessages).flat().find(m => m.id === id)
+    ?? null;
 }

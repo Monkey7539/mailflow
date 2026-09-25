@@ -144,8 +144,11 @@
     },
     "toolbar": {
       "removeTable": "Eliminar tabla",
+      "typography": "Tipografía",
       "textColor": "Color del texto",
       "removeColor": "Quitar color",
+      "customColor": "Color personalizado…",
+      "noColor": "Sin color",
       "insertImage": "Insertar imagen",
       "minimize": "Minimizar",
       "maximize": "Maximizar",
@@ -193,6 +196,7 @@
     "noSubject": "(sin asunto)",
     "to": "Para:",
     "via": "vía",
+    "forwardedFrom": "Remitente original (según {{service}}):",
     "attachment_one": "{{count}} adjunto",
     "attachment_other": "{{count}} adjuntos",
     "loadingError": "No se puede cargar el cuerpo del mensaje",
@@ -236,17 +240,20 @@
       "failTitle": "Error al archivar",
       "failBody": "No se pudo archivar el mensaje.",
       "noFolderTitle": "Sin carpeta de archivo",
-      "noFolderBody": "No hay carpeta de archivo configurada para esta cuenta. Configura una en Ajustes → Cuentas → Asignación de carpetas."
+      "noFolderBody": "No hay carpeta de archivo configurada para esta cuenta. Configura una en Ajustes → Cuentas → Asignación de carpetas.",
+      "conversationTitle": "Conversación archivada"
     },
     "moved": {
       "title": "Mensaje movido",
       "failTitle": "Error al mover",
-      "failBody": "No se pudo mover el mensaje."
+      "failBody": "No se pudo mover el mensaje.",
+      "conversationTitle": "Conversación movida"
     },
     "snoozed": {
       "title": "Mensaje pospuesto",
       "failTitle": "Error al posponer",
-      "failBody": "No se pudo posponer este mensaje."
+      "failBody": "No se pudo posponer este mensaje.",
+      "conversationTitle": "Conversación pospuesta"
     },
     "whitelistFail": {
       "title": "No se pudo guardar la preferencia",
@@ -298,7 +305,8 @@
       "title": "Mensaje eliminado",
       "body": "Movido a la papelera.",
       "failTitle": "Error al eliminar",
-      "failBody": "No se pudo eliminar el mensaje."
+      "failBody": "No se pudo eliminar el mensaje.",
+      "conversationTitle": "Conversación eliminada"
     },
     "bulkDeleted": {
       "title_one": "{{count}} mensaje eliminado",
@@ -364,6 +372,29 @@
       "promotion": "Promociones",
       "automated": "Automático",
       "social": "Social"
+    },
+    "changeLayout": "Cambiar diseño",
+    "layouts": {
+      "focused": {
+        "label": "Enfocado",
+        "description": "Panel de lista mínimo, área de lectura máxima"
+      },
+      "compact": {
+        "label": "Compacto",
+        "description": "Filas densas: más mensajes a la vez"
+      },
+      "comfortable": {
+        "label": "Cómodo",
+        "description": "Filas amplias con espaciado generoso para ojear"
+      },
+      "wide": {
+        "label": "Ancho",
+        "description": "Lista amplia con asuntos y vistas previas más largos"
+      },
+      "vertical": {
+        "label": "División vertical",
+        "description": "Lista de mensajes sobre el panel de lectura"
+      }
     }
   },
   "lockScreen": {
@@ -472,6 +503,11 @@
     }
   },
   "commandPalette": {
+    "labelPicker": {
+      "copyTo": "Copiar a {{folder}}",
+      "error": "No se pudo etiquetar el mensaje",
+      "placeholder": "Copiar o etiquetar el mensaje seleccionado…"
+    },
     "placeholder": "Buscar acciones…",
     "noResults": "No se encontraron acciones",
     "hint": {
@@ -493,6 +529,11 @@
     "customizeHint": "Personaliza los atajos en Ajustes → Atajos",
     "closeHint": "Pulsa ? o Esc para cerrar",
     "then": "luego",
+    "browserMailboxFallback": "En el navegador: g y luego 1–9 abre un buzón visible; g y luego l abre el selector de carpetas.",
+    "visibleMailbox": {
+      "label": "Buzón visible {{number}}",
+      "description": "Abrir el buzón visible {{number}}"
+    },
     "groups": {
       "composeSearch": "Redacción y búsqueda",
       "navigation": "Navegación",
@@ -500,6 +541,30 @@
       "gtd": "GTD"
     },
     "actions": {
+      "toggleLeftSidebar": {
+        "label": "Mostrar u ocultar barra lateral izquierda",
+        "description": "Mostrar u ocultar la barra lateral izquierda"
+      },
+      "openLabelPicker": {
+        "label": "Abrir selector de carpetas",
+        "description": "Copiar el mensaje seleccionado a una carpeta"
+      },
+      "replyAllFromSelection": {
+        "label": "Responder a todos desde la selección",
+        "description": "Responder a todos los destinatarios del mensaje seleccionado"
+      },
+      "markUnread": {
+        "label": "Marcar como no leído",
+        "description": "Marcar el mensaje seleccionado como no leído"
+      },
+      "unsubscribe": {
+        "label": "Cancelar suscripción",
+        "description": "Cancelar la suscripción a la lista del mensaje seleccionado"
+      },
+      "loadRemoteImages": {
+        "label": "Cargar imágenes remotas",
+        "description": "Cargar las imágenes del mensaje seleccionado"
+      },
       "compose": {
         "label": "Redactar",
         "description": "Abrir una nueva ventana de redacción"
@@ -903,11 +968,36 @@
       "threadingOffDesc": "Cada mensaje se muestra individualmente",
       "threadingOn": "Activado",
       "threadingOnDesc": "Las respuestas se agrupan en conversaciones",
+      "threadingPane": "Panel de lectura",
+      "threadingPaneDesc": "La conversación completa se abre junta",
       "composeFormat": "Formato de redacción",
       "composeRichText": "Texto enriquecido",
       "composeRichTextDesc": "Envía HTML — admite formato y firmas con estilo",
       "composePlainText": "Texto sin formato",
       "composePlainTextDesc": "Sin formato HTML — máxima compatibilidad",
+      "defaultReplyAction": "Acción de respuesta predeterminada",
+      "defaultReply": "Responder",
+      "defaultReplyDesc": "El botón Responder envía solo al remitente",
+      "defaultReplyAll": "Responder a todos",
+      "defaultReplyAllDesc": "El botón Responder envía a todos los destinatarios",
+      "defaultSender": "Remitente predeterminado",
+      "defaultSenderDesc": "Desde qué dirección se envían los mensajes nuevos cuando redactas fuera de una cuenta concreta, como en la bandeja unificada. Las respuestas siempre usan la cuenta que recibió el mensaje.",
+      "defaultSenderLastUsed": "Última cuenta utilizada",
+      "markReadBehavior": "Marcar como leído",
+      "markReadImmediate": "Inmediatamente",
+      "markReadImmediateDesc": "Marcar los correos como leídos en cuanto los abres.",
+      "markReadDelay": "Después de un tiempo",
+      "markReadDelayDesc": "Marcar los correos como leídos después de verlos durante un tiempo determinado.",
+      "markReadManual": "Manualmente",
+      "markReadManualDesc": "Nunca marcar correos como leídos automáticamente. Usa el botón de marcar como leído.",
+      "defaultMailApp": "App de correo predeterminada",
+      "defaultMailAppDesc": "Haz que MailFlow abra los enlaces mailto: en este navegador. El navegador te pedirá que confirmes. Funciona en Firefox y Chrome/Edge; no disponible en iOS.",
+      "defaultMailAppBtn": "Registrar MailFlow",
+      "defaultMailAppOk": "Confirma el aviso en tu navegador para finalizar.",
+      "defaultMailAppError": "Tu navegador bloqueó la solicitud.",
+      "markReadDelayLabel": "Retraso",
+      "markReadDelaySeconds": "{{count}} segundo",
+      "markReadDelaySeconds_other": "{{count}} segundos",
       "hoverQuickActionsMode": "Acciones rápidas al pasar el ratón",
       "hoverQuickActionsOff": "Desactivado",
       "hoverQuickActionsOffDesc": "Mantener las acciones rápidas ocultas hasta usar el menú contextual o atajos.",
@@ -927,30 +1017,7 @@
       "gravatarOff": "Desactivado",
       "gravatarOffDesc": "Privado: nunca contacta con terceros.",
       "gravatarOn": "Activado",
-      "gravatarOnDesc": "Obtiene fotos del remitente de Gravatar: comparte direcciones cifradas de remitentes con un tercero.",
-      "defaultReplyAll": "Responder a todos",
-      "defaultReplyDesc": "El botón Responder envía solo al remitente",
-      "defaultReplyAction": "Acción de respuesta predeterminada",
-      "defaultReply": "Responder",
-      "defaultReplyAllDesc": "El botón Responder envía a todos los destinatarios",
-      "defaultSender": "Remitente predeterminado",
-      "defaultSenderDesc": "Desde qué dirección se envían los mensajes nuevos cuando redactas fuera de una cuenta concreta, como en la bandeja unificada. Las respuestas siempre usan la cuenta que recibió el mensaje.",
-      "defaultSenderLastUsed": "Última cuenta utilizada",
-      "markReadBehavior": "Marcar como leído",
-      "markReadImmediate": "Inmediatamente",
-      "markReadImmediateDesc": "Marcar los correos como leídos en cuanto los abres.",
-      "markReadDelay": "Después de un tiempo",
-      "markReadDelayDesc": "Marcar los correos como leídos después de verlos durante un tiempo determinado.",
-      "markReadManual": "Manualmente",
-      "markReadManualDesc": "Nunca marcar correos como leídos automáticamente. Usa el botón de marcar como leído.",
-      "defaultMailApp": "App de correo predeterminada",
-      "defaultMailAppDesc": "Haz que MailFlow abra los enlaces mailto: en este navegador. El navegador te pedirá que confirmes. Funciona en Firefox y Chrome/Edge; no disponible en iOS.",
-      "defaultMailAppBtn": "Registrar MailFlow",
-      "defaultMailAppOk": "Confirma el aviso en tu navegador para finalizar.",
-      "defaultMailAppError": "Tu navegador bloqueó la solicitud.",
-      "markReadDelayLabel": "Retraso",
-      "markReadDelaySeconds": "{{count}} segundo",
-      "markReadDelaySeconds_other": "{{count}} segundos"
+      "gravatarOnDesc": "Obtiene fotos del remitente de Gravatar: comparte direcciones cifradas de remitentes con un tercero."
     },
     "notifications": {
       "title": "Notificaciones",
@@ -1573,7 +1640,8 @@
     "rulesFiredTitle": "Reglas activadas",
     "noRulesFired": "Ninguna regla activada",
     "mlTokensTitle": "Tokens principales",
-    "noMlTokens": "Sin tokens ML"
+    "noMlTokens": "Sin tokens ML",
+    "conversationMovedToSpam": "Conversación movida a Spam"
   },
   "contacts": {
     "title": "Contactos",
@@ -1683,5 +1751,13 @@
     "copyFailed": "Error al copiar",
     "generating": "Generando informe…",
     "error": "No se pudo generar el informe."
+  },
+  "folders": {
+    "inbox": "Bandeja de entrada",
+    "sent": "Enviados",
+    "drafts": "Borradores",
+    "trash": "Papelera",
+    "spam": "Spam",
+    "archive": "Archivo"
   }
 }

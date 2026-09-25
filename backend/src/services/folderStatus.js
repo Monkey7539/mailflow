@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { extractImapError } from './imapError.js';
 
 export const STATUS_INTERVAL_MS = 60000;
 // INBOX plus (BATCH - 1) rotating folders per cycle. The monitor query's LIMIT is bound from
@@ -145,7 +146,7 @@ export class FolderStatusMonitor {
       const failures = (this.failures.get(account.id) || 0) + 1;
       this.failures.set(account.id, failures);
       this.nextCheck.set(account.id, Date.now() + Math.min(600000, STATUS_INTERVAL_MS * 2 ** Math.min(failures - 1, 4)));
-      console.warn(`Folder status cycle failed for account ${account.id}: ${err.message}`);
+      console.warn(`Folder status cycle failed for account ${account.id}: ${extractImapError(err)}`);
     } finally {
       if (any || failed) this.broadcast({ type: 'folder_counts', accountId: account.id }, account.user_id);
     }

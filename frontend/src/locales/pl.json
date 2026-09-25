@@ -144,8 +144,11 @@
     },
     "toolbar": {
       "removeTable": "Usuń tabelę",
+      "typography": "Typografia",
       "textColor": "Kolor tekstu",
       "removeColor": "Usuń kolor",
+      "customColor": "Kolor niestandardowy…",
+      "noColor": "Bez koloru",
       "insertImage": "Wstaw obraz",
       "minimize": "Minimalizuj",
       "maximize": "Maksymalizuj",
@@ -193,6 +196,7 @@
     "noSubject": "(brak tematu)",
     "to": "Do:",
     "via": "przez",
+    "forwardedFrom": "Pierwotny nadawca (według {{service}}):",
     "attachment_one": "{{count}} załącznik",
     "attachment_few": "{{count}} załączniki",
     "attachment_many": "{{count}} załączników",
@@ -238,17 +242,20 @@
       "failTitle": "Archiwizowanie nie powiodło się",
       "failBody": "Nie udało się zarchiwizować wiadomości.",
       "noFolderTitle": "Brak folderu archiwum",
-      "noFolderBody": "Nie skonfigurowano folderu archiwum dla tego konta. Ustaw go w Ustawienia → Konta → Mapowanie folderów."
+      "noFolderBody": "Nie skonfigurowano folderu archiwum dla tego konta. Ustaw go w Ustawienia → Konta → Mapowanie folderów.",
+      "conversationTitle": "Konwersacja zarchiwizowana"
     },
     "moved": {
       "title": "Wiadomość przeniesiona",
       "failTitle": "Przenoszenie nie powiodło się",
-      "failBody": "Nie udało się przenieść wiadomości."
+      "failBody": "Nie udało się przenieść wiadomości.",
+      "conversationTitle": "Konwersacja przeniesiona"
     },
     "snoozed": {
       "title": "Wiadomość odłożona",
       "failTitle": "Odkładanie nie powiodło się",
-      "failBody": "Nie udało się odłożyć tej wiadomości."
+      "failBody": "Nie udało się odłożyć tej wiadomości.",
+      "conversationTitle": "Konwersacja odłożona"
     },
     "whitelistFail": {
       "title": "Nie udało się zapisać ustawienia",
@@ -300,7 +307,8 @@
       "title": "Wiadomość usunięta",
       "body": "Usunięto.",
       "failTitle": "Usuwanie nie powiodło się",
-      "failBody": "Nie udało się usunąć wiadomości."
+      "failBody": "Nie udało się usunąć wiadomości.",
+      "conversationTitle": "Konwersacja usunięta"
     },
     "bulkDeleted": {
       "title_one": "Usunięto {{count}} wiadomość",
@@ -378,6 +386,29 @@
       "promotion": "Promocje",
       "automated": "Automatyczne",
       "social": "Społecznościowe"
+    },
+    "changeLayout": "Zmień układ",
+    "layouts": {
+      "focused": {
+        "label": "Skupiony",
+        "description": "Minimalny panel listy, maksymalny obszar czytania"
+      },
+      "compact": {
+        "label": "Kompaktowy",
+        "description": "Gęste wiersze — więcej wiadomości naraz"
+      },
+      "comfortable": {
+        "label": "Wygodny",
+        "description": "Przestronne wiersze z dużymi odstępami"
+      },
+      "wide": {
+        "label": "Szeroki",
+        "description": "Szeroka lista pokazuje dłuższe tematy i podglądy"
+      },
+      "vertical": {
+        "label": "Podział pionowy",
+        "description": "Lista wiadomości nad panelem czytania"
+      }
     }
   },
   "lockScreen": {
@@ -488,6 +519,11 @@
     "copyLink": "Kopiuj link"
   },
   "commandPalette": {
+    "labelPicker": {
+      "copyTo": "Kopiuj do {{folder}}",
+      "error": "Nie udało się oznaczyć wiadomości etykietą",
+      "placeholder": "Kopiuj lub oznacz wybraną wiadomość etykietą…"
+    },
     "placeholder": "Wyszukaj działanie…",
     "noResults": "Nie znaleziono działań",
     "hint": {
@@ -509,6 +545,11 @@
     "customizeHint": "Dostosuj skróty w Ustawieniach → Skróty",
     "closeHint": "Naciśnij ? lub Esc, aby zamknąć",
     "then": "wtedy",
+    "browserMailboxFallback": "W przeglądarce: g, potem 1–9 otwiera widoczną skrzynkę; g, potem l otwiera wybór folderu.",
+    "visibleMailbox": {
+      "label": "Widoczna skrzynka {{number}}",
+      "description": "Otwórz widoczną skrzynkę {{number}}"
+    },
     "groups": {
       "composeSearch": "Napisz i wyszukaj",
       "navigation": "Nawigacja",
@@ -516,6 +557,30 @@
       "gtd": "GTD"
     },
     "actions": {
+      "toggleLeftSidebar": {
+        "label": "Przełącz lewy pasek boczny",
+        "description": "Pokaż lub ukryj lewy pasek boczny"
+      },
+      "openLabelPicker": {
+        "label": "Otwórz wybór folderu",
+        "description": "Skopiuj wybraną wiadomość do folderu"
+      },
+      "replyAllFromSelection": {
+        "label": "Odpowiedz wszystkim z wyboru",
+        "description": "Odpowiedz wszystkim odbiorcom wybranej wiadomości"
+      },
+      "markUnread": {
+        "label": "Oznacz jako nieprzeczytane",
+        "description": "Oznacz wybraną wiadomość jako nieprzeczytaną"
+      },
+      "unsubscribe": {
+        "label": "Wypisz się",
+        "description": "Wypisz się z listy mailingowej wybranej wiadomości"
+      },
+      "loadRemoteImages": {
+        "label": "Wczytaj zdalne obrazy",
+        "description": "Wczytaj obrazy w wybranej wiadomości"
+      },
       "compose": {
         "label": "Napisz",
         "description": "Otwórz nowe okno tworzenia wiadomości"
@@ -919,6 +984,8 @@
       "threadingOffDesc": "Każda wiadomość jest wyświetlana osobno",
       "threadingOn": "Włączone",
       "threadingOnDesc": "Odpowiedzi grupowane w rozmowy",
+      "threadingPane": "Okienko odczytu",
+      "threadingPaneDesc": "Cała rozmowa otwiera się razem",
       "composeFormat": "Format tworzenia wiadomości",
       "composeRichText": "Tekst sformatowany",
       "composeRichTextDesc": "Wysyłaj HTML — obsługuje formatowanie i sformatowane podpisy",
@@ -946,9 +1013,6 @@
       "defaultMailAppError": "Przeglądarka zablokowała żądanie.",
       "markReadDelayLabel": "Opóźnienie",
       "markReadDelaySeconds": "{{count}} sekunda",
-      "markReadDelaySeconds_one": "{{count}} sekunda",
-      "markReadDelaySeconds_few": "{{count}} sekundy",
-      "markReadDelaySeconds_many": "{{count}} sekund",
       "markReadDelaySeconds_other": "{{count}} sekund",
       "hoverQuickActionsMode": "Szybkie działania po najechaniu",
       "hoverQuickActionsOff": "Wyłączone",
@@ -969,7 +1033,10 @@
       "gravatarOff": "Wyłączone",
       "gravatarOffDesc": "Prywatne — brak kontaktu z podmiotami trzecimi.",
       "gravatarOn": "Włączone",
-      "gravatarOnDesc": "Pobieraj zdjęcia nadawców z usługi Gravatar — do zewnętrznej usługi wysyłane są skrócone adresy nadawców."
+      "gravatarOnDesc": "Pobieraj zdjęcia nadawców z usługi Gravatar — do zewnętrznej usługi wysyłane są skrócone adresy nadawców.",
+      "markReadDelaySeconds_one": "{{count}} sekunda",
+      "markReadDelaySeconds_few": "{{count}} sekundy",
+      "markReadDelaySeconds_many": "{{count}} sekund"
     },
     "notifications": {
       "title": "Powiadomienia",
@@ -1592,7 +1659,8 @@
     "rulesFiredTitle": "Aktywowane reguły",
     "noRulesFired": "Nie aktywowano żadnej reguły",
     "mlTokensTitle": "Najważniejsze tokeny",
-    "noMlTokens": "Brak tokenów ML"
+    "noMlTokens": "Brak tokenów ML",
+    "conversationMovedToSpam": "Konwersacja przeniesiona do spamu"
   },
   "contacts": {
     "title": "Kontakty",
@@ -1702,5 +1770,13 @@
     "copyFailed": "Kopiowanie nie powiodło się",
     "generating": "Generowanie raportu…",
     "error": "Nie udało się wygenerować raportu."
+  },
+  "folders": {
+    "inbox": "Odebrane",
+    "sent": "Wysłane",
+    "drafts": "Szkice",
+    "trash": "Kosz",
+    "spam": "Spam",
+    "archive": "Archiwum"
   }
 }

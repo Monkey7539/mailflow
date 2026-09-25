@@ -144,8 +144,11 @@
     },
     "toolbar": {
       "removeTable": "Tabelle entfernen",
+      "typography": "Typografie",
       "textColor": "Textfarbe",
       "removeColor": "Farbe entfernen",
+      "customColor": "Eigene Farbe…",
+      "noColor": "Keine Farbe",
       "insertImage": "Bild einfügen",
       "minimize": "Minimieren",
       "maximize": "Maximieren",
@@ -193,6 +196,7 @@
     "noSubject": "(kein Betreff)",
     "to": "An:",
     "via": "über",
+    "forwardedFrom": "Ursprünglicher Absender (laut {{service}}):",
     "attachment_one": "{{count}} Anhang",
     "attachment_other": "{{count}} Anhänge",
     "loadingError": "Nachrichteninhalt konnte nicht geladen werden",
@@ -236,17 +240,20 @@
       "failTitle": "Archivierung fehlgeschlagen",
       "failBody": "Nachricht konnte nicht archiviert werden.",
       "noFolderTitle": "Kein Archivordner",
-      "noFolderBody": "Kein Archivordner für dieses Konto konfiguriert. In Einstellungen → Konten → Ordnerzuordnungen festlegen."
+      "noFolderBody": "Kein Archivordner für dieses Konto konfiguriert. In Einstellungen → Konten → Ordnerzuordnungen festlegen.",
+      "conversationTitle": "Konversation archiviert"
     },
     "moved": {
       "title": "Nachricht verschoben",
       "failTitle": "Verschieben fehlgeschlagen",
-      "failBody": "Nachricht konnte nicht verschoben werden."
+      "failBody": "Nachricht konnte nicht verschoben werden.",
+      "conversationTitle": "Konversation verschoben"
     },
     "snoozed": {
       "title": "Nachricht zurückgestellt",
       "failTitle": "Zurückstellen fehlgeschlagen",
-      "failBody": "Diese Nachricht konnte nicht zurückgestellt werden."
+      "failBody": "Diese Nachricht konnte nicht zurückgestellt werden.",
+      "conversationTitle": "Konversation zurückgestellt"
     },
     "whitelistFail": {
       "title": "Einstellung konnte nicht gespeichert werden",
@@ -298,7 +305,8 @@
       "title": "Nachricht gelöscht",
       "body": "In den Papierkorb verschoben.",
       "failTitle": "Löschen fehlgeschlagen",
-      "failBody": "Nachricht konnte nicht gelöscht werden."
+      "failBody": "Nachricht konnte nicht gelöscht werden.",
+      "conversationTitle": "Konversation gelöscht"
     },
     "bulkDeleted": {
       "title_one": "{{count}} Nachricht gelöscht",
@@ -364,6 +372,29 @@
       "promotion": "Werbung",
       "automated": "Automatisch",
       "social": "Sozial"
+    },
+    "changeLayout": "Layout ändern",
+    "layouts": {
+      "focused": {
+        "label": "Fokussiert",
+        "description": "Minimale Listenspalte, maximaler Lesebereich"
+      },
+      "compact": {
+        "label": "Kompakt",
+        "description": "Dichte Zeilen — mehr Nachrichten auf einmal"
+      },
+      "comfortable": {
+        "label": "Komfortabel",
+        "description": "Großzügige Zeilen mit viel Abstand zum Überfliegen"
+      },
+      "wide": {
+        "label": "Breit",
+        "description": "Breite Liste zeigt längere Betreffs und Vorschauen"
+      },
+      "vertical": {
+        "label": "Vertikale Teilung",
+        "description": "Nachrichtenliste über dem Lesebereich"
+      }
     }
   },
   "lockScreen": {
@@ -472,6 +503,11 @@
     "markAsHam": "Als kein Spam markieren"
   },
   "commandPalette": {
+    "labelPicker": {
+      "copyTo": "Nach {{folder}} kopieren",
+      "error": "Nachricht konnte nicht etikettiert werden",
+      "placeholder": "Ausgewählte Nachricht kopieren oder mit Label versehen…"
+    },
     "placeholder": "Aktionen suchen…",
     "noResults": "Keine Aktionen gefunden",
     "hint": {
@@ -493,6 +529,11 @@
     "customizeHint": "Kürzel anpassen unter Einstellungen → Tastaturkürzel",
     "closeHint": "? oder Esc zum Schließen drücken",
     "then": "dann",
+    "browserMailboxFallback": "Im Browser: g und dann 1–9 öffnet ein sichtbares Postfach; g und dann l öffnet die Ordnerauswahl.",
+    "visibleMailbox": {
+      "label": "Sichtbares Postfach {{number}}",
+      "description": "Sichtbares Postfach {{number}} öffnen"
+    },
     "groups": {
       "composeSearch": "Verfassen & Suche",
       "navigation": "Navigation",
@@ -500,6 +541,30 @@
       "gtd": "GTD"
     },
     "actions": {
+      "toggleLeftSidebar": {
+        "label": "Linke Seitenleiste umschalten",
+        "description": "Linke Seitenleiste ein- oder ausblenden"
+      },
+      "openLabelPicker": {
+        "label": "Ordnerauswahl öffnen",
+        "description": "Ausgewählte Nachricht in einen Ordner kopieren"
+      },
+      "replyAllFromSelection": {
+        "label": "Allen antworten",
+        "description": "Allen Empfängern der ausgewählten Nachricht antworten"
+      },
+      "markUnread": {
+        "label": "Als ungelesen markieren",
+        "description": "Ausgewählte Nachricht als ungelesen markieren"
+      },
+      "unsubscribe": {
+        "label": "Abmelden",
+        "description": "Von der ausgewählten Mailingliste abmelden"
+      },
+      "loadRemoteImages": {
+        "label": "Externe Bilder laden",
+        "description": "Bilder in der ausgewählten Nachricht laden"
+      },
       "compose": {
         "label": "Verfassen",
         "description": "Neues Fenster zum Verfassen öffnen"
@@ -832,11 +897,36 @@
       "threadingOffDesc": "Jede Nachricht einzeln angezeigt",
       "threadingOn": "An",
       "threadingOnDesc": "Antworten in Gesprächen gruppiert",
+      "threadingPane": "Lesebereich",
+      "threadingPaneDesc": "Die gesamte Unterhaltung wird zusammen geöffnet",
       "composeFormat": "Verfassungsformat",
       "composeRichText": "Rich Text",
       "composeRichTextDesc": "Sendet HTML — unterstützt Formatierung und gestaltete Signaturen",
       "composePlainText": "Klartext",
       "composePlainTextDesc": "Keine HTML-Formatierung — maximale Kompatibilität",
+      "defaultReplyAction": "Standard-Antwortoption",
+      "defaultReply": "Antworten",
+      "defaultReplyDesc": "Die Schaltfläche Antworten sendet nur an den Absender",
+      "defaultReplyAll": "Allen antworten",
+      "defaultReplyAllDesc": "Die Schaltfläche Antworten sendet an alle Empfänger",
+      "defaultSender": "Standardabsender",
+      "defaultSenderDesc": "Von welcher Adresse neue Nachrichten gesendet werden, wenn Sie außerhalb eines bestimmten Kontos verfassen, etwa im gemeinsamen Posteingang. Antworten verwenden immer das Konto, das die Nachricht empfangen hat.",
+      "defaultSenderLastUsed": "Zuletzt verwendetes Konto",
+      "markReadBehavior": "Als gelesen markieren",
+      "markReadImmediate": "Sofort",
+      "markReadImmediateDesc": "E-Mails sofort als gelesen markieren, sobald sie geöffnet werden.",
+      "markReadDelay": "Nach einer Verzögerung",
+      "markReadDelayDesc": "E-Mails nach einer bestimmten Anzeigezeit als gelesen markieren.",
+      "markReadManual": "Manuell",
+      "markReadManualDesc": "E-Mails niemals automatisch als gelesen markieren. Schaltfläche \"Als gelesen markieren\" verwenden.",
+      "defaultMailApp": "Standard-E-Mail-App",
+      "defaultMailAppDesc": "MailFlow in diesem Browser mailto:-Links öffnen lassen. Der Browser fragt zur Bestätigung nach. Funktioniert in Firefox und Chrome/Edge; unter iOS nicht verfügbar.",
+      "defaultMailAppBtn": "MailFlow registrieren",
+      "defaultMailAppOk": "Bestätigen Sie die Abfrage im Browser, um abzuschließen.",
+      "defaultMailAppError": "Ihr Browser hat die Anfrage blockiert.",
+      "markReadDelayLabel": "Verzögerung",
+      "markReadDelaySeconds": "{{count}} Sekunde",
+      "markReadDelaySeconds_other": "{{count}} Sekunden",
       "hoverQuickActionsMode": "Schnellaktionen beim Hover",
       "hoverQuickActionsOff": "Aus",
       "hoverQuickActionsOffDesc": "Schnellaktionen ausblenden, bis das Kontextmenü oder Tastenkürzel verwendet werden.",
@@ -856,30 +946,7 @@
       "gravatarOff": "Aus",
       "gravatarOffDesc": "Privat — kontaktiert keine Drittanbieter.",
       "gravatarOn": "Ein",
-      "gravatarOnDesc": "Absenderfotos von Gravatar laden — teilt gehashte Absenderadressen mit einem Drittanbieter.",
-      "defaultReplyAll": "Allen antworten",
-      "defaultReplyDesc": "Die Schaltfläche Antworten sendet nur an den Absender",
-      "defaultReplyAction": "Standard-Antwortoption",
-      "defaultReply": "Antworten",
-      "defaultReplyAllDesc": "Die Schaltfläche Antworten sendet an alle Empfänger",
-      "defaultSender": "Standardabsender",
-      "defaultSenderDesc": "Von welcher Adresse neue Nachrichten gesendet werden, wenn Sie außerhalb eines bestimmten Kontos verfassen, etwa im gemeinsamen Posteingang. Antworten verwenden immer das Konto, das die Nachricht empfangen hat.",
-      "defaultSenderLastUsed": "Zuletzt verwendetes Konto",
-      "markReadBehavior": "Als gelesen markieren",
-      "markReadImmediate": "Sofort",
-      "markReadImmediateDesc": "E-Mails sofort als gelesen markieren, sobald sie geöffnet werden.",
-      "markReadDelay": "Nach einer Verzögerung",
-      "markReadDelayDesc": "E-Mails nach einer bestimmten Anzeigezeit als gelesen markieren.",
-      "markReadManual": "Manuell",
-      "markReadManualDesc": "E-Mails niemals automatisch als gelesen markieren. Schaltfläche \"Als gelesen markieren\" verwenden.",
-      "defaultMailApp": "Standard-E-Mail-App",
-      "defaultMailAppDesc": "MailFlow in diesem Browser mailto:-Links öffnen lassen. Der Browser fragt zur Bestätigung nach. Funktioniert in Firefox und Chrome/Edge; unter iOS nicht verfügbar.",
-      "defaultMailAppBtn": "MailFlow registrieren",
-      "defaultMailAppOk": "Bestätigen Sie die Abfrage im Browser, um abzuschließen.",
-      "defaultMailAppError": "Ihr Browser hat die Anfrage blockiert.",
-      "markReadDelayLabel": "Verzögerung",
-      "markReadDelaySeconds": "{{count}} Sekunde",
-      "markReadDelaySeconds_other": "{{count}} Sekunden"
+      "gravatarOnDesc": "Absenderfotos von Gravatar laden — teilt gehashte Absenderadressen mit einem Drittanbieter."
     },
     "notifications": {
       "title": "Benachrichtigungen",
@@ -1573,7 +1640,8 @@
     "rulesFiredTitle": "Ausgelöste Regeln",
     "noRulesFired": "Keine Regeln ausgelöst",
     "mlTokensTitle": "Wichtigste Token",
-    "noMlTokens": "Keine ML-Token"
+    "noMlTokens": "Keine ML-Token",
+    "conversationMovedToSpam": "Konversation in Spam verschoben"
   },
   "contacts": {
     "title": "Kontakte",
@@ -1683,5 +1751,13 @@
     "copyFailed": "Kopieren fehlgeschlagen",
     "generating": "Bericht wird erstellt…",
     "error": "Bericht konnte nicht erstellt werden."
+  },
+  "folders": {
+    "inbox": "Posteingang",
+    "sent": "Gesendet",
+    "drafts": "Entwürfe",
+    "trash": "Papierkorb",
+    "spam": "Spam",
+    "archive": "Archiv"
   }
 }

@@ -67,6 +67,8 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { aiRuns } = await import('../utils/aiRunRegistry.js');
+const { api } = await import('../utils/api.js');
+const { shortcutBus } = await import('../utils/shortcutBus.js');
 const MessagePane = (await import('./MessagePane.jsx')).default;
 
 const MSG_A = { id: 'a1', account_id: 'acct', folder: 'INBOX', uid: 1, subject: 'First', from_email: 'x@y.z', from_name: 'X', date: new Date().toISOString(), is_read: true, to_addresses: [], cc_addresses: [] };
@@ -81,6 +83,7 @@ before(() => {
   useStore.getState().setMessages?.([MSG_A, MSG_B]);
   root = createRoot(document.getElementById('root'));
 });
+
 after(async () => { await React.act(async () => root.unmount()); aiRuns.abortAll(); });
 
 describe('MessagePane renders', () => {
@@ -262,5 +265,111 @@ describe('Download all asks first when an attachment is risky', () => {
     document.removeEventListener('click', record);
     assert.equal(cancelled, false, 'the first click downloads');
     assert.doesNotMatch(after.textContent, armedNote);
+  });
+});
+
+// Characterization tests for the body renderer, written before extracting it into its own
+// component. The iframe lifecycle effect had no coverage at all, and two of the fixes living
+// in it (a document that never finishes loading, #1287ada; resetting the frame between
+// messages) would fail silently if the extraction dropped them.
+describe('message body rendering', () => {
+  const MSG_HTML = { ...MSG_A, id: 'h1', uid: 11, subject: 'HTML body' };
+  const MSG_TEXT = { ...MSG_A, id: 't1', uid: 12, subject: 'Text body' };
+  const BODIES = {
+    h1: { html: '<p id="hello">Hello from HTML</p>', text: '', attachments: [] },
+    t1: { html: '', text: 'Plain text with https://example.com in it', attachments: [] },
+  };
+  let originalFetch;
+
+  before(() => {
+    globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
+    dom.window.requestAnimationFrame ??= globalThis.requestAnimationFrame;
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
+      return { ok: true, status: 200, json: async () => (BODIES[id] ?? {}), text: async () => '' };
+    };
+    useStore.getState().setMessages?.([MSG_A, MSG_B, MSG_HTML, MSG_TEXT]);
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  const open = async (id) => {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage(id);
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 30)); });
+  };
+
+  test('an HTML body renders into an iframe', async () => {
+    await open('h1');
+    const frame = document.querySelector('iframe');
+    assert.ok(frame, 'an HTML body must render inside a frame, not inline');
+  });
+
+  test('the sanitized body reaches the frame', async () => {
+    // Asserted on srcdoc rather than contentDocument: jsdom does not parse srcdoc into a
+    // document, so the frame's own DOM is not observable here. What is observable, and what
+    // the extraction must preserve, is that the body reaches the frame at all.
+    await open('h1');
+    const frame = document.querySelector('iframe');
+    assert.match(frame?.getAttribute('srcdoc') ?? '', /Hello from HTML/, 'body must be handed to the frame');
+  });
+
+  test('the frame is sandboxed and scripts are not allowed to run', async () => {
+    // The body is attacker-controlled. Whatever else the extraction changes, it must not
+    // loosen this.
+    await open('h1');
+    const frame = document.querySelector('iframe');
+    const sandbox = frame?.getAttribute('sandbox');
+    assert.ok(sandbox !== null, 'the email frame must be sandboxed');
+    assert.ok(!/allow-scripts/.test(sandbox ?? ''), 'scripts must never be allowed in an email frame');
+  });
+
+  test('a text-only body renders without a frame', async () => {
+    await open('t1');
+    assert.match(document.getElementById('root').innerHTML, /Plain text with/);
+  });
+
+  test('switching messages resets the frame height', async () => {
+    // The pane sets the frame back to 300px before paint, so a tall email does not leave the
+    // next, shorter one padded out with its height.
+    await open('h1');
+    const frame = document.querySelector('iframe');
+    if (frame) frame.style.height = '2400px';
+    await open('t1');
+    const after = document.querySelector('iframe');
+    if (after) assert.notEqual(after.style.height, '2400px', 'height must not carry across messages');
+  });
+});
+
+describe('selected-message body shortcuts', () => {
+  test('i loads remote images only while the selected body is blocked', async (t) => {
+    const msg = { ...MSG_A, id: 'hotkey-image', uid: 41 };
+    const getBody = t.mock.method(api, 'getMessageBody', async (_id, remote) => ({ text: 'hello', hasBlockedRemoteImages: !remote }));
+    await React.act(async () => {
+      useStore.getState().setMessages([msg]);
+      useStore.getState().setSelectedMessage(msg.id);
+      root.render(React.createElement(MessagePane));
+      await new Promise(r => setTimeout(r, 30));
+    });
+    await React.act(async () => { shortcutBus.emit('loadRemoteImages'); await new Promise(r => setTimeout(r, 30)); });
+    assert.equal(getBody.mock.calls.filter(call => call.arguments[1] === true).length, 1);
+    await React.act(async () => { shortcutBus.emit('loadRemoteImages'); await new Promise(r => setTimeout(r, 20)); });
+    assert.equal(getBody.mock.calls.filter(call => call.arguments[1] === true).length, 1);
+  });
+
+  test('unsubscribe uses selected message existing flow once and ignores missing selection', async (t) => {
+    const msg = { ...MSG_A, id: 'hotkey-unsub', uid: 42, list_unsubscribe: '<https://example.invalid/unsub>' };
+    const unsubscribe = t.mock.method(api, 'unsubscribeMessage', async () => ({ type: 'one-click' }));
+    await React.act(async () => {
+      useStore.getState().setMessages([msg]);
+      useStore.getState().setSelectedMessage(msg.id);
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { shortcutBus.emit('unsubscribe'); await new Promise(r => setTimeout(r, 10)); });
+    assert.deepEqual(unsubscribe.mock.calls.map(call => call.arguments[0]), [msg.id]);
+    await React.act(async () => { shortcutBus.emit('unsubscribe'); useStore.getState().setSelectedMessage(null); shortcutBus.emit('unsubscribe'); });
+    assert.equal(unsubscribe.mock.callCount(), 1);
   });
 });

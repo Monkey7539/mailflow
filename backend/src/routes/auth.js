@@ -769,7 +769,8 @@ export async function patchPreferences(req, res) {
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
           categorizationEnabled, markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars, folderSyncInterval,
-          folderOrder, senderFavicons, showMessagePreviews, defaultSender } = req.body;
+          folderOrder, senderFavicons, showMessagePreviews, defaultSender,
+          conversationMode } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -826,6 +827,9 @@ export async function patchPreferences(req, res) {
     return res.status(400).json({ error: 'senderFavicons must be a boolean' });
   }
   const senderFaviconsVal = hasSenderFavicons ? senderFavicons : null;
+  // Only the three known modes are stored; anything else is ignored rather than persisted.
+  const conversationModeVal = ['off', 'list', 'pane'].includes(conversationMode) ? conversationMode : null;
+
   await query(`
     UPDATE users
     SET preferences = preferences
@@ -870,6 +874,7 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $40::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $40::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $41::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $41::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $42::text IS NOT NULL THEN jsonb_build_object('defaultSender', $42::text) ELSE '{}'::jsonb END
+      || CASE WHEN $43::text IS NOT NULL THEN jsonb_build_object('conversationMode', $43::text) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null, syncInterval ?? null,
@@ -880,7 +885,7 @@ export async function patchPreferences(req, res) {
       categorizationEnabled ?? null, markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderSyncIntervalVal, folderOrderJson, senderFaviconsVal,
-      showMessagePreviews ?? null, defaultSenderVal]);
+      showMessagePreviews ?? null, defaultSenderVal, conversationModeVal]);
 
   if (syncInterval != null) {
     const ms = parseInt(syncInterval) * 1000;

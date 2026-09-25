@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import RedisStore from 'connect-redis';
 import 'dotenv/config';
 import { redisClient } from './services/redis.js';
+import { buildSessionOptions } from './utils/sessionConfig.js';
 
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
@@ -87,23 +88,10 @@ if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
   process.exit(1);
 }
 
-// Session
-const sessionMiddleware = session({
-  store: new RedisStore({ client: redisClient }),
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    // 'auto' sets Secure based on req.secure, which Express derives from the
-    // X-Forwarded-Proto header (trust proxy: 1 above). This makes cookies work
-    // correctly regardless of whether the client connects via HTTPS (port 443),
-    // HTTP behind a TLS-terminating reverse proxy, or plain HTTP on port 80.
-    secure: 'auto',
-    httpOnly: true,
-    sameSite: 'lax',
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  }
-});
+// Session — options live in utils/sessionConfig.js so they can be exercised by tests.
+const sessionMiddleware = session(
+  buildSessionOptions(new RedisStore({ client: redisClient }), process.env.SESSION_SECRET)
+);
 
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',

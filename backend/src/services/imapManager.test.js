@@ -12,8 +12,9 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./spamPipeline.js', () => ({ classifyAndTagMessage: vi.fn() }));
+vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch } from './imapManager.js';
+import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -23,6 +24,7 @@ import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
 import { parseMessage } from './messageParser.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
+import { getAccountAddresses } from './mailAccess.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -747,6 +749,11 @@ describe('isConnectionRefusal', () => {
     'THROTTLED: too many requests',
     'rate limit exceeded',
     'Fresh sync connect timeout (30000ms)',
+    // Real capture of Yahoo refusing a connection burst (Mozilla bug 1727971), which is
+    // the provider and the symptom reported in #474. Reaches us via extractImapError.
+    '[LIMIT] CAPABILITY Rate limit hit.',
+    // A bare [LIMIT] with wording we have never seen still means back off.
+    '[LIMIT] Some limit we have not seen before',
   ])('flags a refusal: %s', (msg) => {
     expect(isConnectionRefusal(msg)).toBe(true);
   });
@@ -2192,7 +2199,7 @@ describe('Gmail label memberships (#418)', () => {
     });
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-  const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {} });
+  const manager = () => ({ backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {}, _secondaryConnectBlocked: () => null, _noteSecondaryRefusal: vi.fn() });
   async function sync(mgr, folder) {
     await ImapManager.prototype.syncMessages.call(mgr, acct, clientFor(folder), folder, 20, false, true);
   }
@@ -2344,7 +2351,7 @@ describe('folder integrity reconciliation safety', () => {
   it('backs off unresolved membership without blocking other folders or advancing a checkpoint', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const { mgr } = setup([]);
-    Object.assign(mgr, { _statusSyncBackoff: new Map(), _statusSyncRunning: new Set(), backfillRunning: new Set(), onDemandSyncing: new Set(),
+    Object.assign(mgr, { _statusSyncBackoff: new Map(), _statusSyncRunning: new Set(), backfillRunning: new Set(), onDemandSyncing: new Set(), _secondaryConnectBlocked: () => null, _noteSecondaryRefusal: vi.fn(),
       _refreshObservedFolder: vi.fn().mockResolvedValue(false) });
     expect(mgr._queueObservedFolder(acct, 'INBOX', observed)).toBe(true);
     await new Promise(resolve => setImmediate(resolve));
@@ -2508,5 +2515,1179 @@ describe('maybeClassifyNewMessage — antispam ingest hook', () => {
     // A failed move must not wedge the account: the next one goes through.
     await expect(imap.moveMessage({ id: 'acct' }, 2, 'INBOX', 'Junk')).resolves.toBe(42);
     move.mockRestore();
+  });
+});
+
+describe('computeThreadId subject fallback requires a shared correspondent (#468)', () => {
+  const ACCOUNT = 'acct-1';
+  const OWNER = 'me@example.com';
+
+  // The fallback only runs for messages with no References and no In-Reply-To, so every
+  // case here passes null for both.
+  const noHeaders = [null, null];
+
+  beforeEach(() => {
+    query.mockReset();
+    getAccountAddresses.mockReset();
+    getAccountAddresses.mockResolvedValue([OWNER]);
+  });
+
+  it('does not merge two senders who only have the account owner in common', async () => {
+    // The report: PayPal and an unrelated sender used the same subject, and MailFlow
+    // threaded them together.
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'paypal-thread',
+        from_email: 'service@paypal.com',
+        to_addresses: [{ email: OWNER }],
+        cc_addresses: [],
+      }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<new@other.com>', ...noHeaders, 'Login attempt', {
+      fromEmail: 'alerts@other.com',
+      to: [{ email: OWNER }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('<new@other.com>'); // its own message id: a new thread
+  });
+
+  it('still threads a reply from the other party, which is why the fallback exists', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'project-thread',
+        from_email: 'anna@partner.com',
+        to_addresses: [{ email: OWNER }],
+        cc_addresses: [],
+      }],
+    });
+
+    // Our own reply, sent to Anna, with the headers stripped by the client.
+    const id = await computeThreadId(ACCOUNT, '<reply@example.com>', ...noHeaders, 'RE: Project update', {
+      fromEmail: OWNER,
+      to: [{ email: 'anna@partner.com' }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('project-thread');
+  });
+
+  it('matches on a cc participant, not just from and to', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'cc-thread',
+        from_email: 'anna@partner.com',
+        to_addresses: [{ email: OWNER }],
+        cc_addresses: [{ email: 'bob@partner.com' }],
+      }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<x@partner.com>', ...noHeaders, 'Quarterly numbers', {
+      fromEmail: 'bob@partner.com',
+      to: [{ email: OWNER }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('cc-thread');
+  });
+
+  it('skips a non-matching candidate and joins a later one that does share a correspondent', async () => {
+    query.mockResolvedValueOnce({
+      rows: [
+        { thread_id: 'stranger', from_email: 'noreply@bank.com', to_addresses: [{ email: OWNER }], cc_addresses: [] },
+        { thread_id: 'real', from_email: 'anna@partner.com', to_addresses: [{ email: OWNER }], cc_addresses: [] },
+      ],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<y@partner.com>', ...noHeaders, 'Status', {
+      fromEmail: 'anna@partner.com',
+      to: [{ email: OWNER }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('real');
+  });
+
+  it('is case insensitive about addresses', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 't', from_email: 'Anna@Partner.com', to_addresses: [{ email: OWNER }], cc_addresses: [] }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<z@partner.com>', ...noHeaders, 'Status', {
+      fromEmail: 'anna@PARTNER.COM', to: [], cc: [], own: OWNER.toUpperCase(),
+    });
+
+    expect(id).toBe('t');
+  });
+
+  it('parses address columns that arrive as JSON strings', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'legacy',
+        from_email: 'anna@partner.com',
+        to_addresses: JSON.stringify([{ email: OWNER }]),
+        cc_addresses: '[]',
+      }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<w@partner.com>', ...noHeaders, 'Status', {
+      fromEmail: 'anna@partner.com', to: [], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('legacy');
+  });
+
+  it('starts a new thread when the message has no correspondent but the owner', async () => {
+    // A message to nobody but the account itself cannot be matched on participants, so it
+    // must not fall back to subject-only matching.
+    const id = await computeThreadId(ACCOUNT, '<self@example.com>', ...noHeaders, 'Notes to self', {
+      fromEmail: OWNER, to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('<self@example.com>');
+    expect(query).not.toHaveBeenCalled(); // no point querying with nothing to match on
+  });
+
+  it('treats an alias as the account\'s own address, not a shared correspondent', async () => {
+    // An alias is typically a shared address like support@, which is exactly where unrelated
+    // automated mail lands. If it counted as a correspondent it would merge that mail back
+    // together and reintroduce the bug for alias users.
+    // A fresh account id, because the own-address lookup is memoized per account for five
+    // minutes and the earlier cases already cached acct-1 without an alias.
+    const ALIAS_ACCOUNT = 'acct-alias';
+    getAccountAddresses.mockResolvedValue([OWNER, 'support@example.com']);
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'paypal-thread',
+        from_email: 'service@paypal.com',
+        to_addresses: [{ email: 'support@example.com' }],
+        cc_addresses: [],
+      }],
+    });
+
+    const id = await computeThreadId(ALIAS_ACCOUNT, '<new@other.com>', ...noHeaders, 'Login attempt', {
+      fromEmail: 'alerts@other.com',
+      to: [{ email: 'support@example.com' }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('<new@other.com>'); // a new thread, not paypal-thread
+  });
+
+  it('does not treat a shared recipient as a shared correspondent', async () => {
+    // The hole in the first version of this fix. Both messages are addressed to the same
+    // third party, here a forwarding address that is neither the account login nor an alias.
+    // Two unrelated senders writing to it have it in common, which is not correspondence:
+    // forwarded mail, catch-all domains, mailing lists and BCC all produce this.
+    const FWD_ACCOUNT = 'acct-forwarded';
+    getAccountAddresses.mockResolvedValue(['simanoom@gmail.com']);
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'storage-alert-thread',
+        from_email: 'alert-3385@lxisa.zub',
+        to_addresses: [{ email: 'me@aol.com' }],
+        cc_addresses: [],
+      }],
+    });
+
+    const id = await computeThreadId(FWD_ACCOUNT, '<second@yxcoi.isj>', ...noHeaders, 'Action required: storage 100% full', {
+      fromEmail: 'alert-6476@yxcoi.isj',
+      to: [{ email: 'me@aol.com' }],
+      cc: [],
+      own: 'simanoom@gmail.com',
+    });
+
+    expect(id).toBe('<second@yxcoi.isj>'); // its own thread, not the first sender's
+  });
+
+  it('threads a reply because the other party sent one and received the other', async () => {
+    const REPLY_ACCOUNT = 'acct-reply-direction';
+    getAccountAddresses.mockResolvedValue([OWNER]);
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'anna-thread',
+        from_email: 'anna@partner.com',
+        to_addresses: [{ email: OWNER }],
+        cc_addresses: [],
+      }],
+    });
+
+    // Our own reply to Anna, headers stripped: she is our recipient and their sender.
+    const id = await computeThreadId(REPLY_ACCOUNT, '<mine@example.com>', ...noHeaders, 'RE: Status', {
+      fromEmail: OWNER,
+      to: [{ email: 'anna@partner.com' }],
+      cc: [],
+      own: OWNER,
+    });
+
+    expect(id).toBe('anna-thread');
+  });
+
+  it('never reaches the fallback when the message carries threading headers', async () => {
+    query.mockResolvedValueOnce({ rows: [{ message_id: '<root@x.com>', thread_id: 'header-thread' }] });
+
+    const id = await computeThreadId(ACCOUNT, '<reply@x.com>', '<root@x.com>', '<root@x.com>', 'Anything', {
+      fromEmail: 'someone@nowhere.com', to: [], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('header-thread');
+  });
+});
+
+// ── Backfill error text (#474 follow-up) ─────────────────────────────────────
+//
+// imapflow rejects every failed IMAP command with the same Error('Command failed'), so a
+// log site using err.message explains nothing. v3.5.3 converted the log sites to
+// extractImapError but missed the backfill catch, and the reporter's post-upgrade logs
+// still showed "Backfill failed for .../Sent: Command failed" with the server's reason
+// discarded.
+//
+// This drives the real catch in backfillMessages rather than inspecting the source: the
+// first awaited call inside the try is a query(), so rejecting it with an imapflow-shaped
+// error reaches the catch the same way a failed FETCH does.
+describe('backfillMessages — error text (#474)', () => {
+  const imapFailure = () => Object.assign(new Error('Command failed'), {
+    responseText: 'AUTHENTICATE Server error - Please try again later',
+    serverResponseCode: 'UNAVAILABLE',
+  });
+
+  let mgr;
+  let spy;
+  beforeEach(() => {
+    mgr = new ImapManager({ clients: new Set() });
+    spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('logs the server explanation and response code, not the bare Command failed', async () => {
+    query.mockReset();
+    query.mockRejectedValue(imapFailure());
+
+    await mgr.backfillMessages({ id: 'acc-1', user_id: 'u1', imap_host: 'imap.mail.yahoo.com' }, 'Sent');
+
+    const line = spy.mock.calls.map(args => args.join(' ')).find(s => s.includes('Backfill failed'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('[UNAVAILABLE]');
+    expect(line).toContain('AUTHENTICATE Server error');
+    expect(line).not.toContain('Command failed');
+  });
+
+  it('releases the per-folder guard so a later backfill can run', async () => {
+    query.mockReset();
+    query.mockRejectedValue(imapFailure());
+    await mgr.backfillMessages({ id: 'acc-1', user_id: 'u1' }, 'Sent');
+    expect(mgr.backfillRunning.has('acc-1:Sent')).toBe(false);
+  });
+});
+
+// ── Body prefetch circuit breaker (#474 follow-up) ───────────────────────────
+//
+// prefetchFolderBodies caught each failure and continued to the next UID. Every iteration
+// opens its own login (fetchMessageBody retries once on a fresh one), so a provider that
+// was refusing turned one refusal into one per remaining message and consumed the account's
+// connection budget. The reporter saw prefetch failures repeating across UIDs after
+// v3.5.3, followed by 'IMAP connections busy, please retry' on unrelated operations.
+describe('prefetchFolderBodies — stops instead of hammering a refusing provider (#474)', () => {
+  const YAHOO = { id: 'acc-1', user_id: 'u1', imap_host: 'imap.mail.yahoo.com', enabled: true };
+  const UIDS = [101, 102, 103, 104, 105, 106, 107, 108];
+
+  let mgr;
+  function arrange(failWith) {
+    mgr = new ImapManager({ clients: new Set() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM email_accounts')) return { rows: [YAHOO] };
+      if (sql.includes('id = ANY($1::uuid[])')) {
+        return { rows: UIDS.map(uid => ({ id: `m-${uid}`, uid, folder: 'INBOX' })) };
+      }
+      return { rows: [] }; // body-cached check: not cached, so each one is attempted
+    });
+    mgr.fetchMessageBody = vi.fn(async () => { throw failWith(); });
+    vi.spyOn(mgr, '_noteConnectionRefusal').mockImplementation(() => {});
+    return mgr;
+  }
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('stops after the FIRST refusal rather than trying every remaining message', async () => {
+    const mgr = arrange(() => Object.assign(new Error('Command failed'), {
+      responseText: 'AUTHENTICATE Server error - Please try again later',
+      serverResponseCode: 'UNAVAILABLE',
+    }));
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT back off live sync when a best-effort prefetch is refused', async () => {
+    // _connectCooldown gates connectAccount, the health-check reconnect and the poll-only
+    // tick. Arming it from here would delay recovery of the user's actual mail flow because
+    // a background body fetch was refused, and would inflate the same failure counter that
+    // real connect refusals escalate on. The snippet indexer keeps its refusal backoff in a
+    // separate host-scoped map for exactly this reason.
+    const mgr = arrange(() => Object.assign(new Error('Command failed'), {
+      responseText: 'AUTHENTICATE Server error - Please try again later',
+      serverResponseCode: 'UNAVAILABLE',
+    }));
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
+    expect(mgr._connectCooldown.has('acc-1')).toBe(false);
+    // It IS recorded, on the backoff that gates background connections.
+    expect(mgr._secondaryCooldown.has('acc-1')).toBe(true);
+  });
+
+  it('skips the run entirely while secondary connections are backed off', async () => {
+    const mgr = arrange(() => new Error('unused'));
+    mgr._secondaryCooldown.set('acc-1', { until: Date.now() + 30000, failures: 1 });
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    expect(mgr.fetchMessageBody).not.toHaveBeenCalled();
+  });
+
+  it('stops at the FIRST rejected AUTHENTICATE and arms the backoff', async () => {
+    // Yahoo answers a burst with [AUTHENTICATIONFAILED] on an account whose credentials are
+    // fine. It is not a refusal by wording, so if only the refusal test armed the backoff,
+    // this loop would be re-entered on the next folder view and spend three more logins,
+    // every view, for as long as the provider stayed busy.
+    const mgr = arrange(() => Object.assign(new Error('Command failed'), {
+      responseText: 'AUTHENTICATE Invalid credentials',
+      serverResponseCode: 'AUTHENTICATIONFAILED',
+    }));
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);
+    expect(mgr._secondaryCooldown.has('acc-1')).toBe(true);
+    // Still never the account-wide ladder: the user's own login is working.
+    expect(mgr._connectCooldown.has('acc-1')).toBe(false);
+  });
+
+  it('stops after three consecutive message-level failures WITHOUT arming a backoff', async () => {
+    // An expunged UID or a body that will not parse says nothing about the connection, so
+    // the next folder view should be free to try again immediately.
+    const mgr = arrange(() => new Error('some message-level problem'));
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(PREFETCH_MAX_CONSECUTIVE_ERRORS);
+    expect(mgr._secondaryCooldown.has('acc-1')).toBe(false);
+    expect(mgr._noteConnectionRefusal).not.toHaveBeenCalled();
+  });
+
+  it('does not abort on scattered failures, because the counter resets on success', async () => {
+    const mgr = arrange(() => new Error('nope'));
+    let n = 0;
+    mgr.fetchMessageBody = vi.fn(async () => {
+      n += 1;
+      if (n % 2 === 1) throw new Error('one bad message');
+      return { html: '<p>ok</p>', text: 'ok', attachments: [] };
+    });
+
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+
+    // Alternating failure/success never reaches three in a row, so every message is attempted.
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(UIDS.length);
+  });
+});
+
+// ── Secondary-connection backoff (#474) ──────────────────────────────────────
+//
+// A provider can accept the sync connection while refusing additional concurrent logins.
+// Yahoo does, and #474's logs show the consequence: the folder-status connect is refused
+// and arms 30s, the next successful sync tick clears the counter as "healthy again", and
+// the following refusal is once more refusal #1. The backoff oscillates at the base delay
+// and never reaches one long enough for the provider to recover.
+describe('secondary connection backoff (#474)', () => {
+  const account = { id: 'acc-1', user_id: 'u1', imap_host: 'imap.mail.yahoo.com' };
+  let mgr;
+  beforeEach(() => {
+    mgr = new ImapManager({ clients: new Set() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('escalates even though live sync keeps succeeding (the reported loop)', () => {
+    const delays = [];
+    for (let cycle = 0; cycle < 4; cycle++) {
+      delays.push(mgr._noteSecondaryRefusal(account));
+      // A successful sync tick: this is the line that used to wipe the counter.
+      mgr._connectCooldown.delete(account.id);
+    }
+    expect(delays).toEqual([...delays].sort((a, b) => a - b));
+    expect(delays[3]).toBeGreaterThan(delays[0]);
+    expect(mgr._secondaryCooldown.get(account.id).failures).toBe(4);
+  });
+
+  it('survives a successful sync clearing the live-sync cooldown (the actual bug)', () => {
+    mgr._noteSecondaryRefusal(account);
+    // This is the line a successful sync tick runs. It must not speak for secondary work.
+    mgr._connectCooldown.delete(account.id);
+    expect(mgr._secondaryCooldown.has(account.id)).toBe(true);
+  });
+
+  it('IS cleared by an explicit human reconnect, so the button is not a no-op', () => {
+    // clearConnectCooldown is the deliberate user action (editing the account, pressing
+    // Reconnect). Leaving folder counts and prefetch frozen for up to the cap after someone
+    // has asked for a retry makes the button look broken.
+    mgr._noteSecondaryRefusal(account);
+    mgr.clearConnectCooldown(account.id);
+    expect(mgr._secondaryCooldown.has(account.id)).toBe(false);
+    expect(mgr._connectCooldown.has(account.id)).toBe(false);
+  });
+
+  // Drives the real _withCountClient rather than calling the helper, so the wiring is what
+  // is under test. Calling _clearSecondaryCooldown directly passed even with the call site
+  // deleted, which proved nothing.
+  describe('_withCountClient wiring', () => {
+    function arrangeConnect(connectImpl) {
+      ImapFlow.mockImplementation(function () {
+        const client = new EventEmitter();
+        client.connect = vi.fn(connectImpl);
+        client.logout = vi.fn(() => Promise.resolve());
+        client.close = vi.fn();
+        return client;
+      });
+      getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+      resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+      query.mockResolvedValue({ rows: [{ ...account, enabled: true }] });
+      // ImapFlow is a module-level mock shared by every test in this file, so its call
+      // history is not ours until we clear it.
+      ImapFlow.mockClear();
+    }
+
+    it('clears the secondary backoff when the connection succeeds', async () => {
+      arrangeConnect(() => Promise.resolve());
+      // An expired entry: not blocking any more, but the failure count is still standing.
+      mgr._secondaryCooldown.set(account.id, { until: Date.now() - 1, failures: 3 });
+
+      const result = await mgr._withCountClient(account, async () => 'ok');
+
+      expect(result).toBe('ok');
+      expect(mgr._secondaryCooldown.has(account.id)).toBe(false);
+    });
+
+    it('arms the SECONDARY backoff on a refusal, never the live-sync one', async () => {
+      arrangeConnect(() => Promise.reject(Object.assign(new Error('Command failed'), {
+        responseText: 'AUTHENTICATE Server error - Please try again later',
+        serverResponseCode: 'UNAVAILABLE',
+      })));
+
+      await expect(mgr._withCountClient(account, async () => 'ok')).rejects.toThrow();
+
+      expect(mgr._secondaryCooldown.get(account.id)?.failures).toBe(1);
+      expect(mgr._connectCooldown.has(account.id)).toBe(false);
+    });
+
+    it('clears the backoff when the LOGIN succeeds but the work afterwards fails', async () => {
+      // The provider accepting the connection is the entire signal this backoff tracks. An
+      // integrity pass or a mailbox open failing afterwards says nothing about whether
+      // secondary connections are welcome, and leaving the backoff armed after a login that
+      // plainly worked would block the next attempt for no reason.
+      arrangeConnect(() => Promise.resolve());
+      mgr._secondaryCooldown.set(account.id, { until: Date.now() - 1, failures: 3 });
+
+      await expect(mgr._withCountClient(account, async () => { throw new Error('mailbox open failed'); }))
+        .rejects.toThrow('mailbox open failed');
+
+      expect(mgr._secondaryCooldown.has(account.id)).toBe(false);
+    });
+
+    it('arms the SECONDARY ladder on a rejected AUTHENTICATE, not the account-wide one', async () => {
+      // Routing this to _noteAuthFailure would pause periodic sync for at least five minutes,
+      // escalating toward six hours, on an account whose own login is working. A genuinely
+      // wrong password is still caught by connectAccount, the reconnect path and the
+      // poll-only tick, which each call _noteAuthFailure themselves.
+      arrangeConnect(() => Promise.reject(Object.assign(new Error('Command failed'), {
+        responseText: 'AUTHENTICATE Invalid credentials',
+        serverResponseCode: 'AUTHENTICATIONFAILED',
+      })));
+
+      await expect(mgr._withCountClient(account, async () => 'ok')).rejects.toThrow();
+
+      expect(mgr._secondaryCooldown.get(account.id)?.failures).toBe(1);
+      expect(mgr._connectCooldown.has(account.id)).toBe(false);
+    });
+
+    it('refuses to open while a backoff is active', async () => {
+      arrangeConnect(() => Promise.resolve());
+      mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+
+      await expect(mgr._withCountClient(account, async () => 'ok'))
+        .rejects.toThrow(/cooldown active/i);
+      expect(ImapFlow).not.toHaveBeenCalled();
+    });
+  });
+
+  it('blocks secondary work while EITHER backoff is active', () => {
+    expect(mgr._secondaryConnectBlocked(account.id)).toBeNull();
+
+    mgr._connectCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+    expect(mgr._secondaryConnectBlocked(account.id)).toBeTruthy();
+
+    mgr._connectCooldown.delete(account.id);
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+    expect(mgr._secondaryConnectBlocked(account.id)).toBeTruthy();
+  });
+
+  it('does not block once a backoff has expired', () => {
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() - 1, failures: 9 });
+    expect(mgr._secondaryConnectBlocked(account.id)).toBeNull();
+  });
+});
+
+// The third 'Command failed' sink #474 exposed. Drives the real catch: _queueObservedFolder
+// kicks off a promise chain, so rejecting _refreshObservedFolder reaches the same handler a
+// failed IMAP command would.
+describe('folder integrity sync error text (#474)', () => {
+  it('logs the server explanation rather than the bare Command failed', async () => {
+    const mgr = new ImapManager({ clients: new Set() });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+    mgr._refreshObservedFolder = vi.fn(() => Promise.reject(Object.assign(new Error('Command failed'), {
+      responseText: 'AUTHENTICATE Server error - Please try again later',
+      serverResponseCode: 'UNAVAILABLE',
+    })));
+
+    const queued = mgr._queueObservedFolder(
+      { id: 'acc-1', user_id: 'u1', imap_host: 'imap.mail.yahoo.com' }, 'INBOX', {});
+    expect(queued).toBe(true);
+    // Let the chain settle.
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    const line = warn.mock.calls.map(a => a.join(' ')).find(l => l.includes('Folder integrity sync failed'));
+    expect(line).toBeTruthy();
+    expect(line).toContain('[UNAVAILABLE]');
+    expect(line).not.toContain('Command failed');
+    vi.restoreAllMocks();
+  });
+});
+
+// ── Yahoo session budget (#474 follow-up) ────────────────────────────────────
+//
+// A fresh Yahoo account with a fresh app password had its FIRST secondary login refused
+// with [UNAVAILABLE] while the primary session worked: a per-account session ceiling, not
+// a throttle (Thunderbird hit the same wall, Mozilla bug 1727971). These pin the pieces
+// that make MailFlow open fewer, politer connections against such a provider.
+describe('yahoo session budget (#474)', () => {
+  const YAHOO = { id: '', user_id: 'u1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test', auth_user: 'y', auth_pass: 'enc' };
+  let seq = 100;
+  const freshYahoo = () => ({ ...YAHOO, id: `acct-yb-${++seq}` });
+  const refusal = () => Object.assign(new Error('Command failed'), {
+    responseText: 'AUTHENTICATE Server error - Please try again later',
+    serverResponseCode: 'UNAVAILABLE',
+  });
+
+  function mockConnect() {
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    ImapFlow.mockClear();
+  }
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('profile: one pooled body connection, no startup pre-warm', () => {
+    const profile = providerProfile({ imap_host: 'imap.mail.yahoo.com' });
+    expect(profile.poolSize).toBe(1);
+    expect(shouldPrewarmPool(profile)).toBe(false);
+    // Everyone else keeps today's behavior.
+    expect(shouldPrewarmPool(providerProfile({ imap_host: 'imap.example.com' }))).toBe(true);
+  });
+
+  it('pool: a second acquire QUEUES for the one Yahoo connection instead of opening another', async () => {
+    mockConnect();
+    const account = freshYahoo();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+
+    const first = await acquirePooledClient(account);
+    expect(ImapFlow).toHaveBeenCalledTimes(1);
+
+    const second = acquirePooledClient(account);
+    await new Promise(r => setTimeout(r, 60));
+    expect(ImapFlow).toHaveBeenCalledTimes(1); // clamp held: no second login attempted
+
+    releasePooledClient(account, first);
+    expect(await second).toBe(first);          // the waiter got the same session
+  });
+
+  it('pool: a non-Yahoo provider still grows to a second connection', async () => {
+    mockConnect();
+    const account = { ...freshYahoo(), imap_host: 'imap.example.com' };
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    await acquirePooledClient(account);
+    await acquirePooledClient(account);
+    expect(ImapFlow).toHaveBeenCalledTimes(2);
+  });
+
+  it('backfill: skips the run while the secondary backoff is armed', async () => {
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = freshYahoo();
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+    query.mockReset();
+
+    await mgr.backfillMessages(account, 'INBOX');
+
+    expect(query).not.toHaveBeenCalled();               // never reached openBfClient
+    expect(mgr.backfillRunning.size).toBe(0);           // and left no stuck guard behind
+  });
+
+  it('backfill: a refusal reaching its catch arms the backoff, so the folder walk stops paying per folder', async () => {
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = freshYahoo();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    query.mockReset();
+    query.mockRejectedValue(refusal());
+
+    await mgr.backfillMessages(account, 'INBOX');
+    expect(mgr._secondaryCooldown.has(account.id)).toBe(true);
+
+    // The next folder in the walk now hits the entry guard instead of logging in.
+    query.mockReset();
+    await mgr.backfillMessages(account, 'Sent');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('backfill: an ordinary error does NOT arm the backoff', async () => {
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = freshYahoo();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    query.mockReset();
+    // Wording chosen to not match isConnectionRefusal (an earlier draft said 'temporarily
+    // down', which the classifier counts as a refusal: the test was testing itself).
+    query.mockRejectedValue(new Error('database is unreachable'));
+    await mgr.backfillMessages(account, 'INBOX');
+    expect(mgr._secondaryCooldown.has(account.id)).toBe(false);
+  });
+
+  it('body fetch: fails fast with a typed error while refused and no idle session exists', async () => {
+    mockConnect();
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = freshYahoo();
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+
+    await expect(mgr.fetchMessageBody(account, 42, 'INBOX')).rejects.toMatchObject({ providerRefusing: true });
+    expect(ImapFlow).not.toHaveBeenCalled();            // no doomed login, no fresh-login retry
+  });
+
+  it('body fetch: the gate error wording can never re-arm the backoff it reports', () => {
+    expect(isConnectionRefusal('Mail server is limiting connections for this account')).toBe(false);
+  });
+
+  it('body fetch: proceeds normally when no backoff is armed', async () => {
+    mockConnect();
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = freshYahoo();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    // The fake transport has no mailboxOpen, so the fetch fails PAST the gate. What this
+    // pins is only that the gate let it through: the failure is not the typed gate error,
+    // and a login attempt was actually made.
+    const err = await mgr.fetchMessageBody(account, 42, 'INBOX').catch(e => e);
+    expect(err.providerRefusing).not.toBe(true);
+    expect(ImapFlow).toHaveBeenCalled();
+  });
+
+  it('hasIdlePooledClient: reports a free usable client and nothing else', () => {
+    const a = {}; const b = {};
+    const pools = new Map([['acct', { clients: [a, b], inUse: new Set([a]), waiters: [], pending: 0 }]]);
+    expect(hasIdlePooledClient(pools, 'acct')).toBe(true);        // b is free
+    pools.get('acct').inUse.add(b);
+    expect(hasIdlePooledClient(pools, 'acct')).toBe(false);       // all busy
+    expect(hasIdlePooledClient(pools, 'other')).toBe(false);      // no pool at all
+    const broken = { usable: false };
+    pools.set('acct2', { clients: [broken], inUse: new Set(), waiters: [], pending: 0 });
+    expect(hasIdlePooledClient(pools, 'acct2')).toBe(false);      // dead transport is not idle
+  });
+});
+
+// ── The gate's bypass and retry, driven end to end (review of d3597f5) ───────────────────
+//
+// The review found the real hole above the acquire race: the entry gate could admit a call
+// to reuse an idle pooled session, and the transient-failure retry then opened a fresh
+// LOGIN anyway, while the backoff was armed. It also noted hasIdlePooledClient was only
+// unit-tested in isolation. These drive fetchMessageBody through the REAL pool.
+describe('fetchMessageBody under an armed backoff (#474)', () => {
+  let seq = 500;
+  function arrange() {
+    const account = { id: `acct-gate-${++seq}`, user_id: 'u1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test', auth_user: 'y', auth_pass: 'enc' };
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      // ECONNRESET is in fetchMessageBody's isTransient list, so the failure genuinely
+      // reaches the retry decision. (A first draft used 'Socket timeout', which is NOT
+      // transient there: the no-retry test then passed without exercising the guard.)
+      client.getMailboxLock = vi.fn(() => Promise.reject(new Error('read ECONNRESET')));
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    ImapFlow.mockClear();
+    const mgr = new ImapManager({ clients: new Set() });
+    return { mgr, account };
+  }
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('admits a blocked call over an IDLE pooled session (the bypass the gate exists for)', async () => {
+    const { mgr, account } = arrange();
+    releasePooledClient(account, await acquirePooledClient(account)); // pool now holds 1 idle
+    expect(ImapFlow).toHaveBeenCalledTimes(1);
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+
+    const err = await mgr.fetchMessageBody(account, 42, 'INBOX').catch(e => e);
+
+    expect(err.providerRefusing).not.toBe(true);   // gate admitted it
+    expect(err.message).toMatch(/ECONNRESET/);     // it really ran over the pooled session
+    expect(ImapFlow).toHaveBeenCalledTimes(1);     // and opened NO new login, retry included
+  });
+
+  it('retries over a fresh LOGIN only when no backoff is armed', async () => {
+    const { mgr, account } = arrange();
+    releasePooledClient(account, await acquirePooledClient(account));
+    expect(ImapFlow).toHaveBeenCalledTimes(1);
+
+    const err = await mgr.fetchMessageBody(account, 42, 'INBOX').catch(e => e);
+
+    expect(err.message).toMatch(/ECONNRESET/);
+    expect(ImapFlow).toHaveBeenCalledTimes(2);     // pooled attempt + the fresh-login retry
+  });
+
+  it('keeps the poolExhausted flag through the error wrap, so the busy 503 can fire', async () => {
+    const { mgr, account } = arrange();
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.close = vi.fn();
+      client.logout = vi.fn(() => Promise.resolve());
+      client.connect = vi.fn(() => Promise.reject(Object.assign(new Error('IMAP connections busy, please retry'), { poolExhausted: true })));
+      return client;
+    });
+    const err = await mgr.fetchMessageBody(account, 42, 'INBOX').catch(e => e);
+    expect(err.poolExhausted).toBe(true);
+  });
+});
+// ── reconcileDeletes must not trust a SEARCH result the server contradicts (#472) ──────
+//
+// Reported on a Strato (Dovecot) account: deleting ONE message in a 15-message INBOX logged
+// "Reconcile: removing 15 server-deleted message(s)" and emptied the folder locally, then
+// backfill restored the rows and the periodic reconcile purged them again, a ten-minute loop
+// the user saw as the mailbox flashing empty. UID SEARCH ALL had returned an empty array for
+// a folder the server had just reported as non-empty at SELECT. reconcileDeletes guarded
+// against search() returning false/undefined, but an empty ARRAY is iterable and was taken
+// as authoritative. The integrity pass already refuses a SEARCH result whose size disagrees
+// with mailbox.exists; this brings reconcile in line with it.
+//
+// Drives the real reconcileDeletes through the real pool: ImapFlow is mocked at module
+// level, so connectImapClient hands back our fake. Each test uses its own account id
+// because the pool is module-level and would otherwise reuse a previous test's fake client.
+describe('reconcileDeletes — SEARCH result vs mailbox.exists (#472)', () => {
+  let seq = 0;
+  function arrange({ exists, searchResult, dbUids }) {
+    const account = { id: `acct-472-${++seq}`, user_id: 'u1', imap_host: 'imap.strato.de', email_address: 'x@example.test' };
+    const mgr = new ImapManager({ clients: new Set() });
+    vi.spyOn(mgr, '_isMoveUidGuarded').mockReturnValue(false);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      client.getMailboxLock = vi.fn(async (path) => {
+        client.mailbox = { path, exists };
+        return { release: vi.fn() };
+      });
+      client.search = vi.fn(async () => searchResult);
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('SELECT DISTINCT m.folder')) return { rows: [{ folder: 'INBOX' }] };
+      if (sql.includes('SELECT uid FROM messages')) return { rows: dbUids.map(uid => ({ uid })) };
+      return { rows: [], rowCount: 0 };
+    });
+    return { mgr, account };
+  }
+  const deletes = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages'));
+  afterEach(() => { vi.restoreAllMocks(); ImapFlow.mockReset(); });
+
+  it('does NOT purge a folder when SEARCH returns nothing but the server says it is non-empty', async () => {
+    // The reported case: 14 still on the server, SEARCH came back empty, 15 rows cached.
+    const { mgr, account } = arrange({ exists: 14, searchResult: [], dbUids: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] });
+    await mgr.reconcileDeletes(account);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it('does NOT purge when SEARCH returns fewer UIDs than the server reports', async () => {
+    const { mgr, account } = arrange({ exists: 14, searchResult: [1,2,3,4,5,6,7,8,9,10], dbUids: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] });
+    await mgr.reconcileDeletes(account);
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it('still removes the genuine orphan when SEARCH and the server agree', async () => {
+    const { mgr, account } = arrange({ exists: 14, searchResult: [1,2,3,4,5,6,7,8,9,10,11,12,13,14], dbUids: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] });
+    await mgr.reconcileDeletes(account);
+    const del = deletes();
+    expect(del).toHaveLength(1);
+    expect(del[0][1][2]).toEqual([15]);
+  });
+
+  it('still empties a folder the server itself reports as empty', async () => {
+    // exists === 0 and an empty SEARCH agree, so every cached row really is gone. This is
+    // why a blanket "never delete all rows of a folder" backstop would be wrong.
+    const { mgr, account } = arrange({ exists: 0, searchResult: [], dbUids: [7, 8, 9] });
+    await mgr.reconcileDeletes(account);
+    const del = deletes();
+    expect(del).toHaveLength(1);
+    expect(del[0][1][2]).toEqual([7, 8, 9]);
+  });
+});
+
+// ── setFlag over the persistent IDLE connection (#474 round 4) ───────────────────────────
+//
+// The reporter's open tab retried one mark-read into a fresh refused LOGIN every few
+// seconds, keeping Yahoo's refusal alive. Thunderbird stores flags on the session already
+// selected on the folder, costing zero logins; setFlag now does the same for INBOX via the
+// persistent client, falling back to the pool only when that cannot serve it.
+describe('setFlag routing (#474 round 4)', () => {
+  let seq = 900;
+  function arrange({ persistent } = {}) {
+    const account = { id: `acct-sf-${++seq}`, user_id: 'u1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test', auth_user: 'y', auth_pass: 'enc' };
+    const mgr = new ImapManager({ clients: new Set() });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    ImapFlow.mockImplementation(function () {
+      const c = new EventEmitter();
+      c.usable = true;
+      c.connect = vi.fn(() => Promise.resolve());
+      c.logout = vi.fn(() => Promise.resolve());
+      c.close = vi.fn();
+      c.noop = vi.fn(() => Promise.resolve());
+      c.getMailboxLock = vi.fn(async () => ({ release: vi.fn() }));
+      c.messageFlagsAdd = vi.fn(async () => true);
+      c.messageFlagsRemove = vi.fn(async () => true);
+      return c;
+    });
+    ImapFlow.mockClear();
+    if (persistent) mgr.connections.set(account.id, persistent);
+    return { mgr, account };
+  }
+  const fakePersistent = (over = {}) => {
+    const release = vi.fn();
+    return Object.assign({
+      usable: true,
+      release,
+      getMailboxLock: vi.fn(async () => ({ release })),
+      messageFlagsAdd: vi.fn(async () => true),
+      messageFlagsRemove: vi.fn(async () => true),
+    }, over);
+  };
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('serializes two opposite flag calls so a stale STORE cannot land last', async () => {
+    // The review's inversion: call A (\\Seen=true) slow on the persistent session, call B
+    // (\\Seen=false) issued right after. Unserialized, A's late STORE could land after B
+    // and silently re-read the message. The per-account chain makes B wait for A entirely.
+    const order = [];
+    let releaseA;
+    const persistent = fakePersistent({
+      messageFlagsAdd: vi.fn(() => new Promise(res => { releaseA = () => { order.push('A-store'); res(true); }; })),
+      messageFlagsRemove: vi.fn(async () => { order.push('B-store'); return true; }),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const a = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    const bDone = vi.fn();
+    const bPromise = mgr.setFlag(account, 42, 'INBOX', '\\Seen', false).then(bDone);
+    await new Promise(r => setTimeout(r, 80));
+    expect(persistent.messageFlagsRemove).not.toHaveBeenCalled(); // B waits for A
+    expect(bDone).not.toHaveBeenCalled();
+    releaseA();
+    await a; await bPromise;
+    expect(order).toEqual(['A-store', 'B-store']);                // newest value lands last
+  });
+
+  it("passes acquireTimeout so a timed-out waiter leaves the ImapFlow lock queue", async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    const opts = persistent.getMailboxLock.mock.calls[0]?.[1];
+    expect(Number(opts?.acquireTimeout)).toBeGreaterThan(0);
+  });
+
+  it('stores an INBOX flag on the persistent session and opens NO other connection', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+
+    await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+
+    expect(persistent.messageFlagsAdd).toHaveBeenCalledWith('42', ['\\Seen'], { uid: true });
+    expect(persistent.release).toHaveBeenCalled();       // the lock never leaks
+    expect(ImapFlow).not.toHaveBeenCalled();             // zero logins, the whole point
+  });
+
+  it('falls through to the pool when the persistent store reports not-applied', async () => {
+    const persistent = fakePersistent({ messageFlagsAdd: vi.fn(async () => false) });
+    const { mgr, account } = arrange({ persistent });
+
+    await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+
+    expect(ImapFlow).toHaveBeenCalled();                 // pool path took over
+    expect(persistent.release).toHaveBeenCalled();
+  });
+
+  it('skips a persistent session whose transport is already dead (usable === false)', async () => {
+    // Queueing a command on a dead ImapFlow transport hangs or throws late; the pool path
+    // with its eviction/retry is the right place for that. The health check owns teardown.
+    const persistent = fakePersistent({ usable: false });
+    const { mgr, account } = arrange({ persistent });
+
+    await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+
+    expect(persistent.getMailboxLock).not.toHaveBeenCalled();
+    expect(ImapFlow).toHaveBeenCalled();
+  });
+
+  it('does not touch the persistent session for a non-INBOX folder', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+
+    await mgr.setFlag(account, 42, 'Snoozed', '\\Seen', false);
+
+    expect(persistent.messageFlagsRemove).not.toHaveBeenCalled();
+    expect(ImapFlow).toHaveBeenCalled();
+  });
+
+  it('gives up on a hung lock, uses the pool, and still releases the late lock', async () => {
+    vi.useFakeTimers();
+    let grantLock;
+    const release = vi.fn();
+    const persistent = fakePersistent({
+      release,
+      getMailboxLock: vi.fn(() => new Promise(res => { grantLock = () => res({ release }); })),
+    });
+    const { mgr, account } = arrange({ persistent });
+
+    const call = mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+    await vi.advanceTimersByTimeAsync(5100);             // persistent attempt deadline
+    await call;                                          // pool path finished the job
+    expect(ImapFlow).toHaveBeenCalled();
+
+    grantLock();                                         // the sync finally releases the mailbox
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalled();                  // late lock released, nothing stored
+    expect(persistent.messageFlagsAdd).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('fails fast and typed when blocked with no persistent session and no idle pool client', async () => {
+    const { mgr, account } = arrange();
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+
+    const t0 = Date.now();
+    const err = await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true).catch(e => e);
+
+    expect(err.providerRefusing).toBe(true);
+    expect(ImapFlow).not.toHaveBeenCalled();             // no doomed LOGIN, no fresh retry
+    expect(Date.now() - t0).toBeLessThan(300);           // no 400ms retry sleep either
+  });
+
+  it('while blocked, a usable persistent session still serves the flag', async () => {
+    const persistent = fakePersistent();
+    const { mgr, account } = arrange({ persistent });
+    mgr._secondaryCooldown.set(account.id, { until: Date.now() + 30000, failures: 1 });
+
+    await mgr.setFlag(account, 42, 'INBOX', '\\Seen', true);
+
+    expect(persistent.messageFlagsAdd).toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+});
+
+// ── Primary ladder: cleared by a successful SYNC, not a successful LOGIN (#474 round 4) ──
+//
+// Yahoo accepts every reconnect and then starves the session. Clearing the refusal counter
+// on login success meant the ladder read "refusal #1, 30s" forever, never long enough for
+// the provider to recover: the same oscillation fixed for the secondary ladder in v3.5.4,
+// now on the primary. The reporter's round-4 log shows it verbatim.
+describe('primary refusal ladder vs login success (#474 round 4)', () => {
+  it('escalates across login-success cycles and resets only via the human clear', () => {
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = { id: 'acct-pl-1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test' };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const delays = [];
+    for (let cycle = 0; cycle < 3; cycle++) {
+      delays.push(mgr._noteConnectionRefusal(account));
+      // The reported loop's beat: a reconnect LOGIN succeeds between refusals. Nothing may
+      // reset the count here any more; only a successful sync or the human clear does.
+    }
+    expect(delays[2]).toBeGreaterThan(delays[0]);
+    expect(mgr._connectCooldown.get(account.id).failures).toBe(3);
+
+    mgr.clearConnectCooldown(account.id);               // explicit human action still resets
+    expect(mgr._connectCooldown.has(account.id)).toBe(false);
+    vi.restoreAllMocks();
+  });
+});
+
+describe('connectAccount success leaves the refusal count standing (#474 round 4)', () => {
+  it('a successful LOGIN no longer wipes the primary ladder', async () => {
+    // Drives the REAL connectAccount to success (same scaffolding as the #360 test): an
+    // earlier mutation pass showed the accumulation-only test passed with the old
+    // clear-on-login restored, which is the helper-only trap again.
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr._attachIdleListeners = vi.fn();
+    mgr.syncFolders = vi.fn(() => Promise.resolve());
+    mgr.syncMessages = vi.fn(() => Promise.resolve());
+    mgr._shouldAutoBackfillOnConnect = vi.fn(() => Promise.resolve(false));
+    mgr.backfillAllFolders = vi.fn(() => Promise.resolve());
+    mgr._startSyncInterval = vi.fn();
+    mgr.broadcast = vi.fn();
+    mgr._startPluginSyncTimers = vi.fn(() => Promise.resolve());
+
+    const acct = { id: 'acct-cl-1', user_id: 1, imap_host: 'imap.mail.yahoo.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    // LOGIN succeeds but the initial SYNC fails: the count must survive, because a login
+    // is a handshake and only a sync is health (#474). Review sharpened this contract:
+    // a SUCCESSFUL initial sync clears immediately, covered by the companion test below.
+    mgr.syncMessages = vi.fn(() => Promise.reject(new Error('mailbox busy')));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mgr._connectCooldown.set(acct.id, { until: Date.now() - 1, failures: 2 });
+
+    const ok = await mgr.connectAccount(acct);
+
+    expect(ok).toBe(true);
+    expect(mgr._connectCooldown.get(acct.id)?.failures).toBe(2);
+    vi.restoreAllMocks();
+  });
+
+  it('a successful initial SYNC clears the ladder immediately', async () => {
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr._attachIdleListeners = vi.fn();
+    mgr.syncFolders = vi.fn(() => Promise.resolve());
+    mgr.syncMessages = vi.fn(() => Promise.resolve());
+    mgr._shouldAutoBackfillOnConnect = vi.fn(() => Promise.resolve(false));
+    mgr.backfillAllFolders = vi.fn(() => Promise.resolve());
+    mgr._startSyncInterval = vi.fn();
+    mgr.broadcast = vi.fn();
+    mgr._startPluginSyncTimers = vi.fn(() => Promise.resolve());
+
+    const acct = { id: 'acct-cl-2', user_id: 1, imap_host: 'imap.mail.yahoo.com', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+    mgr._connectCooldown.set(acct.id, { until: Date.now() - 1, failures: 4 });
+
+    expect(await mgr.connectAccount(acct)).toBe(true);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    vi.restoreAllMocks();
+  });
+
+  it('a reconnect success clears the account error but never the ladder', async () => {
+    // Pins the second delete site the review found unpinned: restoring the old
+    // _connectCooldown.delete on the reconnect-success path must fail THIS test.
+    const mgr = new ImapManager({ clients: new Set() });
+    const account = { id: 'acct-cl-3', user_id: 'u1', email_address: 'y@example.test' };
+    mgr._clearAccountError = vi.fn(() => Promise.resolve());
+    mgr._connectCooldown.set(account.id, { until: Date.now() - 1, failures: 3 });
+
+    await mgr._onReconnectSuccess(account);
+
+    expect(mgr._clearAccountError).toHaveBeenCalledWith(account);
+    expect(mgr._connectCooldown.get(account.id)?.failures).toBe(3);
+  });
+});
+
+// Prefetch treats the fetchMessageBody gate error as an immediate quiet stop.
+describe('prefetch on the gate error (#474 round 4)', () => {
+  it('stops at the FIRST gate error without burning the consecutive count or re-arming', async () => {
+    const account = { id: 'acct-pg-1', user_id: 'u1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test' };
+    const mgr = new ImapManager({ clients: new Set() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    query.mockReset();
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM email_accounts')) return { rows: [account] };
+      if (sql.includes('id = ANY($1::uuid[])')) return { rows: [101, 102, 103, 104].map(uid => ({ id: `m-${uid}`, uid, folder: 'INBOX' })) };
+      return { rows: [] };
+    });
+    mgr.fetchMessageBody = vi.fn(async () => { throw Object.assign(new Error('Mail server is limiting connections for this account'), { providerRefusing: true }); });
+    const armed = vi.spyOn(mgr, '_noteSecondaryRefusal');
+
+    await mgr.prefetchFolderBodies(account.id, ['m-101', 'm-102', 'm-103', 'm-104']);
+
+    expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);  // one gate error, immediate stop
+    expect(armed).not.toHaveBeenCalled();                   // our own gate never re-arms
+    vi.restoreAllMocks();
   });
 });

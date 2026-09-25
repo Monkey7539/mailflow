@@ -30,7 +30,7 @@ import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudi
 import { usePushNotifications } from '../hooks/usePushNotifications.js';
 import SignatureEditor from './SignatureEditor.jsx';
 import DiagnosticsReportModal from './DiagnosticsReportModal.jsx';
-import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
+import { getEffectiveShortcuts, getGroupedActions, shortcutActionText, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import SpamSettings from './SpamSettings.jsx';
@@ -1618,7 +1618,7 @@ function SwipeActionIcon({ action, size = 17 }) {
 function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, syncInterval, setSyncInterval, folderSyncInterval, setFolderSyncInterval, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, syncInterval, setSyncInterval, folderSyncInterval, setFolderSyncInterval, conversationMode, setConversationMode, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
   const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailFlow as your default email app": registerProtocolHandler is the
@@ -1723,7 +1723,7 @@ function LayoutsTab() {
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
                 }}>
                   <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
-                    {l.label}
+                    {t(l.labelKey, l.label)}
                   </div>
                   {isActive && (
                     <div style={{
@@ -1738,7 +1738,7 @@ function LayoutsTab() {
                   )}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4, lineHeight: 1.4 }}>
-                  {l.description}
+                  {t(l.descriptionKey, l.description)}
                 </div>
               </div>
             </button>
@@ -2078,14 +2078,15 @@ function LayoutsTab() {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {[
-            { id: false, label: t('admin.messageList.threadingOff'), desc: t('admin.messageList.threadingOffDesc') },
-            { id: true,  label: t('admin.messageList.threadingOn'),  desc: t('admin.messageList.threadingOnDesc') },
+            { id: 'off',  label: t('admin.messageList.threadingOff'),  desc: t('admin.messageList.threadingOffDesc') },
+            { id: 'list', label: t('admin.messageList.threadingOn'),   desc: t('admin.messageList.threadingOnDesc') },
+            { id: 'pane', label: t('admin.messageList.threadingPane'), desc: t('admin.messageList.threadingPaneDesc') },
           ].map(({ id, label, desc }) => {
-            const active = threadedView === id;
+            const active = conversationMode === id;
             return (
               <button
-                key={String(id)}
-                onClick={() => setThreadedView(id)}
+                key={id}
+                onClick={() => setConversationMode(id)}
                 style={{
                   flex: 1, padding: '10px 12px', textAlign: 'left',
                   background: active ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
@@ -5897,6 +5898,7 @@ const LANGUAGES = [
   { code: 'zhCN', nativeName: '简体中文'},
   { code: 'pl', nativeName: 'Polski' },
   { code: 'cs', nativeName: 'Čeština' },
+  { code: 'ptBR', nativeName: 'Português (Brasil)' },
 ];
 
 function LanguageTab() {
@@ -7299,7 +7301,7 @@ function ShortcutsTab() {
           background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.4)',
           borderRadius: 7, fontSize: 12, color: 'var(--text-secondary)',
         }}>
-          {t('admin.shortcuts.conflict', { key: pendingConflict.key, action: t(ACTION_DEFS[pendingConflict.action]?.labelKey) })}
+          {t('admin.shortcuts.conflict', { key: pendingConflict.key, action: shortcutActionText(t, pendingConflict.action, 'label') })}
         </div>
       )}
 
@@ -7312,7 +7314,7 @@ function ShortcutsTab() {
             {t(groupName)}
           </div>
           <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-            {actions.map(({ action, descriptionKey }, i) => {
+            {actions.map(({ action }, i) => {
               const key = effective[action];
               const isDefault = !(action in shortcuts);
               const isRec = recording === action;
@@ -7328,7 +7330,7 @@ function ShortcutsTab() {
                   }}
                 >
                   <span style={{ flex: 1, fontSize: 13, color: 'var(--text-secondary)' }}>
-                    {t(descriptionKey)}
+                    {shortcutActionText(t, action)}
                   </span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                     <button
@@ -8606,7 +8608,7 @@ function makeSearchIndex(t) {
     { label: t('admin.messageList.defaultReplyAction'), keywords: ['reply', 'reply all', 'default reply'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.markReadBehavior'), keywords: ['mark read', 'mark as read', 'read delay', 'auto read', 'manual read', 'unread'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     // Appearance > Fonts & Language
-    { label: t('admin.appearance.language'), keywords: ['language', 'locale', 'french', 'english', 'spanish', 'german', 'deutsch', 'russian', 'chinese', 'italian', 'czech', 'čeština', 'français', 'español'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
+    { label: t('admin.appearance.language'), keywords: ['language', 'locale', 'french', 'english', 'spanish', 'german', 'deutsch', 'russian', 'chinese', 'italian', 'czech', 'čeština', 'portuguese', 'português', 'brasil', 'français', 'español'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     { label: t('admin.appearance.fontSize'), keywords: ['font size', 'text size', 'zoom', 'scale', 'accessibility', 'larger text'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     { label: t('admin.appearance.typography'), keywords: ['font', 'typography', 'typeface', 'serif', 'sans', 'monospace', 'reading font'], tab: 'appearance', subtab: 'fonts', breadcrumb: fontsCrumb },
     // Integrations

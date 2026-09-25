@@ -1,7 +1,9 @@
 export function getContextMenuPolicy(variant = 'inbox') {
   const gtdSidebar = variant === 'gtdSidebar';
+  // The conversation pane has no list row behind it, so there is nothing to select.
+  const conversation = variant === 'conversation';
   return {
-    select: !gtdSidebar,
+    select: !gtdSidebar && !conversation,
     compose: true,
     archive: !gtdSidebar,
     snooze: !gtdSidebar,

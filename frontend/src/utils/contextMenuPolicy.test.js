@@ -66,3 +66,20 @@ test('inbox actions keep their current row without resolving', async () => {
 
   assert.equal(result, message);
 });
+
+test('the conversation pane drops only row selection, since it has no list row', () => {
+  // Everything else must survive: the pane's pickers are this menu's, so disabling
+  // snooze or move here would silently empty the conversation toolbar.
+  assert.deepEqual(getContextMenuPolicy('conversation'), {
+    select: false,
+    compose: true,
+    archive: true,
+    snooze: true,
+    categorize: true,
+    done: false,
+    rules: true,
+    spam: true,
+    copy: true,
+    viewHeaders: true,
+  });
+});
