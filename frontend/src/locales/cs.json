@@ -173,6 +173,8 @@
     "messagesPerPage": "Zpráv na stránku",
     "selectAll": "Vybrat vše",
     "deselectAll": "Zrušit výběr",
+    "starSelected": "Označit hvězdičkou",
+    "unstarSelected": "Odebrat hvězdičku",
     "markReadSelected": "Označit jako přečtené",
     "markUnreadSelected": "Označit jako nepřečtené",
     "archiveSelected": "Archivovat vybrané",
@@ -337,6 +339,7 @@
     "archive": "Archivovat",
     "star": "Označit hvězdičkou",
     "delete": "Smazat",
+    "downloadEml": "Stáhnout jako .eml",
     "print": "Vytisknout",
     "more": "Další",
     "summarize": "Shrnout",
@@ -704,6 +707,10 @@
         "label": "Vybrat zprávu",
         "description": "Vybrat nebo zrušit výběr aktuální zprávy"
       },
+      "undoAction": {
+        "label": "Vrátit poslední akci",
+        "description": "Vrátí poslední archivaci, smazání, přesun nebo označení spamu, dokud je oznámení zobrazeno"
+      },
       "printMessage": {
         "label": "Vytisknout",
         "description": "Vytisknout aktuální zprávu"
@@ -723,9 +730,6 @@
       "toggleRightSidebar": {
         "label": "Pravý postranní panel",
         "description": "Skrýt nebo zobrazit pravý postranní panel"
-      },
-      "gtdUndo": {
-        "description": "Vrátit zpět poslední klasifikaci GTD"
       }
     }
   },

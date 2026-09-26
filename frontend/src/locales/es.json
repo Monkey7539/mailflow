@@ -221,6 +221,7 @@
     "archive": "Archivar",
     "star": "Destacar",
     "delete": "Eliminar",
+    "downloadEml": "Descargar como .eml",
     "print": "Imprimir",
     "more": "Más",
     "summarize": "Resumir",
@@ -286,6 +287,8 @@
     "messagesPerPage": "Mensajes por página",
     "selectAll": "Seleccionar todo",
     "deselectAll": "Deseleccionar todo",
+    "starSelected": "Destacar",
+    "unstarSelected": "Quitar destacado",
     "markReadSelected": "Marcar como leído",
     "markUnreadSelected": "Marcar como no leído",
     "archiveSelected": "Archivar selección",
@@ -625,6 +628,10 @@
         "label": "Seleccionar mensaje",
         "description": "Marcar o desmarcar el mensaje actual"
       },
+      "undoAction": {
+        "label": "Deshacer la última acción",
+        "description": "Deshace el último archivado, borrado, movimiento o marcado como spam mientras se muestra el aviso"
+      },
       "printMessage": {
         "label": "Imprimir",
         "description": "Imprimir el mensaje actual"
@@ -640,9 +647,6 @@
       "gtdDelegated": {
         "label": "Marcar Delegado",
         "description": "Clasificar el mensaje seleccionado como Delegado"
-      },
-      "gtdUndo": {
-        "description": "Deshacer la última clasificación GTD"
       },
       "toggleRightSidebar": {
         "label": "Alternar la barra lateral derecha",

@@ -81,6 +81,25 @@ export default function ElectronNotificationBridge() {
   useEffect(() => {
     if (!nativeBridgeReady) return undefined;
     const unsubscribe = window.mailflowNative?.updates?.onStatus?.((status) => {
+      // An install that cannot verify a download has nothing to install, so it is offered the
+      // release page instead. The main process shows its own toast for this only until a
+      // bridge that handles it is mounted, which __mailflowNativeUpdateLinkReady signals.
+      if (status?.type === 'available' && status?.data?.canAutoInstall === false) {
+        const releaseUrl = status?.data?.releaseUrl;
+        addNotification({
+          type: 'info',
+          title: 'Update available',
+          body: 'A new version of MailFlow is available to download.',
+          persistent: true,
+          ...(releaseUrl ? {
+            actionLabel: 'View Release',
+            // Electron's window-open handler sends an https URL to the default browser.
+            onAction: () => window.open(releaseUrl, '_blank'),
+          } : {}),
+        });
+        return;
+      }
+
       if (status?.type !== 'downloaded') return;
 
       const platform = window.mailflowNative?.platform;
@@ -146,8 +165,10 @@ export default function ElectronNotificationBridge() {
         },
       });
     });
+    if (typeof unsubscribe === 'function') window.__mailflowNativeUpdateLinkReady = true;
 
     return () => {
+      window.__mailflowNativeUpdateLinkReady = false;
       if (typeof unsubscribe === 'function') unsubscribe();
     };
   }, [addNotification, nativeBridgeReady]);

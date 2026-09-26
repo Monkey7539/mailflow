@@ -892,6 +892,16 @@ const PROVIDERS = {
     // connection early, which is exactly what this provider punishes.
     poolSize: 1,
     poolPrewarm: false,
+    // Yahoo also rate-limits the AUTHENTICATE command itself ("[LIMIT] AUTHENTICATE Rate
+    // limit hit.", #474 round 5): once the periodic tasks were each opening their own
+    // fresh login, the refusals never converged (measured at 26/hr steady-state with the
+    // tab closed — staleness probe, folder status, reconcile via pool grow). So the fix is
+    // not pacing fresh logins better, it is not opening them: folder status and the
+    // staleness probe run over the shared body pool (one session here), the way flag
+    // writes already ride the persistent IDLE session. One accepted login establishes the
+    // pooled session and every periodic task after that reuses it, which also keeps it
+    // warm — the same emergent property as Thunderbird's cached-connection model.
+    secondaryOverPool: true,
   },
   apple: {
     // iCloud is permissive — large batches, short delay.
@@ -955,6 +965,26 @@ const PROVIDERS = {
                                // making notification-click opens use the DB cache.
     skipFolderPatterns: [],
     skipFolderNames: [],
+  },
+  strato: {
+    // Identical to `generic` except for the ENABLE opt-out. Strato's server ENABLEs
+    // IMAP4rev2 despite not advertising it in CAPABILITY, then half-implements it:
+    // `UID SEARCH ALL` answers with an EMPTY ESEARCH response while EXISTS is nonzero
+    // (#472, verified by the reporter's raw traces with and without the ENABLE line —
+    // without it, classic SEARCH returns every UID). An always-empty SEARCH poisons
+    // everything membership-based: reconcile skips every folder ("has 0 entries but the
+    // server reports N"), the integrity pass fails once a minute, and backfill sees
+    // "0 on server". imapflow's disableIMAP4rev2 exists precisely for servers with
+    // broken IMAP4rev2 implementations; see makeClientCfg.
+    batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
+    connectStaggerMs: 500,
+    fetchBody: false,
+    pushesFlags: true,
+    snippetIndex: true,
+    speculativeFetch: true,
+    skipFolderPatterns: [],
+    skipFolderNames: [],
+    disableIMAP4rev2: true,
   },
   generic: {
     batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
@@ -1078,6 +1108,7 @@ export function providerProfile(account) {
   if (host.includes('.icloud.com') || host.includes('.apple.com') || host.includes('.me.com')) return PROVIDERS.apple;
   if (host.includes('.outlook.com') || host.includes('office365.com') || host.includes('.hotmail.com') || host.includes('.live.com') || (account.oauth_provider === 'microsoft')) return PROVIDERS.microsoft;
   if (host.includes('purelymail.com')) return PROVIDERS.purelymail;
+  if (host.includes('.strato.')) return PROVIDERS.strato;
   return PROVIDERS.generic;
 }
 
@@ -1419,6 +1450,10 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     // indefinitely — the refresh button spins forever and auto-poll stops working.
     commandTimeout: 30000,
   };
+  // Targeted ENABLE opt-out for servers whose IMAP4rev2 is broken (#472: Strato answers
+  // UID SEARCH ALL with an empty ESEARCH once IMAP4rev2 is enabled). Profile-driven so
+  // every connection kind — persistent, pool, backfill, probe — behaves identically.
+  if (providerProfile(account).disableIMAP4rev2) cfg.disableIMAP4rev2 = true;
   // Auto-IDLE: ImapFlow re-enters IDLE automatically between commands so the
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
@@ -1456,6 +1491,20 @@ function drainWaiters(pool) {
   }
 }
 
+// The pool grow below is a fresh AUTHENTICATE, and #474's provider refuses those while
+// happily serving sessions that already exist — so the grow must honor the manager's
+// secondary backoff. The pool lives at module scope and the backoff lives on the
+// ImapManager instance; the manager registers its callbacks here at construction (round 5:
+// reconcile rides the pool, and its refused grow was retried every sync tick, ~5 doomed
+// logins/hr that neither checked nor armed any ladder). Defaults are permissive so
+// imapPool.test.js can exercise the pool without a manager.
+const poolSecondaryGate = {
+  isBlocked: () => null,   // (accountId) -> active cooldown | null
+  noteRefusal: () => {},   // (account) -> void; arms the secondary ladder
+  clearCooldown: () => {}, // (account) -> void; an ACCEPTED grow login is the ladder's clear signal
+};
+export function registerPoolSecondaryGate(gate) { Object.assign(poolSecondaryGate, gate); }
+
 // Exported for imapPool.test.js, which pins how many connections a stalled pool opens.
 export async function acquirePooledClient(account) {
   const id = account.id;
@@ -1482,6 +1531,19 @@ export async function acquirePooledClient(account) {
   // clamp turns away waits in the queue below exactly like a full pool.
   const poolCap = Math.min(POOL_SIZE, providerProfile(account).poolSize ?? POOL_SIZE);
   if (pool.clients.length + pool.pending < poolCap) {
+    // A grow is a fresh AUTHENTICATE. While the secondary backoff is armed the provider is
+    // refusing exactly that, so fail fast with the same typed error fetchMessageBody's gate
+    // uses instead of paying a doomed login. Reuse of an EXISTING session (the idle-client
+    // branch above, or waiting below when the pool is full) stays allowed — established
+    // sessions are the one thing #474's provider keeps serving. The wording deliberately
+    // does not match isConnectionRefusal, so surfacing it can never re-arm the backoff.
+    const growBlocked = poolSecondaryGate.isBlocked(id);
+    if (growBlocked) {
+      const gateErr = new Error('Mail server is limiting connections for this account');
+      gateErr.providerRefusing = true;
+      gateErr.retryAfterMs = Math.max(0, growBlocked.until - Date.now());
+      throw gateErr;
+    }
     pool.pending += 1;
     try {
       const freshAccount = await ensureFreshToken(account);
@@ -1501,7 +1563,22 @@ export async function acquirePooledClient(account) {
       });
       pool.clients.push(client);
       pool.inUse.add(client);
+      // The provider ACCEPTED this login — the whole signal the secondary ladder tracks
+      // (same reasoning as _withCountClient's clear-on-login).
+      poolSecondaryGate.clearCooldown(freshAccount);
       return client;
+    } catch (err) {
+      // A refused or throttle-shaped grow arms the shared secondary ladder like every other
+      // secondary login (auth-failure included: Yahoo phrases its throttle as
+      // [AUTHENTICATIONFAILED] on an account whose credentials are fine, #474). Marked on
+      // the error so a caller that arms on refusal text (body prefetch) does not count the
+      // same event twice.
+      const detail = extractImapError(err);
+      if (isConnectionRefusal(detail) || isAuthFailure(detail)) {
+        poolSecondaryGate.noteRefusal(account);
+        err.secondaryBackoffArmed = true;
+      }
+      throw err;
     } finally {
       // Released whether the connect succeeded or threw; a failed attempt must not leave a
       // phantom reservation that permanently shrinks the pool.
@@ -1760,6 +1837,15 @@ export class ImapManager {
     // long enough for the provider to recover. A successful sync is not evidence that
     // secondary connections are welcome, so it no longer speaks for them.
     this._secondaryCooldown = new Map(); // accountId -> { until: ms, failures: number }
+    // Hand the module-level pool grow this manager's secondary backoff (#474 round 5): a
+    // grow is a fresh AUTHENTICATE, so it must honor and arm the same ladder every other
+    // secondary login does. Registration (not imports) because the ladder is instance
+    // state; the last-constructed manager wins, which is the production singleton.
+    registerPoolSecondaryGate({
+      isBlocked: (accountId) => this._secondaryConnectBlocked(accountId),
+      noteRefusal: (account) => this._noteSecondaryRefusal(account),
+      clearCooldown: (account) => this._clearSecondaryCooldown(account.id),
+    });
     // accountId -> the value last persisted to email_accounts.sync_error: a string (error is
     // showing), null (known clear), or absent (unknown — e.g. just after a restart, where the
     // DB may still hold a stale error, so the next call writes through unconditionally).
@@ -1910,6 +1996,20 @@ export class ImapManager {
     // eviction defers only when a sync started within the last SYNC_HUNG_MS. It is a
     // UID-watermark test (not a message-count comparison) so old never-synced messages
     // (a backfill gap) don't cause endless reconnect-churn.
+    //
+    // One provider-shaped exception to "fresh login every cycle" (#474 round 5): a
+    // secondaryOverPool provider (Yahoo) probes over the shared body pool instead of a
+    // fresh login, and skips the cycle while the secondary backoff is armed with no
+    // pooled session to reuse. Against a provider that rate-limits AUTHENTICATE itself,
+    // the fresh probe was the biggest leak: a refused login every 3 minutes, 15/hr in the
+    // reporter's count, and it never armed any ladder. The frozen-view caveat above is
+    // PurelyMail's, and PurelyMail keeps the fresh path; the pooled session is still
+    // independent of the persistent connection, so the question the probe asks — does the
+    // server hold mail the sync missed — keeps its meaning. The accepted trade: a
+    // provider whose POOLED session also froze would go undetected, which Yahoo has never
+    // shown, against 20 doomed logins/hr, which it has. Every other provider keeps the
+    // round-4 behavior exactly (fresh login every cycle, ladder untouched), so no
+    // unrelated background refusal can ever suppress deaf-IDLE recovery there.
     this._stalenessCheckTimer = setInterval(async () => {
       // Re-entrancy guard: the per-account probes below do blocking network I/O
       // sequentially, so a slow cycle (many accounts, or one on a degraded provider)
@@ -1947,50 +2047,89 @@ export class ImapManager {
             const maxUid = w.maxuid ? Number(w.maxuid) : 0;
             if (!maxUid) continue; // nothing synced yet — backfill owns initial population
 
+            // Shared probe body: SELECT INBOX, ask for UIDs above the watermark, confirm
+            // them with FETCH. Works over a fresh login or a pooled session alike.
+            const probeInbox = async (probeClient) => {
+              const lock = await probeClient.getMailboxLock('INBOX');
+              try {
+                // Filter guards the IMAP `n:*` quirk: when n exceeds the highest UID
+                // the server returns that highest UID, which is NOT above maxUid. Cap to
+                // the newest 200 — enough to prove a miss without a huge FETCH on a deep gap.
+                const above = await probeClient.search({ uid: `${maxUid + 1}:*` }, { uid: true });
+                const candidates = (above || []).filter(u => u > maxUid).slice(-200);
+                if (candidates.length === 0) return 0;
+                // Some servers advertise phantom UIDs that cannot be fetched.
+                // Confirm candidates with FETCH before diagnosing a missed message;
+                // every returned UID needs its own cached INBOX copy on all providers.
+                const fetched = [];
+                for await (const m of probeClient.fetch(candidates.join(','), { uid: true, envelope: true }, { uid: true })) {
+                  const raw = m.envelope?.messageId;
+                  fetched.push({ uid: m.uid, messageId: raw ? raw.replace(/[<>]/g, '').trim() : null });
+                }
+                if (fetched.length === 0) return 0; // every candidate was a phantom
+                return countMissingInboxCopies(account, fetched);
+              } finally { lock.release(); }
+            };
+
+            const overPool = providerProfile(account).secondaryOverPool === true;
+
             let missed = 0;
-            let probe = null;
-            try {
-              // Genuinely fresh login — NOT withFreshClient/pool, which can share the
-              // frozen mailbox view. Token refresh and host/DNS resolution are bounded
-              // (raceTimeout) so a hang in either can't wedge the sequential loop and, via
-              // the re-entrancy guard, silently freeze the check for ALL accounts. The
-              // probe socket is created only AFTER those succeed, so the finally below
-              // always has a real client to close (no post-timeout connection can escape).
-              const fresh = await raceTimeout(ensureFreshToken(account), 15000, 'Staleness token refresh');
-              const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Staleness host resolve');
-              // Use the same admission control and IPv4 fallback as every other login.
-              // Keep connection establishment outside the command deadline: otherwise
-              // that deadline cancels the fallback before it can recover.
-              probe = await connectImapClient(fresh, resolved, { policy }, 25000, 'Staleness connect');
-              missed = await raceTimeout(
-                (async () => {
-                  const lock = await probe.getMailboxLock('INBOX');
-                  try {
-                    // Filter guards the IMAP `n:*` quirk: when n exceeds the highest UID
-                    // the server returns that highest UID, which is NOT above maxUid. Cap to
-                    // the newest 200 — enough to prove a miss without a huge FETCH on a deep gap.
-                    const above = await probe.search({ uid: `${maxUid + 1}:*` }, { uid: true });
-                    const candidates = (above || []).filter(u => u > maxUid).slice(-200);
-                    if (candidates.length === 0) return 0;
-                    // Some servers advertise phantom UIDs that cannot be fetched.
-                    // Confirm candidates with FETCH before diagnosing a missed message;
-                    // every returned UID needs its own cached INBOX copy on all providers.
-                    const fetched = [];
-                    for await (const m of probe.fetch(candidates.join(','), { uid: true, envelope: true }, { uid: true })) {
-                      const raw = m.envelope?.messageId;
-                      fetched.push({ uid: m.uid, messageId: raw ? raw.replace(/[<>]/g, '').trim() : null });
-                    }
-                    if (fetched.length === 0) return 0; // every candidate was a phantom
-                    return countMissingInboxCopies(account, fetched);
-                  } finally { lock.release(); }
-                })(),
-                25000, 'Staleness probe',
-              );
-            } finally {
-              // close() (not logout()) — destroys the socket AND aborts a still-pending
-              // connect() left running by the race timeout, so a slow login can't leak an
-              // authenticated session that lingers on a connection-limited server.
-              if (probe) { try { probe.close(); } catch { /* already closed */ } }
+            if (overPool) {
+              // Skip the cycle while the secondary backoff is armed and no pooled session
+              // exists to reuse: a probe could only trigger a grow the gate will refuse.
+              // With an idle pooled client the probe still runs — reuse costs no login and
+              // is the one thing a refusing provider keeps serving. Deliberately scoped to
+              // secondaryOverPool providers (review of round 5): everywhere else the probe
+              // keeps its round-4 behavior — a fresh login every cycle, ladder untouched —
+              // because letting a ladder that unrelated background refusals can arm
+              // suppress the deaf-IDLE check would trade recovery latency on EVERY
+              // provider for a leak only session-limited providers have.
+              if (this._secondaryConnectBlocked(accountId)
+                && !hasIdlePooledClient(connectionPools, accountId)) continue;
+              // Session-limited provider: probe over the shared body pool (one session on
+              // Yahoo, serialized by the pool itself). A grow, if the pool is empty, goes
+              // through acquirePooledClient's gate, which owns the ladder arming/clearing —
+              // so this path deliberately never touches the ladder. Acquired OUTSIDE the
+              // command deadline: acquire has its own bounded timeout, and racing it would
+              // strand an abandoned waiter in the pool queue for the full acquire window.
+              const pooledProbe = await acquirePooledClient(account);
+              try {
+                missed = await raceTimeout(probeInbox(pooledProbe), 25000, 'Staleness probe');
+              } catch (err) {
+                // A rejected or TIMED-OUT probe may leave a command in flight, and this is
+                // the account's only shared session, so it must not go back to the pool
+                // idle (review of round 5: a hung SEARCH held the one Yahoo session until
+                // imapflow's command timeout, and a click queued behind it could hit
+                // poolExhausted on a healthy account). close() is the same invariant the
+                // fresh path's finally enforces; the pool's close handler evicts it, and
+                // release() below then just closes a client that is no longer pooled.
+                try { pooledProbe.close(); } catch { /* already closed */ }
+                throw err;
+              } finally {
+                releasePooledClient(account, pooledProbe);
+              }
+            } else {
+              let probe = null;
+              try {
+                // Genuinely fresh login — NOT withFreshClient/pool, which can share the
+                // frozen mailbox view. Token refresh and host/DNS resolution are bounded
+                // (raceTimeout) so a hang in either can't wedge the sequential loop and, via
+                // the re-entrancy guard, silently freeze the check for ALL accounts. The
+                // probe socket is created only AFTER those succeed, so the finally below
+                // always has a real client to close (no post-timeout connection can escape).
+                const fresh = await raceTimeout(ensureFreshToken(account), 15000, 'Staleness token refresh');
+                const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Staleness host resolve');
+                // Use the same admission control and IPv4 fallback as every other login.
+                // Keep connection establishment outside the command deadline: otherwise
+                // that deadline cancels the fallback before it can recover.
+                probe = await connectImapClient(fresh, resolved, { policy }, 25000, 'Staleness connect');
+                missed = await raceTimeout(probeInbox(probe), 25000, 'Staleness probe');
+              } finally {
+                // close() (not logout()) — destroys the socket AND aborts a still-pending
+                // connect() left running by the race timeout, so a slow login can't leak an
+                // authenticated session that lingers on a connection-limited server.
+                if (probe) { try { probe.close(); } catch { /* already closed */ } }
+              }
             }
 
             if (missed === 0) continue;
@@ -3140,6 +3279,27 @@ export class ImapManager {
 
   async _withCountClient(account, fn) {
     const host = (account.imap_host || '').toLowerCase();
+    // Session-limited provider (#474 round 5): run the folder-status pass over the shared
+    // body pool (one session on Yahoo) instead of a fresh login per cycle — the fresh path
+    // below was refused, re-armed its ladder, and retried at the ~16-minute cap forever
+    // (measured at 6 refusals/hr, around the clock, with the tab closed). The pooled
+    // client may have a mailbox selected, which STATUS tolerates (imapflow even refreshes
+    // the live mailbox state from it). The ladder is owned by acquirePooledClient's gate:
+    // a reused session proves nothing about whether LOGINS are welcome, so this path
+    // neither clears nor arms it, and gate errors propagate to the monitor's own backoff.
+    if (providerProfile(account).secondaryOverPool === true) {
+      await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
+      try {
+        if (this._secondaryConnectBlocked(account.id) && !hasIdlePooledClient(connectionPools, account.id)) {
+          throw new Error('Provider connection cooldown active');
+        }
+        const { rows: [current] } = await query('SELECT * FROM email_accounts WHERE id=$1 AND enabled', [account.id]);
+        if (!current) return;
+        return await withFreshClient(current, fn);
+      } finally {
+        this._bgConnSem.release(host);
+      }
+    }
     await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
     let client;
     try {
@@ -3321,7 +3481,19 @@ export class ImapManager {
           // the pass instead and retry next tick. Nothing is checkpointed, so nothing is
           // claimed to be verified. Folders large enough to skip the scan entirely never
           // reach here, which is the case this whole change is for.
-          if (fullScanDeferred) return;
+          //
+          // And the transport must end WITH the pass (review of round 5): on the fresh
+          // path the caller's finally destroyed it anyway, but on the secondaryOverPool
+          // path this client is the account's ONLY pooled session, and returning normally
+          // here would put it back idle with the abandoned FETCH still in flight — the
+          // next acquirer (a body click, the staleness probe) queues behind a command
+          // nobody is waiting on and times out. Closing it lets the pool's close handler
+          // evict it; the next task grows a fresh session through the gate. release() in
+          // the finally below is pure state cleanup and is safe on a closed client.
+          if (fullScanDeferred) {
+            try { client.close(); } catch { /* already closed */ }
+            return;
+          }
           // Advance the flag watermark unless a full scan was cut short. 'skip' seeds it on
           // purpose: without a baseline a large folder can never reach the cheap CHANGEDSINCE
           // path, so it would stay on the expensive plan forever. Seeding means flag changes
@@ -3795,6 +3967,14 @@ export class ImapManager {
             }
             // Propagate resolved thread_id to any earlier messages that used this
             // message as a provisional thread root (out-of-order delivery / sync).
+            //
+            // Deliberately NO is_deleted filter: soft-deleted rows are still threading
+            // inputs — computeThreadId's header-chain lookup reads thread_id from ANY
+            // row, so a deleted row left holding a stale provisional root would hand
+            // that stale id to the next reply referencing it and split the thread.
+            // Served by idx_messages_account_thread, which is NON-partial for exactly
+            // this reason; with only the old partial index this was a full table scan
+            // per processed reply (#495).
             if (threadId && threadId !== msgId) {
               await query(
                 `UPDATE messages SET thread_id = $1
@@ -3820,11 +4000,21 @@ export class ImapManager {
         });
 
         // ── New-mail phase — UID-watermark safety net for a populated local cache. Fetches only
-        // UIDs above the highest we already have — usually just the newest message, then a no-op
-        // upsert. When no local UID exists, the full plan above owns metadata ingestion instead.
+        // UIDs above the highest we already have. When no local UID exists, the full plan above
+        // owns metadata ingestion instead.
+        //
+        // The filter guards the RFC 3501 `n:*` quirk, same as the staleness probe: when n
+        // exceeds the highest UID, the server returns that highest message anyway, so without
+        // it the newest message of every folder came back on every tick and its upsert wrote a
+        // real new row version each time (#495 follow-up: the reporter measured it as the
+        // entire 0.10 updates/s residue left after the beta, one rewrite per folder per tick,
+        // Gmail and Outlook alike). A skipped uid at or below the watermark that is somehow
+        // NOT cached is a hole below the watermark, which is backfill's and the integrity
+        // pass's job by this phase's own contract, never this fetch's.
         if (maxKnownUid > 0) {
           try {
             for await (const msg of client.fetch(`${maxKnownUid + 1}:*`, fetchQuery, { uid: true })) {
+              if (msg.uid <= maxKnownUid) continue;
               await processMsg(msg);
             }
           } catch (err) {
@@ -3893,19 +4083,67 @@ export class ImapManager {
           }
         } else if (plan === 'full') {
           // A missing/invalid modseq baseline or an incomplete local cache requires a recent
-          // sequence scan with full metadata. Re-read exists from the live connection — ImapFlow
-          // may have decremented it if an EXPUNGE arrived during the UID phase, making a range
-          // captured at SELECT time stale. The watermark is seeded below so subsequent syncs can
-          // go delta once the local cache has a UID. Bounded to the most recent `limit` messages —
-          // older un-cached messages in a large folder are backfill's job, not this scan's; backfill
-          // runs on connect/reconnect/reindex and its dbCount-vs-serverTotal check re-detects the gap.
+          // sequence scan. Re-read exists from the live connection — ImapFlow may have
+          // decremented it if an EXPUNGE arrived during the UID phase, making a range captured
+          // at SELECT time stale. On a CONDSTORE server the watermark is seeded below so
+          // subsequent syncs go delta; a server WITHOUT CONDSTORE lands here on EVERY tick,
+          // permanently, which is why the scan is split (#495). Bounded to the most recent
+          // `limit` messages — older un-cached messages in a large folder are backfill's job,
+          // not this scan's; backfill runs on connect/reconnect/reindex and its
+          // dbCount-vs-serverTotal check re-detects the gap.
           const liveExists = client.mailbox?.exists ?? 0;
           const phase2Range = liveExists > limit
             ? `${liveExists - limit + 1}:${liveExists}` : '1:*';
           try {
             const scan = (async () => {
-              for await (const msg of client.fetch(phase2Range, fetchQuery)) {
-                await processMsg(msg);
+              // On a UIDVALIDITY change every cached (account, folder, uid) identity is
+              // void, and with an EMPTY cache (maxKnownUid 0: first sync, or the purge that
+              // change just ran) there is nothing to partition — in both cases the split
+              // below would only add a round trip, so everything takes the full-metadata
+              // path directly.
+              if (uidValidityChanged || maxKnownUid === 0) {
+                for await (const msg of client.fetch(phase2Range, fetchQuery)) {
+                  await processMsg(msg);
+                }
+                return;
+              }
+              // Split the range by whether the UID is already cached (#495). This branch used
+              // to run the full-metadata fetch and the unconditional upsert for all `limit`
+              // messages every time — which for a CONDSTORE-less server (Outlook, Exmail)
+              // meant re-downloading and rewriting the newest 20-100 rows every tick forever:
+              // measured by the reporter at ~3 row rewrites and 5.4 WAL fsyncs per second on
+              // an idle instance, plus one full-table thread-propagation scan per reply. A
+              // cheap uid+flags pass answers both questions at once: cached rows get their
+              // flags bulk-applied through the same path the delta branch uses (writes only
+              // rows whose flags actually changed, honors the 30s local-wins window), and
+              // only genuinely unknown UIDs pay the full fetch and upsert. Metadata repairs
+              // for cached rows (subject healing, #378 thread re-rooting) no longer re-run
+              // each tick — which is parity with what delta-path providers already get; a
+              // manual reindex still re-upserts everything.
+              const seen = [];
+              for await (const msg of client.fetch(phase2Range, { uid: true, flags: true })) {
+                seen.push({ uid: msg.uid, isRead: msg.flags.has('\\Seen'), isStarred: msg.flags.has('\\Flagged') });
+              }
+              if (seen.length === 0) return;
+              const { rows: cachedRows } = await query(
+                'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])',
+                [account.id, folder, seen.map(s => s.uid)]
+              );
+              const cachedUids = new Set(cachedRows.map(r => Number(r.uid)));
+              const missing = seen.filter(s => !cachedUids.has(s.uid)).map(s => s.uid);
+              if (missing.length > 0) {
+                for await (const msg of client.fetch(missing.join(','), fetchQuery, { uid: true })) {
+                  await processMsg(msg);
+                }
+              }
+              const flagsToUpdate = seen.filter(s => cachedUids.has(s.uid));
+              const changed = await this._applyFlagUpdates(account, folder, flagsToUpdate);
+              if (changed > 0) {
+                // The old per-message upserts surfaced external flag flips via the row
+                // rewrite; now that unchanged rows are left alone, nudge readers the way
+                // the delta branch does.
+                this.broadcast({ type: 'flags_synced', accountId: account.id }, account.user_id);
+                await emitSectionsChanged(this.pluginFacade, account, changed);
               }
             })();
             scan.catch(() => {}); // see the delta branch — swallow a post-timeout late rejection
@@ -4455,6 +4693,9 @@ export class ImapManager {
                 if (bfInsert?.rows[0]?.is_new) {
                   this.maybeClassifyNewMessage(account, bfInsert.rows[0].id, parsed, { deferAutoMove: true });
                 }
+                // Same statement as the sync path's propagation, same constraints: no
+                // is_deleted filter (deleted rows still feed computeThreadId), served by
+                // the non-partial idx_messages_account_thread (#495).
                 if (bfThreadId && bfThreadId !== bfMsgId) {
                   await query(
                     `UPDATE messages SET thread_id = $1
@@ -5120,6 +5361,12 @@ export class ImapManager {
   // the frontend gates alerts/sounds and the list refresh to INBOX / the visible folder. Best-effort;
   // all failures are non-fatal.
   async _syncSpamFolder(account) {
+    // Spam sync rides the pool. While the secondary backoff is armed and no pooled session
+    // exists, a run could only hit the grow gate — whose typed fail-fast the beta reporter's
+    // log then counted as a Yahoo refusal, though it costs zero logins (#474 round 5
+    // follow-up: the one line their 7-hour table flagged). Skip quietly like reconcile
+    // does; the next slow-cadence tick retries.
+    if (this._secondaryConnectBlocked(account.id) && !hasIdlePooledClient(connectionPools, account.id)) return;
     let spamPath;
     try {
       spamPath = await resolveSpamFolder(account.id, account.folder_mappings);
@@ -5272,7 +5519,9 @@ export class ImapManager {
         // [AUTHENTICATIONFAILED] rather than a refusal (#474), so matching only the refusal
         // wording would leave exactly that case hammering, three logins per view.
         if (isConnectionRefusal(detail) || isAuthFailure(detail)) {
-          this._noteSecondaryRefusal(account);
+          // A refusal during a pool GROW already armed the ladder inside acquirePooledClient
+          // and carries the mark; arming again here would climb two rungs per event.
+          if (!err.secondaryBackoffArmed) this._noteSecondaryRefusal(account);
           console.log(`Body prefetch stopping for ${logAccount(account)}: provider is refusing connections`);
           return;
         }
@@ -5548,6 +5797,23 @@ export class ImapManager {
       if (firstErr.poolExhausted) wrapped.poolExhausted = true;
       throw wrapped;
     }
+  }
+
+  // Full RFC 822 source, for the .eml download (#381). Pool client like fetchHeaders;
+  // imapflow buffers the source the same way attachment fetches buffer their part.
+  // Returns a Buffer, or null when the server has nothing for the UID.
+  async fetchRawMessage(account, uid, folder) {
+    return withFreshClient(account, async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for await (const msg of client.fetch(String(uid), { uid: true, source: true }, { uid: true })) {
+          if (msg.source) return Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+        }
+        return null;
+      } finally {
+        lock.release();
+      }
+    });
   }
 
   async fetchHeaders(account, uid, folder) {
@@ -6481,6 +6747,11 @@ export class ImapManager {
   // DB writes). Phase 2: diff and delete outside the IMAP connection so a DB error never
   // evicts a healthy pool client.
   async reconcileDeletes(account) {
+    // Reconcile rides the pool. While the secondary backoff is armed and no pooled session
+    // exists, running could only trigger a grow the gate will refuse — skip the cycle
+    // quietly instead of logging a "Reconcile connection error" per sync tick (#474 round
+    // 5: ~5/hr of exactly that). The next tick retries; deletes reconcile late, not never.
+    if (this._secondaryConnectBlocked(account.id) && !hasIdlePooledClient(connectionPools, account.id)) return;
     // Captured before the Phase 1 snapshot. Any row inserted or re-synced after this
     // instant (new IDLE mail, a bulk-move reinsert) is NOT in the snapshot yet, so it
     // would look like an orphan. Excluding rows synced at/after the cutoff closes that
