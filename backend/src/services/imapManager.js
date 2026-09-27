@@ -1042,7 +1042,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1053,7 +1053,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      forwarded_from_name, forwarded_from_email, forwarded_via
+      forwarded_from_name, forwarded_from_email, forwarded_via, bcc_addresses
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -1797,6 +1797,30 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
     return { succeeded: [], failed: uids.slice(), staleCount: gone.length - destArrived, mappable: false };
   }
   return { succeeded: gone, failed: stillPresent, staleCount: 0, mappable: destArrived === gone.length };
+}
+
+// client.messageMove without its data loss. On a server without MOVE (RFC 6851) imapflow
+// emulates it as COPY, then \Deleted + EXPUNGE, and expunges even when the COPY failed: its
+// COPY resolves false on a NO rather than throwing, so a full quota or a missing destination
+// destroyed the message (postalsys/imapflow#406). Emulate it here and delete only once the
+// server has confirmed the copy.
+async function moveUids(client, range, toFolder) {
+  // imapflow's own test for MOVE (hasCapability in lib/tools.js), where IMAP4rev2 includes
+  // it. This must never say yes where imapflow says no, or its unchecked fallback runs.
+  const caps = client.capabilities;
+  const hasMove = caps?.has('MOVE') || client.enabled?.has('IMAP4REV2')
+    || (caps?.has('IMAP4rev2') && !caps?.has('IMAP4rev1'));
+  if (hasMove) return client.messageMove(range, toFolder, { uid: true });
+
+  const copied = await client.messageCopy(range, toFolder, { uid: true });
+  if (!copied) return false;
+  // The copy has landed, so a failed delete leaves the message in both folders rather than
+  // losing it. imapflow's fallback reports that as moved too; callers that retry a failed
+  // move (snooze wake-up) would otherwise add another copy on every attempt.
+  if (!(await client.messageDelete(range, { uid: true, silent: true }))) {
+    console.warn(`Emulated move ${client.mailbox?.path} → ${toFolder} of UID(s) ${range}: copied, but the source could not be deleted — the message is now in both folders`);
+  }
+  return copied;
 }
 
 export class ImapManager {
@@ -5251,7 +5275,8 @@ export class ImapManager {
   // composer can reopen it (recipient / subject / body) without waiting for a folder
   // re-sync. On a flaky connection that re-sync can be delayed or fail, which used to
   // leave the reopened draft blank because the row it reads from didn't exist yet.
-  // Mirrors upsertSentMessageRecord but also stores the body and the \Draft flag.
+  // Mirrors upsertSentMessageRecord but also stores the body and the \Draft flag, and the Bcc,
+  // whose only other copy is the IMAP draft itself.
   // A later real sync of the same (account, uid, folder) keeps these local values
   // (its own upsert COALESCEs the existing body/subject/recipients).
   async upsertDraftMessageRecord(account, folder, uid, {
@@ -5261,6 +5286,7 @@ export class ImapManager {
     fromEmail,
     to = [],
     cc = [],
+    bcc = [],
     inReplyTo = null,
     snippet = '',
     bodyHtml = null,
@@ -5274,8 +5300,8 @@ export class ImapManager {
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16)
+        flags, body_html, body_text, thread_id, bcc_addresses
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -5294,7 +5320,9 @@ export class ImapManager {
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         flags = EXCLUDED.flags,
         body_html = COALESCE(EXCLUDED.body_html, messages.body_html),
-        body_text = COALESCE(EXCLUDED.body_text, messages.body_text)
+        body_text = COALESCE(EXCLUDED.body_text, messages.body_text),
+        -- No keep-old guard like to/cc: sync never writes Bcc, so this save is its only source.
+        bcc_addresses = EXCLUDED.bcc_addresses
     `, [
       account.id, uid, folder, msgId,
       sanitizeStr(subject || '(no subject)'),
@@ -5305,6 +5333,7 @@ export class ImapManager {
       bodyHtml != null ? sanitizeStr(bodyHtml) : null,
       bodyText != null ? sanitizeStr(bodyText) : null,
       msgId || null,
+      JSON.stringify(Array.isArray(bcc) ? bcc : []),
     ]);
   }
 
@@ -6042,7 +6071,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) {
             newUid = result.uidMap.get(Number(uid)) || null;
@@ -6171,7 +6200,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
         } finally {
@@ -6185,12 +6214,25 @@ export class ImapManager {
     return newUid;
   }
 
-  async permanentDeleteMessage(account, uid, folder) {
-    await withFreshClient(account, async (client) => {
+  // With expectMessageId, the uid is deleted only if the server copy still carries that
+  // Message-ID, checked under the same mailbox lock. A uid names a place in the folder, so one
+  // read from a stale row, or looked up in the wrong account, would otherwise expunge whatever
+  // sits there. Resolves false, having deleted nothing, when it does not match.
+  async permanentDeleteMessage(account, uid, folder, { expectMessageId } = {}) {
+    return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
+        if (expectMessageId !== undefined) {
+          const bare = id => String(id ?? '').replace(/[<>]/g, '').trim();
+          let found = '';
+          for await (const msg of client.fetch(String(uid), { uid: true, envelope: true }, { uid: true })) {
+            if (msg.uid === Number(uid)) found = bare(msg.envelope?.messageId);
+          }
+          if (!found || found !== bare(expectMessageId)) return false;
+        }
         const result = await client.messageDelete(String(uid), { uid: true });
         if (result === false) throw new Error('messageDelete returned false — server did not confirm deletion');
+        return true;
       } finally {
         lock.release();
       }
@@ -6299,7 +6341,7 @@ export class ImapManager {
       const serverUidMap = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(uids.map(String), toFolder, { uid: true });
+          const result = await moveUids(client, uids.map(String), toFolder);
           if (result === false) throw new Error('bulk messageMove returned false — server did not confirm move');
           return result?.uidMap?.size ? result.uidMap : null;
         } finally {

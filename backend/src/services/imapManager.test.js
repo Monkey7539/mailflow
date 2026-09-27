@@ -373,6 +373,8 @@ describe('insertCopiedSibling', () => {
     expect(ins[1]).toEqual(['acct-1', 'INBOX', 100, 5001, 'Todo']);
     // delivery_addresses is copied verbatim from the source row, same as list_unsubscribe.
     expect(ins[0]).toContain('delivery_addresses');
+    // So is a draft's Bcc (0061), in both the INSERT list and the SELECT.
+    expect(ins[0].match(/\bbcc_addresses\b/g)).toHaveLength(2);
   });
 
   it('increments destination unread only when the copied message is unread', async () => {
@@ -394,6 +396,45 @@ describe('insertCopiedSibling', () => {
     query.mockResolvedValueOnce({ rows: [] }); // DO NOTHING → no RETURNING row
     await insertCopiedSibling('acct-1', 100, 'INBOX', 'Todo', 5001);
     expect(countAdjusts()).toHaveLength(0);
+  });
+});
+
+// ── upsertDraftMessageRecord — the row a reopened draft is built from ───────
+
+describe('upsertDraftMessageRecord', () => {
+  beforeEach(() => {
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+  });
+
+  const save = (meta) => ImapManager.prototype.upsertDraftMessageRecord.call({}, { id: 'acct-1' }, 'Drafts', 5, {
+    messageId: '<d1@example.com>', subject: 's', fromName: 'A', fromEmail: 'a@example.com',
+    to: [{ name: '', email: 'to@example.com' }], ...meta,
+  });
+  // The value bound to a column, found through the VALUES slot in the same position.
+  const insertedValue = (col) => {
+    const [sql, params] = findCall('INSERT INTO messages');
+    const cols = sql.match(/INSERT INTO messages \(([^)]*)\)/)[1].split(',').map(s => s.trim());
+    const vals = sql.match(/VALUES \(([^)]*)\)/)[1].split(',').map(s => s.trim());
+    expect(cols).toContain(col);
+    return params[Number(vals[cols.indexOf(col)].match(/^\$(\d+)/)[1]) - 1];
+  };
+
+  it('stores the Bcc, whose only other copy is the draft on the server', async () => {
+    const bcc = [{ name: 'Hidden Person', email: 'hidden@example.com' }];
+    await save({ bcc });
+    expect(insertedValue('bcc_addresses')).toBe(JSON.stringify(bcc));
+  });
+
+  it('stores a draft without Bcc as an empty list, since NULL means unknown', async () => {
+    await save({});
+    expect(insertedValue('bcc_addresses')).toBe('[]');
+  });
+
+  it('takes the saved Bcc over whatever a racing sync wrote for the same uid', async () => {
+    await save({ bcc: [] });
+    const [sql] = findCall('INSERT INTO messages');
+    expect(sql).toMatch(/bcc_addresses = EXCLUDED\.bcc_addresses/);
   });
 });
 
@@ -4185,5 +4226,73 @@ describe('prefetch on the gate error (#474 round 4)', () => {
     expect(mgr.fetchMessageBody).toHaveBeenCalledTimes(1);  // one gate error, immediate stop
     expect(armed).not.toHaveBeenCalled();                   // our own gate never re-arms
     vi.restoreAllMocks();
+  });
+});
+
+// A uid names a place in a folder, not a message. Replacing a draft passes the Message-ID of
+// the copy it means to delete, so a uid read from a stale row, or looked up in the wrong
+// account, deletes nothing. Driven through the real pool so the check is what guards the
+// EXPUNGE.
+describe('permanentDeleteMessage with expectMessageId', () => {
+  let seq = 0;
+  function arrange(serverCopies) {
+    const account = { id: `acct-pdm-${++seq}`, user_id: 'u1', imap_host: 'imap.example.com', email_address: 'me@example.test', auth_user: 'me', auth_pass: 'enc' };
+    const client = Object.assign(new EventEmitter(), {
+      usable: true,
+      connect: vi.fn(() => Promise.resolve()),
+      logout: vi.fn(() => Promise.resolve()),
+      close: vi.fn(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      fetch: vi.fn(async function* (range) {
+        for (const uid of String(range).split(',').map(Number)) {
+          if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
+        }
+      }),
+      messageDelete: vi.fn().mockResolvedValue(true),
+    });
+    ImapFlow.mockImplementation(function () { return client; });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    return { mgr: new ImapManager({ clients: new Set() }), account, client };
+  }
+
+  it('deletes the uid when the server copy carries the expected Message-ID', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(true);
+    expect(client.getMailboxLock).toHaveBeenCalledWith('Drafts');
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('compares Message-IDs without their angle brackets', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: 'old@example.test' })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes nothing when another message now holds the uid', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<someone-elses@example.test>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('deletes nothing when the uid is no longer on the server', async () => {
+    const { mgr, account, client } = arrange(new Map());
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it.each([[null], ['']])('deletes nothing when the expected Message-ID is %j', async (expectMessageId) => {
+    const { mgr, account, client } = arrange(new Map([[7, null]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('without an expected Message-ID deletes as before, with no extra FETCH', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts')).toBe(true);
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
   });
 });
