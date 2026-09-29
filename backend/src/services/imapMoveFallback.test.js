@@ -74,6 +74,8 @@ function connectionTo(server) {
     connect: vi.fn(async () => {}),
     close: vi.fn(),
     logout: vi.fn(async () => {}),
+    // A pooled session with a mailbox selected is refreshed with NOOP before its next use.
+    noop: vi.fn(async () => true),
 
     async getMailboxLock(path) {
       this.mailbox = { path, exists: server.folders[path].uids.length };
@@ -246,5 +248,48 @@ describe('move on a server with MOVE', () => {
     await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
     expect(server.commands.map(([c]) => c)).toEqual(['MOVE']);
     expect(server.folders.INBOX.uids).toEqual([4, 6]);
+  });
+});
+
+// With no COPYUID to read, bulkMoveMessages works out what moved by searching the destination
+// from the UIDNEXT it had before the move. A UID another client already moved or deleted is the
+// usual way to get here (#407: Dovecot answers that MOVE with OK and no COPYUID), and a move
+// that fails outright is checked the same way. The search is `n:*`, which past the last UID
+// still names the newest message already in the folder.
+describe.each([
+  ['sends no COPYUID for a MOVE', ['IMAP4rev1', 'MOVE']],
+  ['has neither MOVE nor UIDPLUS', ['IMAP4rev1']],
+])('move into a folder that already holds mail, on a server that %s', (_label, capabilities) => {
+  beforeEach(() => {
+    server = makeServer({ capabilities });
+    server.folders.Archive = { uids: [1, 2, 3], uidNext: 4 };
+  });
+
+  it('reports a UID that is no longer in the source as failed, not as moved onto existing mail', async () => {
+    const r = await mgr.bulkMoveMessages(acct, [9], 'INBOX', 'Archive');
+    expect(r.succeeded).toEqual([]);
+    expect(r.failed).toEqual([9]);
+    expect([...r.uidMap]).toEqual([]);
+    expect(mgr.syncFolderOnDemand).toHaveBeenCalledWith(acct, 'Archive');
+  });
+
+  it('still maps a message that really moved to its new UID', async () => {
+    const r = await mgr.bulkMoveMessages(acct, [5], 'INBOX', 'Archive');
+    expect(r.succeeded).toEqual([5]);
+    expect([...r.uidMap]).toEqual([[5, 4]]);
+  });
+});
+
+describe('move into a folder that already holds mail, when the move itself fails', () => {
+  beforeEach(() => {
+    server = makeServer({ refuseCopy: true });
+    server.folders.Archive = { uids: [1, 2, 3], uidNext: 4 };
+  });
+
+  it('reports a UID that is no longer in the source as failed, not as moved onto existing mail', async () => {
+    const r = await mgr.bulkMoveMessages(acct, [9], 'INBOX', 'Archive');
+    expect(r.succeeded).toEqual([]);
+    expect(r.failed).toEqual([9]);
+    expect([...r.uidMap]).toEqual([]);
   });
 });
