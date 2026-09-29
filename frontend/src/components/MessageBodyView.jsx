@@ -302,7 +302,11 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
   return (
     <iframe
       ref={iframeRef}
-      srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8">
+      // index.html marks the app translate="no" so a browser translator cannot break React's
+      // DOM, and Chrome's translator carries that into this frame. React renders nothing in
+      // here, so the email opts back in at its own root. Not on the <iframe>: there Chrome's
+      // translator also rewrites the title below, which the app has already localised.
+      srcDoc={`<!DOCTYPE html><html translate="yes"><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <meta name="color-scheme" content="only light">
       <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';">
