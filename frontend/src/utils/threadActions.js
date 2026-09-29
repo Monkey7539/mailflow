@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { normalizeConversation, newestConversationMessage } from './conversation.js';
 import { conversationActionIds, conversationSpamTargets, newestSnoozeTarget } from './conversationActions.js';
 import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDelete } from './pendingDeletes.js';
+import { archiveTargetsForFolder } from './threadedArchive.js';
 
 // Which messages a thread-wide action should actually operate on.
 //
@@ -107,20 +108,31 @@ const subjectOf = (messages, t) =>
   newestConversationMessage(messages)?.subject || t('common.noSubject');
 
 // fetchThread is the authoritative lookup, supplied by the pane that knows the thread id
-// and folder. Omitting it falls back to the messages on screen.
-const liveThread = (fetchThread) => fetchThread
-  ? (targets) => resolveThreadMessages({
+// and folder. Omitting it falls back to the messages on screen. `select` applies the same
+// choice the action made on screen to what the lookup returns.
+const liveThread = (fetchThread, select = messages => messages) => fetchThread
+  ? async (targets) => select(await resolveThreadMessages({
       message: targets[0],
       isThreadRow: true,
       fetchThread,
-    })
+    }))
   : null;
 
-export function archiveThread(messages, { t, addNotification, fetchThread }) {
+// Archive and delete act on the conversation as the list behind the pane shows it: its
+// messages in one folder and, outside the unified inbox, one account (see ReadingPane), which
+// is what the list's own thread archive takes (#361). The pane also shows the reader's Sent
+// replies and copies filed elsewhere, for context. Archive is a move on IMAP, so including
+// those would take a reply out of Sent, and bulk-delete expunges anything already in Trash or
+// Drafts rather than moving it there.
+const inListScope = ({ row, accountId = null, folder = 'INBOX' }) => messages =>
+  archiveTargetsForFolder(row, messages, accountId ? folder : 'INBOX', true, accountId);
+
+export function archiveThread(messages, { t, addNotification, fetchThread, scope }) {
+  const inScope = inListScope(scope);
   runThreadAction({
-    messages,
+    messages: inScope(messages),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, inScope),
     commit: async (targets) => {
       const result = await api.bulkArchive(conversationActionIds(targets));
       // Not an error: the account simply has no archive folder mapped, and the user
@@ -138,11 +150,12 @@ export function archiveThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function deleteThread(messages, { t, addNotification, fetchThread }) {
+export function deleteThread(messages, { t, addNotification, fetchThread, scope }) {
+  const inScope = inListScope(scope);
   runThreadAction({
-    messages,
+    messages: inScope(messages),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, inScope),
     // The delete guards stop a sync already in flight from resurrecting the rows
     // between the optimistic removal and the commit.
     onRemove: targets => targets.forEach(message => setPendingDelete(message.id)),
@@ -160,20 +173,22 @@ export function deleteThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function moveThread(messages, folder, { t, addNotification, fetchThread }) {
+// A folder path belongs to one account: the row's, whose folders the picker lists. Only that
+// account's copies are sent, as from the list, or the row itself when the thread holds none of
+// them. bulk-move skips any other account that has no folder at the path, and still answers ok.
+export function moveThread(messages, folder, { t, addNotification, fetchThread, scope }) {
+  const accountId = scope.row.account_id;
+  const inAccount = (list) => {
+    const own = normalizeConversation(list).filter(message => message.account_id === accountId);
+    return own.length ? own : [scope.row];
+  };
   runThreadAction({
-    messages,
+    messages: inAccount(messages),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, inAccount),
     commit: async (targets) => {
       await api.bulkMove(conversationActionIds(targets), folder);
-      // Recorded per account, since a thread can span several.
-      const seen = new Set();
-      targets.forEach(message => {
-        if (seen.has(message.account_id)) return;
-        seen.add(message.account_id);
-        useStore.getState().recordRecentFolder({ accountId: message.account_id, path: folder });
-      });
+      useStore.getState().recordRecentFolder({ accountId, path: folder });
     },
     notification: {
       title: t('message.moved.conversationTitle'),

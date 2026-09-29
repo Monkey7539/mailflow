@@ -32,11 +32,11 @@ function ThreadBtn({ onClick, title, children }) {
 // The whole conversation, stacked, with only what the reader has opened rendered.
 //
 // The thread endpoint already returns every message across folders, Sent replies included,
-// deduplicated by Message-ID preferring the INBOX copy, so this needs no scope parameter of
-// its own.
+// deduplicated by Message-ID preferring the INBOX copy, so showing it needs no scope
+// parameter of its own.
 //
 // Design from #317 by YunQue0912.
-export default function ConversationPane({ threadId, folder, unified = false, selectedMessageId = null }) {
+export default function ConversationPane({ threadId, folder, unified = false, scope = null, selectedMessageId = null }) {
   const { t } = useTranslation();
   const addNotification = useStore(s => s.addNotification);
   const accounts = useStore(s => s.accounts);
@@ -45,11 +45,13 @@ export default function ConversationPane({ threadId, folder, unified = false, se
   const [expanded, setExpanded] = useState(() => new Set());
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  // { x, y, view } — the move and snooze pickers are ContextMenu's, opened straight
+  // { x, y, view, row } — the move and snooze pickers are ContextMenu's, opened straight
   // into the relevant sub-view rather than reimplemented here.
   const [picker, setPicker] = useState(null);
 
   useEffect(() => {
+    // A picker belongs to the conversation it was opened on: it lists that row's folders.
+    setPicker(null);
     if (!threadId) { setMessages([]); return; }
     let cancelled = false;
     setLoading(true);
@@ -88,13 +90,18 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     return next;
   });
 
+  // The row the conversation was opened from, and the folder and account its actions take it
+  // from, as ReadingPane chose them. Without a scope the pane acts as the unified inbox would.
+  const actionScope = scope || { row: newestConversationMessage(messages), accountId: null, folder };
+
   // Acting on the conversation empties the reading pane: every message it was showing
   // has just been removed from the list behind it.
-  const runAction = (action) => {
+  const runAction = (action, row = actionScope.row) => {
     action(messages, {
       t,
       addNotification,
       accounts,
+      scope: { ...actionScope, row },
       // The authoritative list, re-read when the action actually commits, so a reply
       // that arrived while this conversation was open is not left behind.
       fetchThread: () => api.getThread(threadId, folder, unified),
@@ -104,7 +111,9 @@ export default function ConversationPane({ threadId, folder, unified = false, se
 
   const openPicker = (event, view) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    setPicker({ x: rect.left, y: rect.bottom + 4, view });
+    // The row is kept with the picker, which lists its account's folders once, on opening:
+    // a move then sends that account's copies even if the selection changes meanwhile.
+    setPicker({ x: rect.left, y: rect.bottom + 4, view, row: actionScope.row });
   };
 
   // Every branch that returns from here fills the reading area, for the same flex reason
@@ -140,8 +149,9 @@ export default function ConversationPane({ threadId, folder, unified = false, se
         background: 'var(--bg-primary)',
       }}
     >
-      {/* Thread-level actions, the way Gmail does it: archiving a conversation archives
-          all of it, so the reader does not file the same thread message by message. */}
+      {/* Thread-level actions, the way Gmail does it: archiving a conversation takes all of
+          it out of the folder it was opened from, so the reader does not file the same
+          thread message by message. */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <ThreadBtn onClick={() => runAction(archiveThread)} title={t('message.archive')}>
           {t('message.archive')}
@@ -170,13 +180,13 @@ export default function ConversationPane({ threadId, folder, unified = false, se
         <ContextMenu
           x={picker.x}
           y={picker.y}
-          message={newestConversationMessage(messages)}
+          message={picker.row}
           variant="conversation"
           defaultMoveView={picker.view === 'move'}
           defaultSnoozeView={picker.view === 'snooze'}
           onClose={() => setPicker(null)}
           onAction={(action, data) => {
-            if (action === 'moveTo') runAction((list, opts) => moveThread(list, data, opts));
+            if (action === 'moveTo') runAction((list, opts) => moveThread(list, data, opts), picker.row);
             else if (action === 'snooze') runAction((list, opts) => snoozeThread(list, data, opts));
             setPicker(null);
           }}

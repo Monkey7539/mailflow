@@ -8,7 +8,7 @@
 // Same loader hooks as MessagePane.render.test.js: node --test cannot parse JSX, and
 // react-i18next is stubbed because a real i18n instance would test i18next.
 
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -67,12 +67,24 @@ const bulkReads = [];
 let blockImages = false;
 let textOnly = false;
 const remoteBodyRequests = [];
+let threadResponse = THREAD;
+let actionRequests = [];
+let folderRequests = [];
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
-  if (u.includes('/mail/thread/')) return { ok: true, status: 200, json: async () => ({ messages: THREAD }) };
+  if (u.includes('/mail/thread/')) return { ok: true, status: 200, json: async () => ({ messages: threadResponse }) };
   if (u.includes('/mail/messages/bulk-read')) {
     bulkReads.push(JSON.parse(opts.body));
     return { ok: true, status: 200, json: async () => ({}) };
+  }
+  if (/\/mail\/messages\/bulk-(archive|delete|move)$/.test(u)) {
+    actionRequests.push({ url: u, body: JSON.parse(opts.body) });
+    return { ok: true, status: 200, json: async () => ({}) };
+  }
+  const folderAccount = /\/accounts\/([^/]+)\/folders$/.exec(u)?.[1];
+  if (folderAccount) {
+    folderRequests.push(folderAccount);
+    return { ok: true, status: 200, json: async () => [{ path: 'Projects', name: 'Projects' }] };
   }
   const id = /\/messages\/([^/]+)\/body/.exec(u)?.[1];
   if (id) {
@@ -88,6 +100,8 @@ globalThis.fetch = async (url, opts = {}) => {
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const ConversationPane = (await import('./ConversationPane.jsx')).default;
+const ReadingPane = (await import('./ReadingPane.jsx')).default;
+const { useStore } = await import('../store/index.js');
 const { shortcutBus } = await import('../utils/shortcutBus.js');
 const { api } = await import('../utils/api.js');
 
@@ -212,5 +226,172 @@ describe('conversation pane', () => {
     await React.act(async () => { shortcutBus.emit('loadRemoteImages'); shortcutBus.emit('unsubscribe'); await new Promise(r => setTimeout(r, 50)); });
     assert.deepEqual(remoteBodyRequests, ['m3']);
     assert.deepEqual(unsubscribed, ['m3']);
+  });
+});
+
+// Rendered through ReadingPane, because the list's folder, account and row reach the pane's
+// actions from there. Each test waits out the real undo window before the request is sent.
+describe('conversation actions act on what the list is showing', () => {
+  const click = el => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  beforeEach(() => { actionRequests = []; folderRequests = []; });
+
+  test('Archive from an account\'s inbox leaves the Sent reply and another account\'s copy', async (t) => {
+    // m3 was also delivered to a second account (#476). The pane shows that copy and the Sent
+    // reply m2, but this account's inbox holds only m1 and m3.
+    threadResponse = [...THREAD, { ...THREAD[2], id: 'x3', account_id: 'other' }];
+    t.after(() => { threadResponse = THREAD; });
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: 'acct', selectedFolder: 'INBOX', searchQuery: '',
+        messages: [{ ...THREAD[2], thread_id: '<1@x>', message_count: 2 }], selectedMessageId: 'm3',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'archive' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    await React.act(async () => { click(document.querySelector('button[title="message.archive"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4600)); });
+
+    const archive = actionRequests.find(r => /bulk-archive/.test(r.url));
+    assert.deepEqual(archive?.body.ids.sort(), ['m1', 'm3'], 'm2 stays in [Gmail]/Sent Mail and x3 in its own account');
+  });
+
+  test('Move lists the viewed account\'s folders and sends only that account\'s copies', async (t) => {
+    // Account A's inbox, on a conversation whose reply was also delivered to B (#476). The two
+    // copies share a Date and B's sorts last, so B's is the newest message in the pane.
+    threadResponse = [
+      { id: 'a1', account_id: 'A', folder: 'INBOX', message_id: '<5@x>', subject: 'Plan', from_email: 'c@x.z', from_name: 'Cy', date: '2026-02-01T10:00:00Z', is_read: true, snippet: '' },
+      { id: 'a2', account_id: 'A', folder: 'INBOX', message_id: '<6@x>', subject: 'Re: Plan', from_email: 'c@x.z', from_name: 'Cy', date: '2026-02-02T10:00:00Z', is_read: true, snippet: '' },
+      { id: 'b2', account_id: 'B', folder: 'INBOX', message_id: '<6@x>', subject: 'Re: Plan', from_email: 'c@x.z', from_name: 'Cy', date: '2026-02-02T10:00:00Z', is_read: true, snippet: '' },
+    ];
+    t.after(() => { threadResponse = THREAD; });
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: 'A', selectedFolder: 'INBOX', searchQuery: '', recentFolders: [],
+        messages: [{ ...threadResponse[1], thread_id: '<5@x>', message_count: 2 }], selectedMessageId: 'a2',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'move' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    await React.act(async () => { click(document.querySelector('button[title="contextMenu.moveToFolder"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    assert.deepEqual(folderRequests, ['A'], 'the picker lists the folders of the account being viewed');
+
+    const projects = [...document.querySelectorAll('#root *')].filter(el => el.textContent === 'Projects').at(-1);
+    await React.act(async () => { click(projects); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4600)); });
+
+    const move = actionRequests.find(r => /bulk-move/.test(r.url));
+    assert.deepEqual(move?.body.ids.sort(), ['a1', 'a2'], 'B has no folder at that path, so its copy is not sent');
+    assert.deepEqual(useStore.getState().recentFolders, [{ accountId: 'A', path: 'Projects' }]);
+  });
+
+  // A notification tap or a link parks the message it opens in threadMessages and selects it,
+  // leaving the folder and account being viewed as they were. So does a GTD sidebar row.
+  const tapped = { ...THREAD[2], thread_id: '<1@x>' };
+
+  test('Delete on a conversation opened from a notification leaves the draft of the open Drafts folder', async (t) => {
+    // Drafts is open and lists the conversation's draft reply, which is all the open folder
+    // holds of it. bulk-delete expunges a draft outright rather than moving it to Trash.
+    const draft = { id: 'm4', account_id: 'acct', folder: '[Gmail]/Drafts', message_id: '<4@x>', subject: 'Re: Welcome', from_email: 'me@x.z', from_name: 'Me', date: '2026-01-04T10:00:00Z', is_read: true, snippet: 'draft' };
+    threadResponse = [...THREAD, draft];
+    t.after(() => { threadResponse = THREAD; });
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: 'acct', selectedFolder: '[Gmail]/Drafts', searchQuery: '',
+        messages: [{ ...draft, thread_id: '<1@x>', message_count: 4 }],
+        threadMessages: { __dl_m3: [tapped] }, selectedMessageId: 'm3',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'tap-drafts' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    await React.act(async () => { click(document.querySelector('button[title="message.delete"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4600)); });
+
+    const del = actionRequests.find(r => /bulk-delete/.test(r.url));
+    assert.deepEqual(del?.body.ids.sort(), ['m1', 'm3'], 'the tapped message\'s inbox copies go to Trash, and m4 stays in Drafts');
+  });
+
+  test('Archive on a conversation opened from a notification takes its own account\'s copies', async (t) => {
+    // Another account is open. m3 was delivered to it too (#476), and its copy is the
+    // conversation's row there.
+    const copy = { ...THREAD[2], id: 'x3', account_id: 'other' };
+    threadResponse = [...THREAD, copy];
+    t.after(() => { threadResponse = THREAD; });
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: 'other', selectedFolder: 'INBOX', searchQuery: '',
+        messages: [{ ...copy, thread_id: '<1@x>', message_count: 1 }],
+        threadMessages: { __dl_m3: [tapped] }, selectedMessageId: 'm3',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'tap-other-account' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    await React.act(async () => { click(document.querySelector('button[title="message.archive"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4600)); });
+
+    const archive = actionRequests.find(r => /bulk-archive/.test(r.url));
+    assert.deepEqual(archive?.body.ids.sort(), ['m1', 'm3'], 'acct\'s inbox copies: not its Sent reply m2, and not x3, which stays in the open inbox');
+  });
+
+  test('Move sends the account whose folders the picker listed when the selection changes meanwhile', async (t) => {
+    // The unified inbox lists an email delivered to A and B (#476) as A's row. While the picker
+    // is open, a notification tap selects B's copy of the same email.
+    threadResponse = [
+      { id: 'a7', account_id: 'A', folder: 'INBOX', message_id: '<7@x>', subject: 'Trip', from_email: 'd@x.z', from_name: 'Di', date: '2026-03-01T10:00:00Z', is_read: true, snippet: '' },
+      { id: 'b7', account_id: 'B', folder: 'INBOX', message_id: '<7@x>', subject: 'Trip', from_email: 'd@x.z', from_name: 'Di', date: '2026-03-01T10:00:00Z', is_read: true, snippet: '' },
+    ];
+    t.after(() => { threadResponse = THREAD; });
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: null, selectedFolder: 'INBOX', searchQuery: '', recentFolders: [],
+        messages: [{ ...threadResponse[0], thread_id: '<7@x>', message_count: 2 }], selectedMessageId: 'a7',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'move-reselect' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    await React.act(async () => { click(document.querySelector('button[title="contextMenu.moveToFolder"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    assert.deepEqual(folderRequests, ['A']);
+
+    await React.act(async () => {
+      useStore.setState({ threadMessages: { __dl_b7: [{ ...threadResponse[1], thread_id: '<7@x>' }] }, selectedMessageId: 'b7' });
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const projects = [...document.querySelectorAll('#root *')].filter(el => el.textContent === 'Projects').at(-1);
+    await React.act(async () => { click(projects); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4600)); });
+
+    const move = actionRequests.find(r => /bulk-move/.test(r.url));
+    assert.deepEqual(move?.body.ids, ['a7'], 'A\'s copy goes to A\'s folder, and B\'s is not sent to a path from A');
+    assert.deepEqual(useStore.getState().recentFolders, [{ accountId: 'A', path: 'Projects' }]);
+  });
+
+  test('the Move picker closes when the pane switches to another conversation', async () => {
+    // It lists the folders of the row it was opened on, so a notification tap that opens a
+    // different conversation must not leave it acting on that one.
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId: 'acct', selectedFolder: 'INBOX', searchQuery: '',
+        messages: [{ ...THREAD[2], thread_id: '<1@x>', message_count: 2 }], selectedMessageId: 'm3',
+      });
+      root.render(React.createElement(ReadingPane, { key: 'picker-switch' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    await React.act(async () => { click(document.querySelector('button[title="contextMenu.moveToFolder"]')); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const pickerOpen = () => [...document.querySelectorAll('#root *')].some(el => el.textContent === 'Projects');
+    assert.ok(pickerOpen(), 'the picker lists the folders of acct');
+
+    const other = { id: 'n1', account_id: 'acct', folder: 'INBOX', message_id: '<8@x>', thread_id: '<8@x>', subject: 'Other', from_email: 'e@x.z', from_name: 'Ed', date: '2026-01-05T10:00:00Z', is_read: true, snippet: '' };
+    await React.act(async () => {
+      useStore.setState({ threadMessages: { __dl_n1: [other] }, selectedMessageId: 'n1' });
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    assert.ok(!pickerOpen(), 'the picker opened on the previous conversation is gone');
   });
 });
