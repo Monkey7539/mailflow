@@ -1358,6 +1358,54 @@ describe('_syncSpamFolder — periodic spam poll guards', () => {
   });
 });
 
+// Shaped like imapflow's parse of "Forward as attachment" (Outlook, Thunderbird, Gmail) of an
+// email that has files of its own: the message/rfc822 part keeps its own disposition and also
+// carries the enclosed email's structure as childNodes, whose root reuses the wrapper's part
+// number. The enclosed email has an attached PDF and a named text file sent inline.
+const forwardedAsAttachment = (dispositionParameters) => ({
+  type: 'multipart/mixed',
+  childNodes: [
+    { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+    {
+      part: '2', type: 'message/rfc822', encoding: '7bit', size: 2000,
+      disposition: 'attachment', dispositionParameters,
+      childNodes: [{
+        part: '2', type: 'multipart/mixed',
+        childNodes: [
+          {
+            part: '2.1', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.1.2', type: 'text/html', encoding: '7bit' },
+            ],
+          },
+          {
+            part: '2.2', type: 'application/pdf', encoding: 'base64', size: 900,
+            disposition: 'attachment', dispositionParameters: { filename: 'invoice.pdf' },
+          },
+          {
+            part: '2.3', type: 'text/plain', encoding: '7bit', size: 300,
+            disposition: 'inline', dispositionParameters: { filename: 'notes.txt' },
+          },
+        ],
+      }],
+    },
+  ],
+});
+
+// A plain-text message with a photo that is disposed inline and has a Content-ID:
+// there is no HTML body to reference it.
+const textWithInlinePhoto = {
+  type: 'multipart/mixed',
+  childNodes: [
+    { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+    {
+      part: '2', type: 'image/jpeg', encoding: 'base64', id: '<x@apple>', size: 40000,
+      disposition: 'inline', dispositionParameters: { filename: 'IMG_0001.jpeg' },
+    },
+  ],
+};
+
 describe('walkStructure attachment classification', () => {
   const walk = (node) => {
     const results = { textParts: [], attachments: [] };
@@ -1478,6 +1526,122 @@ describe('walkStructure attachment classification', () => {
     expect(results.textParts.map(p => p.type)).toEqual(['text/plain', 'text/html']);
     expect(results.attachments).toHaveLength(0);
   });
+
+  it('lists an attached email as an .eml with the files inside it, not as body text', () => {
+    const results = walk(forwardedAsAttachment({ filename: 'fwd.eml' }));
+    expect(results.textParts.map(p => p.part)).toEqual(['1']);
+    expect(results.attachments).toEqual([
+      { part: '2', filename: 'fwd.eml', type: 'message/rfc822', encoding: '7bit', size: 2000, disposition: 'attachment' },
+      { part: '2.2', filename: 'invoice.pdf', type: 'application/pdf', encoding: 'base64', size: 900, disposition: 'attachment' },
+      { part: '2.3', filename: 'notes.txt', type: 'text/plain', encoding: '7bit', size: 300, disposition: 'inline' },
+    ]);
+  });
+
+  it('names an attached email message.eml when it has no filename', () => {
+    // Outlook can attach a message with Content-Disposition: attachment and no filename.
+    const results = walk(forwardedAsAttachment({ 'creation-date': 'Tue, 01 Sep 2026 10:00:00 GMT' }));
+    expect(results.attachments.map(a => a.filename)).toEqual(['message.eml', 'invoice.pdf', 'notes.txt']);
+  });
+
+  it('treats a named message/rfc822 without a disposition as an attached email', () => {
+    const results = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 2000, parameters: { name: 'fwd.eml' },
+          childNodes: [{
+            part: '2', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.2', type: 'text/html', encoding: '7bit' },
+            ],
+          }],
+        },
+      ],
+    });
+    expect(results.textParts.map(p => p.part)).toEqual(['1']);
+    expect(results.attachments.map(a => [a.part, a.filename])).toEqual([['2', 'fwd.eml']]);
+  });
+
+  it('lists the message a bounce returns instead of reading it as the body', () => {
+    // An RFC 3464 bounce as Postfix sends it: the failure reason, the delivery status, then
+    // the returned message with no Content-Disposition.
+    const results = walk({
+      type: 'multipart/report', parameters: { 'report-type': 'delivery-status' },
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        { part: '2', type: 'message/delivery-status', encoding: '7bit' },
+        {
+          part: '3', type: 'message/rfc822', encoding: '8bit', size: 3000,
+          childNodes: [{
+            part: '3', type: 'multipart/alternative',
+            childNodes: [
+              { part: '3.1', type: 'text/plain', encoding: 'quoted-printable' },
+              { part: '3.2', type: 'text/html', encoding: 'quoted-printable' },
+            ],
+          }],
+        },
+      ],
+    });
+    expect(results.textParts.map(p => p.part)).toEqual(['1']);
+    expect(results.attachments.map(a => [a.part, a.filename, a.type, a.encoding])).toEqual([
+      ['3', 'message.eml', 'message/rfc822', '8bit'],
+    ]);
+  });
+
+  it('does not list the body of a single-part attached email a second time', () => {
+    // imapflow numbers a single-part email's body like its wrapper, and fetching that part
+    // number returns the whole .eml.
+    const results = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 5000,
+          disposition: 'attachment', dispositionParameters: { filename: 'scan.eml' },
+          childNodes: [{ part: '2', type: 'application/pdf', encoding: 'base64', parameters: { name: 'scan.pdf' } }],
+        },
+      ],
+    });
+    expect(results.attachments.map(a => [a.part, a.filename])).toEqual([['2', 'scan.eml']]);
+  });
+
+  it('still reads a wrapped post, an unnamed inline or undisposed message/rfc822, as the body', () => {
+    // A mailing list's DMARC "wrap message" sends the post as an unnamed message/rfc822, as
+    // the whole message or after a note from the list, disposed inline or not at all.
+    const inline = walk({
+      type: 'message/rfc822', encoding: '7bit', size: 900, disposition: 'inline',
+      childNodes: [{
+        type: 'multipart/alternative',
+        childNodes: [
+          { part: '1', type: 'text/plain', encoding: '7bit' },
+          { part: '2', type: 'text/html', encoding: '7bit' },
+        ],
+      }],
+    });
+    expect(inline.textParts.map(p => p.part)).toEqual(['1', '2']);
+    expect(inline.attachments).toHaveLength(0);
+
+    const undisposed = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 900,
+          childNodes: [{
+            part: '2', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.2', type: 'text/html', encoding: '7bit' },
+            ],
+          }],
+        },
+      ],
+    });
+    expect(undisposed.textParts.map(p => p.part)).toEqual(['1', '2.1', '2.2']);
+    expect(undisposed.attachments).toHaveLength(0);
+  });
 });
 
 describe('attachment-only messages have no body', () => {
@@ -1547,6 +1711,127 @@ describe('calendar-only messages', () => {
       bodyParts: new Map([['1', Buffer.from('<p>Invite</p>')], ['2', Buffer.from(ics)]]),
     };
     expect(extractBodyFromMsg(msg).html).toBe('<p>Invite</p>');
+  });
+});
+
+// The body route caches the list fetchMessageBody returns, and every download route
+// resolves parts from that cache, so a part missing from it cannot be opened at all.
+// Most of these drive the real fetchMessageBody and fetchAttachment through the pool
+// against a fake server holding one message; the synced-body cases call
+// extractBodyFromMsg, which lists the same parts.
+describe('parts the body never shows are listed as attachments', () => {
+  let seq = 700;
+  function serve(structure, parts) {
+    const account = { id: `acct-parts-${++seq}`, user_id: 'u1', imap_host: 'imap.example.test', email_address: 'p@example.test', auth_user: 'p', auth_pass: 'enc' };
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.getMailboxLock = vi.fn(async () => ({ release() {} }));
+      client.fetch = vi.fn(async function* (range, fetchQuery) {
+        yield {
+          uid: 42,
+          bodyStructure: fetchQuery.bodyStructure ? structure : undefined,
+          bodyParts: fetchQuery.bodyParts
+            ? new Map(fetchQuery.bodyParts.filter(p => p in parts).map(p => [p, Buffer.from(parts[p])]))
+            : undefined,
+        };
+      });
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    return { mgr: new ImapManager({ clients: new Set() }), account };
+  }
+
+  it('lists an attached email and the files inside it, and keeps the note it came with as the body', async () => {
+    const { mgr, account } = serve(forwardedAsAttachment({ filename: 'fwd.eml' }), {
+      '1': 'see attached', '2.1.1': 'newsletter', '2.1.2': '<h1>Newsletter</h1>',
+    });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBeNull();
+    expect(body.text).toBe('see attached');
+    expect(body.attachments.map(a => a.filename)).toEqual(['fwd.eml', 'invoice.pdf', 'notes.txt']);
+  });
+
+  it('downloads an attached email as the whole enclosed message', async () => {
+    const eml = 'From: news@example.com\r\nSubject: Newsletter\r\nMIME-Version: 1.0\r\n\r\nhello\r\n';
+    const { mgr, account } = serve(forwardedAsAttachment({ filename: 'fwd.eml' }), { '2': eml });
+    const buf = await mgr.fetchAttachment(account, 42, 'INBOX', '2');
+    expect(buf.toString()).toBe(eml);
+  });
+
+  it('lists an inline photo in a plain-text message', async () => {
+    const { mgr, account } = serve(textWithInlinePhoto, { '1': 'here is the photo', '2': '/9j/4AAQ' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.text).toBe('here is the photo');
+    expect(body.attachments).toEqual([{
+      part: '2', filename: 'IMG_0001.jpeg', type: 'image/jpeg', encoding: 'base64', size: 40000, disposition: 'inline',
+    }]);
+  });
+
+  it('lists only the inline images the HTML does not reference', async () => {
+    // Hand-picked Content-IDs, as PHPMailer allows: the HTML references logo-dark in angle
+    // brackets and another case, logo is a prefix of it but is not referenced, and the
+    // third image has an empty Content-ID, which nothing can reference.
+    const image = (part, id, filename) => ({
+      part, type: 'image/png', encoding: 'base64', id, size: 12,
+      disposition: 'inline', dispositionParameters: { filename },
+    });
+    const { mgr, account } = serve({
+      type: 'multipart/related',
+      childNodes: [
+        { part: '1', type: 'text/html', encoding: '7bit', parameters: { charset: 'utf-8' } },
+        image('2', '<logo-dark>', 'logo-dark.png'),
+        image('3', '<logo>', 'logo.png'),
+        image('4', '<>', 'spacer.png'),
+      ],
+    }, { '1': '<p>hi</p><img src="cid:<LOGO-DARK>">', '2': 'iVBORw0KGgo=', '3': 'AAAA', '4': 'BBBB' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<p>hi</p><img src="data:image/png;base64,iVBORw0KGgo=">');
+    expect(body.attachments.map(a => a.filename)).toEqual(['logo.png', 'spacer.png']);
+  });
+
+  it('lists an inline photo when the body is read from a synced message', () => {
+    const body = extractBodyFromMsg({
+      bodyStructure: textWithInlinePhoto,
+      bodyParts: new Map([['1', Buffer.from('here is the photo')]]),
+    });
+    expect(body.text).toBe('here is the photo');
+    expect(body.attachments.map(a => a.filename)).toEqual(['IMG_0001.jpeg']);
+  });
+
+  it('names an unnamed inline image after its type', () => {
+    const body = extractBodyFromMsg({
+      bodyStructure: {
+        type: 'multipart/mixed',
+        childNodes: [
+          { part: '1', type: 'text/plain', encoding: '7bit' },
+          { part: '2', type: 'image/jpeg', encoding: 'base64', id: '<a@x>' },
+          { part: '3', type: 'image/svg+xml', encoding: '7bit', id: '<b@x>' },
+        ],
+      },
+      bodyParts: new Map([['1', Buffer.from('two pictures')]]),
+    });
+    expect(body.attachments.map(a => a.filename)).toEqual(['image.jpg', 'image.svg']);
+  });
+
+  it('downloads a listed inline image with its own transfer encoding', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+    const { mgr, account } = serve({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'image/svg+xml', encoding: '7bit', id: '<s@x>',
+          disposition: 'inline', dispositionParameters: { filename: 'logo.svg' },
+        },
+      ],
+    }, { '1': 'logo attached', '2': svg });
+    const buf = await mgr.fetchAttachment(account, 42, 'INBOX', '2');
+    expect(buf.toString()).toBe(svg);
   });
 });
 
