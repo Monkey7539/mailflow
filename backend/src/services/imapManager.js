@@ -1194,10 +1194,20 @@ const connectionPools = new Map(); // accountId -> { clients: [], waiting: [] }
 // through two connections.
 export const POOL_SIZE = 4;
 
-// How long an operation waits for a pooled connection before giving up. Longer than the
-// 30s commandTimeout that frees a stalled connection, so a caller queued behind a stall
-// normally gets served rather than failing just before the slot frees.
+// How long an operation waits for a pooled connection before giving up. Longer than
+// POOL_STALL_TIMEOUT_MS, so a stalled connection has been closed before a queued caller
+// gives up. Closing it does not hand the slot to the queue (only a released connection
+// does), but the next caller to arrive can grow a fresh one.
 export const ACQUIRE_TIMEOUT_MS = 35000;
+
+// How long a leased pooled connection may owe the server a reply, with nothing arriving,
+// before it is closed. imapflow has no per-command timeout. The `commandTimeout` this file
+// used to pass is not an imapflow option in any release and was silently ignored, so a
+// stalled command held its slot until the 5-minute socketTimeout. With a pool of one
+// (Yahoo), every pooled operation on the account failed as busy for that whole time.
+// It measures silence, not duration: a long FETCH or APPEND that keeps moving bytes is
+// never cut off, and whole-folder writes are already chunked (_chunkedFolderOp).
+export const POOL_STALL_TIMEOUT_MS = 30000;
 
 // Retained as a plugin compatibility helper. Ordinary ingestion never relocates a
 // cached row by Message-ID; explicit move operations use confirmed folder/UID mappings.
@@ -1445,10 +1455,10 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     auth: { user: account.auth_user, pass: decrypt(account.auth_pass) },
     logger: false,
     tls: tlsOpts,
-    // Prevent IMAP commands from hanging forever on half-open TCP connections.
-    // Without this, a silently-dead connection causes every sync call to wait
-    // indefinitely — the refresh button spins forever and auto-poll stops working.
-    commandTimeout: 30000,
+    // No per-command timeout here: imapflow has none (a `commandTimeout` key is silently
+    // ignored). Its only bound on an unanswered command is socketTimeout, 5 minutes of
+    // silence, so a caller that cannot wait that long needs a deadline of its own, like
+    // the sync wall-clock races, folderStatus's STATUS race and POOL_STALL_TIMEOUT_MS.
   };
   // Targeted ENABLE opt-out for servers whose IMAP4rev2 is broken (#472: Strato answers
   // UID SEARCH ALL with an empty ESEARCH once IMAP4rev2 is enabled). Profile-driven so
@@ -1651,9 +1661,9 @@ export async function acquirePooledClient(account) {
     const entry = { resolve, reject, timer: null };
     entry.timer = setTimeout(() => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
-      // Give up on the operation rather than on the limit. A stalled connection is
-      // released by its own commandTimeout at 30s, so a wait longer than that usually
-      // gets served; past it, the honest answer is that the account is saturated.
+      // Give up on the operation rather than on the limit. A stalled connection has been
+      // closed by POOL_STALL_TIMEOUT_MS before this fires; past it, the honest answer is
+      // that the account is saturated.
       const err = new Error('IMAP connections busy, please retry');
       err.poolExhausted = true;
       reject(err);
@@ -1688,8 +1698,35 @@ export function evictPool(accountId) {
   connectionPools.delete(accountId);
 }
 
-async function withFreshClient(account, fn) {
+// Puts POOL_STALL_TIMEOUT_MS on the socket for the length of a lease, then restores the
+// normal timeout. Only while leased, because an unused pooled connection needs the long
+// value: imapflow closes an idle session with no mailbox selected (the pre-warmed one,
+// or one that only ran STATUS) when the timer fires, and a short timer there would cost
+// a fresh login each time on providers that ration them (#474).
+// imapflow's timeout handler closes the connection only when a command is overdue; a
+// session that is quiet for a reason (a held lock, an open download, IDLE) gets a NOOP.
+// client.socket and client.socketTimeout are imapflow internals: without them this does
+// nothing, and imapPoolStall.test.js runs a real ImapFlow so an upgrade that moves them
+// fails there.
+function guardPoolLease(client) {
+  const socket = client.socket;
+  const idleMs = client.socketTimeout;
+  const lease = { stalled: false, end() {} };
+  if (typeof socket?.setTimeout !== 'function' || !Number.isFinite(idleMs)) return lease;
+  const onError = (err) => { if (err?.code === 'ETIMEOUT') lease.stalled = true; };
+  client.on('error', onError);
+  socket.setTimeout(POOL_STALL_TIMEOUT_MS);
+  lease.end = () => {
+    client.off('error', onError);
+    if (!socket.destroyed) socket.setTimeout(idleMs);
+  };
+  return lease;
+}
+
+// Exported for imapPoolStall.test.js.
+export async function withFreshClient(account, fn) {
   const client = await acquirePooledClient(account);
+  const lease = guardPoolLease(client);
   try {
     return await fn(client);
   } catch (err) {
@@ -1704,8 +1741,17 @@ async function withFreshClient(account, fn) {
       pool.clients = pool.clients.filter(c => c !== client);
       drainWaiters(pool);
     }
+    // A command cut off by the stall timeout rejects with imapflow's 'Connection not
+    // available', which isConnectionRefusal reads as the provider refusing us: callers
+    // would arm the refusal backoff and the body route would say the server is limiting
+    // connections. Name it for what it was. 'timed out' is also what fetchMessageBody
+    // retries on a fresh login.
+    if (lease.stalled) {
+      throw new Error(`IMAP command timed out: no reply in ${POOL_STALL_TIMEOUT_MS / 1000}s`, { cause: err });
+    }
     throw err;
   } finally {
+    lease.end();
     releasePooledClient(account, client);
   }
 }
@@ -2164,7 +2210,7 @@ export class ImapManager {
                 // A rejected or TIMED-OUT probe may leave a command in flight, and this is
                 // the account's only shared session, so it must not go back to the pool
                 // idle (review of round 5: a hung SEARCH held the one Yahoo session until
-                // imapflow's command timeout, and a click queued behind it could hit
+                // imapflow's 5-minute socketTimeout, and a click queued behind it could hit
                 // poolExhausted on a healthy account). close() is the same invariant the
                 // fresh path's finally enforces; the pool's close handler evicts it, and
                 // release() below then just closes a client that is no longer pooled.
@@ -2230,8 +2276,8 @@ export class ImapManager {
             // The body-fetch pool shares the same frozen/half-open fate as the deaf
             // persistent connection (same account, same server session state), so drop it
             // too. Otherwise the next body fetch hangs on a stale pooled connection until
-            // its 30s command timeout before retrying — the "preview hangs then eventually
-            // loads" symptom after a late-notification reconnect.
+            // POOL_STALL_TIMEOUT_MS closes it before retrying — the "preview hangs then
+            // eventually loads" symptom after a late-notification reconnect.
             evictPool(accountId);
 
             // Reconnect + catch up. If a sync was hung, the close() above makes it error and
@@ -3010,7 +3056,8 @@ export class ImapManager {
         usedFreshSyncClient = true;
         syncResult = await this._syncInboxWithFreshLogin(syncAccount);
       } else {
-        // Wall-clock timeout guards against half-open TCP sockets that never trigger commandTimeout.
+        // Wall-clock timeout guards against half-open TCP sockets, which imapflow would otherwise
+        // wait on for its 5-minute socketTimeout (it has no per-command timeout).
         syncResult = await Promise.race([
           this.syncMessages(syncAccount, activeClient, 'INBOX', 20, false, true),
           new Promise((_, reject) =>
@@ -4118,8 +4165,9 @@ export class ImapManager {
                 flagsToUpdate.push({ uid: msg.uid, isRead: msg.flags.has('\\Seen'), isStarred: msg.flags.has('\\Flagged') });
               }
             })();
-            // If the timeout wins the race, the fetch keeps running until ImapFlow's commandTimeout
-            // aborts it — swallow that late rejection so it isn't an unhandled rejection.
+            // If the timeout wins the race, the fetch keeps running until it finishes or the
+            // connection is closed under it — swallow that late rejection so it isn't an
+            // unhandled rejection.
             scan.catch(() => {});
             const outcome = await Promise.race([
               scan,
@@ -5814,15 +5862,15 @@ export class ImapManager {
     // Providers flagged preferFreshBodyFetch (e.g. PurelyMail) skip the shared pool on the
     // FIRST attempt too: a brand-new login avoids both contending with flag writes on the
     // size-2 pool and inheriting a frozen/half-open pooled session view that would hang the
-    // fetch until its command timeout. Other providers keep pool-first for TLS reuse.
+    // fetch until POOL_STALL_TIMEOUT_MS. Other providers keep pool-first for TLS reuse.
     const firstAcquire = providerProfile(account).preferFreshBodyFetch ? withFreshLogin : withFreshClient;
     try {
       return await doFetch(firstAcquire);
     } catch (firstErr) {
       const detail = extractImapError(firstErr);
       // Retry once on any transient connection-level error (dead pool connection,
-      // half-open TCP, NAT expiry, commandTimeout, socket reset, or an empty UID FETCH
-      // from a frozen mailbox view). withFreshClient already evicted the bad pooled
+      // half-open TCP, NAT expiry, the pool's stall timeout, socket reset, or an empty
+      // UID FETCH from a frozen mailbox view). withFreshClient already evicted the bad pooled
       // connection; the retry then goes through a BRAND-NEW login (withFreshLogin) rather
       // than the pool, so a second frozen/dead pooled connection can't hang or blank it.
       // Server-side rejections (auth, permission, unknown mailbox) fail again and propagate.
