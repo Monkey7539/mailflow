@@ -212,6 +212,19 @@ describe('conversation pane', () => {
     assert.equal(body.getAttribute('translate'), 'yes');
   });
 
+  test('an HTML message stays translatable under the translate="no" UI', async () => {
+    // Chrome's translator carries the page's translate="no" into the same-origin frame an HTML
+    // body renders in, so the email has to opt back in inside its own document.
+    await React.act(async () => {
+      root.render(React.createElement(ConversationPane, { key: 'html-body', threadId: '<1@x>', folder: 'INBOX', selectedMessageId: 'm1' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const frame = [...document.querySelectorAll('iframe')].find(f => /body of m1/.test(f.getAttribute('srcdoc') ?? ''));
+    assert.ok(frame, 'the HTML body is rendered in a frame');
+    const email = new dom.window.DOMParser().parseFromString(frame.getAttribute('srcdoc'), 'text/html');
+    assert.equal(email.querySelector('p').closest('[translate]')?.getAttribute('translate'), 'yes');
+  });
+
   test('selected conversation card handles image and unsubscribe shortcuts', async (t) => {
     blockImages = true;
     THREAD[2].list_unsubscribe = '<https://example.invalid/unsubscribe>';
