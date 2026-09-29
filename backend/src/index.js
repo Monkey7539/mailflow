@@ -4,7 +4,6 @@ import session from 'express-session';
 import cors from 'cors';
 import { createServer } from 'http';
 import { readFileSync } from 'fs';
-import { WebSocketServer } from 'ws';
 import RedisStore from 'connect-redis';
 import 'dotenv/config';
 import { redisClient } from './services/redis.js';
@@ -42,7 +41,7 @@ import { encryptExistingCredentials, query } from './services/db.js';
 import { runMigrations } from './services/migrations.js';
 import { parseVCard } from './utils/vcard.js';
 import { reloadAuthSettings } from './services/authLimiter.js';
-import { setupWebSocket } from './services/websocket.js';
+import { createWebSocketServer, setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
 import { getUpdateStatus } from './services/updateCheck.js';
 import { recordHttp } from './services/performanceMetrics.js';
@@ -62,7 +61,7 @@ const app = express();
 // the Secure cookie, meaning the session cookie is never sent to the browser.
 app.set('trust proxy', 1);
 const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer });
+const wss = createWebSocketServer(httpServer);
 
 // Redis — connect the shared client before any route or session middleware uses it.
 await redisClient.connect();
