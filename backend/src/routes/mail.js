@@ -17,7 +17,7 @@ import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
-import { safeFilename, attachmentDisposition } from '../utils/contentDisposition.js';
+import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
 import { tokenize, extractFlagFeatures } from '../services/spamTokenizer.js';
 import { updateIncrementalForUser } from '../services/spamModelStore.js';
 
@@ -700,7 +700,7 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 
     if (entries.length === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
-    const zipName = (message.subject || 'attachments').substring(0, 100) + '-attachments.zip';
+    const zipName = truncateFilename(message.subject || 'attachments', 100) + '-attachments.zip';
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', attachmentDisposition(zipName));
 
@@ -793,7 +793,7 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
     const buffer = await imapManager.fetchRawMessage(accountResult.rows[0], message.uid, message.folder);
     if (!buffer) return res.status(404).json({ error: 'Could not fetch message source' });
 
-    const name = `${(message.subject || 'message').slice(0, 80)}.eml`;
+    const name = `${truncateFilename(message.subject || 'message', 80)}.eml`;
     res.setHeader('Content-Type', 'message/rfc822');
     res.setHeader('Content-Disposition', attachmentDisposition(name));
     res.setHeader('Content-Length', buffer.length);
