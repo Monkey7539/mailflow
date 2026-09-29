@@ -28,7 +28,7 @@ async function request(method, path, body, extraHeaders) {
       window.dispatchEvent(new CustomEvent('mailflow:session_expired'));
     }
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(err.error || 'Request failed');
+    const e = new Error(err.error || 'Request failed'); e.status = res.status; throw e;
   }
   return res.json();
 }
