@@ -4634,6 +4634,7 @@ export class ImapManager {
       // Messages still appear in the list via envelope metadata; bodies load on-demand.
       const bodyParts = cfg.fetchBody ? BODY_PREFETCH_PARTS : [];
       let consecutiveErrors = 0;
+      let reconnectFailures = 0;
       let i = 0;
       // Count rows this backfill actually wrote (UID upserts) so GTD section data can be
       // refreshed once at completion when the account is gtd_enabled — the tick's fingerprint
@@ -4641,18 +4642,24 @@ export class ImapManager {
       let backfilledRows = 0;
 
       while (i < missingUids.length) {
-        // Stop immediately if the account was deleted while backfilling
-        const accountCheck = await query('SELECT id FROM email_accounts WHERE id = $1', [account.id]);
+        // Stop immediately if the account was deleted or disabled while backfilling
+        const accountCheck = await query('SELECT id FROM email_accounts WHERE id = $1 AND enabled', [account.id]);
         if (!accountCheck.rows.length) {
-          console.log(`Backfill stopping — account ${logAccount(account)} was deleted`);
+          console.log(`Backfill stopping — account ${logAccount(account)} was deleted or disabled`);
           return;
         }
 
         // Periodically reconnect to keep connections fresh and pick up refreshed OAuth tokens
         if (batchesOnConn >= cfg.batchesPerConn) {
-          try { await openBfClient(); }
+          try { await openBfClient(); reconnectFailures = 0; }
           catch (reconnErr) {
-            console.error(`Backfill reconnect failed for ${logAccount(account)}:`, reconnErr.message);
+            // Three in a row ends the run. A rejected login (changed password, revoked OAuth
+            // grant) does not recover inside this loop, and each retry holds this folder's
+            // guard and a per-host background slot. The outer catch arms the backoff when it
+            // recognises a refusal or a rejected login, and the folder status check finds the
+            // gap again once logins work.
+            if (++reconnectFailures >= 3) throw reconnErr;
+            console.error(`Backfill reconnect failed for ${logAccount(account)}:`, extractImapError(reconnErr));
             await new Promise(r => setTimeout(r, cfg.errorDelay));
             continue; // retry same batch after delay
           }
@@ -5078,13 +5085,20 @@ export class ImapManager {
       if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.backfillAllRunning.delete(account.id);
       this.broadcast({ type: 'backfill_all_complete', accountId: account.id }, account.user_id);
-      // Both run as background jobs after the complete signal — neither should block the UI.
-      this.refreshBulkFlags(account).catch(err =>
-        console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
-      );
-      this.startSnippetIndexer(account).catch(err =>
-        console.error(`Snippet indexer failed for ${logAccount(account)}:`, err.message)
-      );
+      // Both jobs open fresh logins and check neither `enabled` nor the connection backoff. A
+      // walk that stopped because the account was disabled or its logins were refused must not
+      // be followed by more logins to it.
+      const canLogIn = !this._secondaryConnectBlocked(account.id)
+        && (await query('SELECT id FROM email_accounts WHERE id = $1 AND enabled', [account.id])).rows.length > 0;
+      if (canLogIn) {
+        // Both run as background jobs after the complete signal — neither should block the UI.
+        this.refreshBulkFlags(account).catch(err =>
+          console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
+        );
+        this.startSnippetIndexer(account).catch(err =>
+          console.error(`Snippet indexer failed for ${logAccount(account)}:`, err.message)
+        );
+      }
     }
   }
 
