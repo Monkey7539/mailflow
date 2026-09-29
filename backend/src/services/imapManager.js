@@ -6669,6 +6669,13 @@ export class ImapManager {
           try { return await client.search({ uid: `${destUidNextBefore}:*` }, { uid: true }); }
           finally { lock.release(); }
         });
+        // A non-array result (undefined: no mailbox selected, false: SEARCH failed) leaves the
+        // destination unverified. Read as empty, it would report the whole batch stale.
+        if (!Array.isArray(destNew)) throw new Error(`destination UID SEARCH returned ${destNew}`);
+        // The filter guards the RFC 3501 `n:*` quirk, same as the staleness probe: when nothing
+        // arrived, the server still returns the destination's newest existing message, and a
+        // stale UID in the batch would be counted as having landed there and mapped onto it.
+        destNew = destNew.filter(u => u >= destUidNextBefore);
         destArrived = destNew.length;
       } catch (destErr) {
         console.warn(`bulkMoveMessages: destination verification failed (${destErr.message}) — trusting source-absence`);
