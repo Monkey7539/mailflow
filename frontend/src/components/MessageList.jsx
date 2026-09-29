@@ -988,12 +988,16 @@ export default function MessageList() {
   const scheduleDelete = useCallback(async (message) => {
     const tid = message.thread_id || message.id;
     const isThreadRow = isThreadListRow(message);
+    const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
     const key = isThreadRow ? `thread:${tid}` : message.id;
     if (pendingDeleteTimers.current.has(key)) return;
 
     let deleteMessages = [message];
     try {
-      deleteMessages = await resolveMessagesForThreadAction(message);
+      // Scoped like archive: the thread spans every folder and account, and bulk-delete
+      // permanently expunges whatever is already in Trash or Drafts.
+      const resolved = await resolveMessagesForThreadAction(message);
+      deleteMessages = archiveTargetsForFolder(message, resolved, activeFolder, isThreadRow, selectedAccountId);
     } catch (err) {
       console.error('Failed to load thread for delete:', err.message);
       addNotification({ type: 'error', title: t('messageList.deleted.failTitle'), body: t('messageList.deleted.failBody') });
@@ -1071,7 +1075,7 @@ export default function MessageList() {
       },
     });
   }, [
-    isThreadListRow, expandedThreadId, resolveMessagesForThreadAction,
+    isThreadListRow, selectedAccountId, selectedFolder, expandedThreadId, resolveMessagesForThreadAction,
     removeMessage, setExpandedThreadId, decrementUnread, incrementUnread,
     addNotification, t,
   ]);
@@ -1502,12 +1506,16 @@ export default function MessageList() {
 
   const handleBulkDelete = useCallback(async (ids, msgs) => {
     const key = `bulk:${ids[0]}`;
-    // Selected thread rows delete the whole conversation, matching the
-    // single-row delete path — without this only each thread's visible
-    // (newest) message was deleted and the rest of the thread survived.
+    const activeFolder = selectedAccountId ? selectedFolder : 'INBOX';
+    // Selected thread rows delete the conversation's messages in this folder,
+    // matching the single-row delete path — without this only each thread's
+    // visible (newest) message was deleted and the rest of the thread survived.
     let deleteIds = ids;
     try {
-      const resolved = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
+      const resolved = await Promise.all(msgs.map(async (m) => {
+        const thread = await resolveMessagesForThreadAction(m);
+        return archiveTargetsForFolder(m, thread, activeFolder, isThreadListRow(m), selectedAccountId);
+      }));
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
@@ -1572,7 +1580,7 @@ export default function MessageList() {
         });
       },
     });
-  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
+  }, [searchHasMore, removeMessage, prefetchSearchAfterRemoval, selectedAccountId, selectedFolder, isThreadListRow, resolveMessagesForThreadAction, decrementUnread, incrementUnread, addNotification, t]);
 
   const handleBulkMove = useCallback(async (ids, msgs, folder) => {
     // Selected thread rows move the whole conversation. A folder path is
