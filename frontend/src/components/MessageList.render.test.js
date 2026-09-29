@@ -65,11 +65,13 @@ globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 // MessageList loads its own messages on mount and overwrites anything seeded in the store,
 // so the fetch stub has to serve the row rather than the store. Only the messages endpoint
 // needs a real shape; everything else can be an empty object, unless a test serves a path
-// through ROUTES as [status, body].
+// through ROUTES as [status, body]. Every request is recorded in CALLS.
 let SERVED = [];
 let ROUTES = {};
-globalThis.fetch = async (url) => {
+const CALLS = [];
+globalThis.fetch = async (url, init = {}) => {
   const path = String(url);
+  CALLS.push({ path, method: init.method || 'GET', body: init.body });
   const [status, body] = Object.entries(ROUTES).find(([p]) => path.endsWith(p))?.[1]
     ?? [200, path.includes('/mail/messages?') ? { messages: SERVED, total: SERVED.length } : {}];
   return { ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
@@ -79,6 +81,7 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { shortcutBus } = await import('../utils/shortcutBus.js');
+const { clearDeleteGuard } = await import('../utils/pendingDeletes.js');
 const MessageList = (await import('./MessageList.jsx')).default;
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
@@ -96,13 +99,13 @@ let container, root;
 
 // Mount fresh for each scenario. MessageList refetches on mount and overwrites anything seeded
 // in the store, so the fixture is served through fetch rather than set as state.
-async function mount({ rows, threadedView, folder = 'INBOX' }) {
+async function mount({ rows, threadedView, folder = 'INBOX', accountId = 'acct-1' }) {
   SERVED = rows;
   if (root) await React.act(async () => root.unmount());
   container = dom.window.document.getElementById('root');
   useStore.setState({
     accounts: [ACCOUNT], accountsReady: true,
-    selectedAccountId: 'acct-1', selectedFolder: folder,
+    selectedAccountId: accountId, selectedFolder: folder,
     messages: rows, messagesTotal: rows.length, hasMoreMessages: false, loadingMessages: false,
     searchQuery: '', threadedView,
     folders: { 'acct-1': [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }, { path: 'Drafts', name: 'Drafts', special_use: '\\Drafts' }] },
@@ -321,5 +324,111 @@ describe('MessageList — reopening a saved draft keeps its Bcc', () => {
     assert.equal(useStore.getState().selectedMessageId, 'draft-1');
     assert.ok(useStore.getState().notifications.some(n => n.type === 'error' && n.title === 'messageList.draftBcc.failTitle'));
     await React.act(async () => { useStore.setState({ selectedMessageId: null, notifications: [] }); });
+  });
+});
+
+describe('MessageList — deleting a conversation stays in the folder it was deleted from', () => {
+  // GET /mail/thread returns a conversation's copies from every folder and every account, and
+  // bulk-delete permanently expunges whatever is already in Trash or Drafts. Deleting the INBOX
+  // row used to expunge an earlier-trashed message and a draft reply, and move the Sent reply
+  // and the other account's copy to Trash, none of which the row counted.
+  const conversation = (n) => {
+    const base = { ...MESSAGE, thread_id: `thr-${n}`, is_read: true };
+    const head = { ...base, id: `head-${n}`, uid: 10 * n, message_id: `<head-${n}@x>`, message_count: 2, unread_count: 0 };
+    const members = [
+      head,
+      { ...base, id: `inbox-old-${n}`, uid: 10 * n + 1, message_id: `<old-${n}@x>` },
+      { ...base, id: `trashed-${n}`, folder: 'Trash', uid: 10 * n + 2, message_id: `<trashed-${n}@x>` },
+      { ...base, id: `draft-${n}`, folder: 'Drafts', uid: 10 * n + 3, message_id: `<draft-${n}@x>` },
+      { ...base, id: `sent-${n}`, folder: 'Sent', uid: 10 * n + 4, message_id: `<sent-${n}@x>` },
+      { ...base, id: `other-acct-${n}`, account_id: 'acct-2', uid: 10 * n + 5, message_id: `<head-${n}@x>` },
+    ];
+    for (const query of ['?folder=INBOX', '?folder=INBOX&unified=true', '?folder=Trash']) {
+      ROUTES[`/mail/thread/thr-${n}${query}`] = [200, { messages: members }];
+    }
+    return { head, members };
+  };
+  const trashRow = (n) => ({ ...conversation(n).members.find(m => m.id === `trashed-${n}`), message_count: 2, unread_count: 0 });
+
+  // Opening one row and Ctrl-clicking another selects both (#220), so the delete shortcut
+  // takes the multi-select path.
+  const selectBoth = async (one, two) => {
+    await React.act(async () => { useStore.getState().setSelectedMessage(one.id); });
+    await React.act(async () => {
+      draggableIn(two.id).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+    });
+  };
+
+  const deleteSelected = () => React.act(async () => {
+    shortcutBus.emit('delete');
+    await new Promise(r => setTimeout(r, 10));
+  });
+
+  // The request waits out the 4.5 s undo window, but unmounting sends it at once (the
+  // navigate-away path), so the ids it carries can be read straight away.
+  const flushDeletedIds = async () => {
+    const before = CALLS.length;
+    await React.act(async () => { root.unmount(); await new Promise(r => setTimeout(r, 10)); });
+    root = null;
+    const ids = CALLS.slice(before).flatMap(({ path, method, body }) => {
+      if (path.endsWith('/mail/messages/bulk-delete')) return JSON.parse(body).ids;
+      if (method === 'DELETE' && path.includes('/mail/messages/')) return [path.split('/').pop()];
+      return [];
+    });
+    ids.forEach(clearDeleteGuard);
+    ROUTES = {};
+    useStore.setState({ selectedMessageId: null, notifications: [] });
+    return ids.sort();
+  };
+
+  test('a conversation row deletes only its copies in this folder and account', async () => {
+    const { head } = conversation(1);
+    await mount({ rows: [head], threadedView: true });
+    await React.act(async () => { useStore.getState().setSelectedMessage(head.id); });
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['head-1', 'inbox-old-1']);
+  });
+
+  test('selected conversation rows are scoped the same way', async () => {
+    const one = conversation(1).head;
+    const two = conversation(2).head;
+    await mount({ rows: [one, two], threadedView: true });
+    await selectBoth(one, two);
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['head-1', 'head-2', 'inbox-old-1', 'inbox-old-2']);
+  });
+
+  test("in the unified inbox it takes every account's inbox copies and nothing else", async () => {
+    const { head } = conversation(1);
+    await mount({ rows: [head], threadedView: true, accountId: null });
+    await React.act(async () => { useStore.getState().setSelectedMessage(head.id); });
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['head-1', 'inbox-old-1', 'other-acct-1']);
+  });
+
+  test("selected rows in the unified inbox take every account's inbox copies too", async () => {
+    const one = conversation(1).head;
+    const two = conversation(2).head;
+    await mount({ rows: [one, two], threadedView: true, accountId: null });
+    await selectBoth(one, two);
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['head-1', 'head-2', 'inbox-old-1', 'inbox-old-2', 'other-acct-1', 'other-acct-2']);
+  });
+
+  test('deleting it from Trash leaves the copies in other folders alone', async () => {
+    const trashed = trashRow(1);
+    await mount({ rows: [trashed], threadedView: true, folder: 'Trash' });
+    await React.act(async () => { useStore.getState().setSelectedMessage(trashed.id); });
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['trashed-1']);
+  });
+
+  test('selected rows in Trash take only their Trash copies', async () => {
+    const one = trashRow(1);
+    const two = trashRow(2);
+    await mount({ rows: [one, two], threadedView: true, folder: 'Trash' });
+    await selectBoth(one, two);
+    await deleteSelected();
+    assert.deepEqual(await flushDeletedIds(), ['trashed-1', 'trashed-2']);
   });
 });
