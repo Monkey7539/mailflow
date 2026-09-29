@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import RedisStore from 'connect-redis';
 import 'dotenv/config';
 import { redisClient } from './services/redis.js';
+import { parseTrustProxyHops } from './utils/trustProxy.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
 
 import sendRoutes from './routes/send.js';
@@ -60,7 +61,13 @@ const app = express();
 // Trust the nginx reverse proxy so req.secure reflects HTTPS correctly.
 // Without this, express-session sees HTTP (from nginx) and refuses to set
 // the Secure cookie, meaning the session cookie is never sent to the browser.
-app.set('trust proxy', 1);
+// The hop count also decides req.ip, which keys the login rate limit.
+const trustProxyHops = parseTrustProxyHops(process.env.TRUST_PROXY_HOPS);
+if (trustProxyHops === null) {
+  console.error(`FATAL: TRUST_PROXY_HOPS must be a whole number of at least 1 (the reverse proxies in front of the backend, counting nginx), got "${process.env.TRUST_PROXY_HOPS}". Exiting.`);
+  process.exit(1);
+}
+app.set('trust proxy', trustProxyHops);
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
