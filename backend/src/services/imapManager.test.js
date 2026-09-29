@@ -4526,3 +4526,58 @@ describe('permanentDeleteMessage with expectMessageId', () => {
     expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
   });
 });
+
+// A socket is authenticated once, at upgrade, so a revoked session's socket keeps receiving
+// its user's broadcasts until something closes it. The auth routes call closeSockets for that.
+describe('closeSockets', () => {
+  function arrange() {
+    const socket = (userId, sessionId) => ({ userId, sessionId, close: vi.fn() });
+    const sockets = {
+      mine: socket('u1', 's1'),
+      myOtherDevice: socket('u1', 's2'),
+      someoneElse: socket('u2', 's3'),
+      // Still in its session lookup: websocket.js has not set a userId yet.
+      authenticating: socket(undefined, undefined),
+    };
+    return { sockets, ctx: { wss: { clients: new Set(Object.values(sockets)) } } };
+  }
+  const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+
+  it('closes only the sockets opened by the given session', async () => {
+    const { sockets, ctx } = arrange();
+    ImapManager.prototype.closeSockets.call(ctx, 'u1', { sessionId: 's1', reason: 'Locked' });
+    await nextTurn();
+    expect(sockets.mine.close).toHaveBeenCalledWith(1008, 'Locked');
+    expect(sockets.myOtherDevice.close).not.toHaveBeenCalled();
+    expect(sockets.someoneElse.close).not.toHaveBeenCalled();
+    expect(sockets.authenticating.close).not.toHaveBeenCalled();
+  });
+
+  it('closes every socket of the user when no session is given', async () => {
+    const { sockets, ctx } = arrange();
+    ImapManager.prototype.closeSockets.call(ctx, 'u1');
+    await nextTurn();
+    expect(sockets.mine.close).toHaveBeenCalledWith(1008, 'Unauthorized');
+    expect(sockets.myOtherDevice.close).toHaveBeenCalledWith(1008, 'Unauthorized');
+    expect(sockets.someoneElse.close).not.toHaveBeenCalled();
+    expect(sockets.authenticating.close).not.toHaveBeenCalled();
+  });
+
+  it('closes nothing without a userId, not even a socket still authenticating', async () => {
+    const { sockets, ctx } = arrange();
+    ImapManager.prototype.closeSockets.call(ctx, undefined);
+    await nextTurn();
+    for (const ws of Object.values(sockets)) expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it('waits a turn, so it also closes a socket that authenticates just after the call', async () => {
+    const { sockets, ctx } = arrange();
+    ImapManager.prototype.closeSockets.call(ctx, 'u1', { sessionId: 's1' });
+    // An upgrade whose session lookup was answered in the same read from Redis as the write
+    // that ended the session authenticates a microtask after that write's callback.
+    await Promise.resolve();
+    Object.assign(sockets.authenticating, { userId: 'u1', sessionId: 's1' });
+    await nextTurn();
+    expect(sockets.authenticating.close).toHaveBeenCalledWith(1008, 'Unauthorized');
+  });
+});
