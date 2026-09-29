@@ -343,8 +343,8 @@ describe('MessageList — deleting a conversation stays in the folder it was del
       { ...base, id: `sent-${n}`, folder: 'Sent', uid: 10 * n + 4, message_id: `<sent-${n}@x>` },
       { ...base, id: `other-acct-${n}`, account_id: 'acct-2', uid: 10 * n + 5, message_id: `<head-${n}@x>` },
     ];
-    for (const query of ['?folder=INBOX', '?folder=INBOX&unified=true', '?folder=Trash']) {
-      ROUTES[`/mail/thread/thr-${n}${query}`] = [200, { messages: members }];
+    for (const query of ['folder=INBOX', 'folder=INBOX&unified=true', 'folder=Trash']) {
+      ROUTES[`/mail/thread?id=thr-${n}&${query}`] = [200, { messages: members }];
     }
     return { head, members };
   };

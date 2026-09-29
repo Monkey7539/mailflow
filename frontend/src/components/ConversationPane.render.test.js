@@ -72,7 +72,7 @@ let actionRequests = [];
 let folderRequests = [];
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
-  if (u.includes('/mail/thread/')) return { ok: true, status: 200, json: async () => ({ messages: threadResponse }) };
+  if (u.includes('/mail/thread?')) return { ok: true, status: 200, json: async () => ({ messages: threadResponse }) };
   if (u.includes('/mail/messages/bulk-read')) {
     bulkReads.push(JSON.parse(opts.body));
     return { ok: true, status: 200, json: async () => ({}) };
