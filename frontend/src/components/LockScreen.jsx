@@ -13,11 +13,11 @@ export default function LockScreen() {
 
   async function handleSignOut() {
     setSigningOut(true);
-    try {
-      await api.logout();
-    } catch { /* intentional */ }
+    const signedOut = await api.logout().then(() => true, () => false);
     localStorage.removeItem('mailflow_locked_message');
-    setLocked(false);
+    // If the sign-out failed, the session may still be alive, and unlocked if the lock request
+    // failed too. Keep the lock then, so the next load sends it again.
+    if (signedOut) setLocked(false);
     setUser(null);
   }
 
