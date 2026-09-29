@@ -5,8 +5,10 @@ vi.mock('./smtpTransport.js', () => ({
   createAccountSmtpTransport: vi.fn(),
 }));
 
+import nodemailer from 'nodemailer';
 import { query } from './db.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
+import { parseRawHeaders } from './messageParser.js';
 import {
   buildForwardMessage,
   forwardRuleMessage,
@@ -48,6 +50,15 @@ const messageRow = {
   body_html: '<p>Original body</p>',
   attachments: [],
 };
+
+// The headers sync hands the rules when a sent forward lands in a mailbox: the message as
+// nodemailer writes it, read back by the parser sync uses.
+async function deliveredHeaders(mail) {
+  const { message } = await nodemailer
+    .createTransport({ streamTransport: true, buffer: true, newline: 'windows' })
+    .sendMail(mail);
+  return parseRawHeaders(message.subarray(0, message.indexOf('\r\n\r\n')));
+}
 
 describe('buildForwardMessage', () => {
   it('builds a PII-free-shape Fwd message and escapes forwarded headers', () => {
@@ -550,5 +561,86 @@ describe('forwardRuleMessage', () => {
     expect(transport.sendMail).toHaveBeenCalledTimes(2);
     expect(createAccountSmtpTransport).toHaveBeenCalledTimes(2);
     expect(reservationStatus).toBe('sent');
+  });
+
+  it('stops a forward that comes back to a mailbox that already forwarded it', async () => {
+    const upstream = { ...account, id: 'account-0', email_address: 'upstream@example.net' };
+    const second = { ...account, id: 'account-2', email_address: 'second@example.org' };
+    const third = { ...account, id: 'account-3', email_address: 'third@example.org' };
+    const hops = [[upstream, account], [account, second], [second, third], [third, account]];
+    query.mockImplementation(async sql => ({
+      rows: sql.includes('INSERT INTO inbox_rule_forwards')
+        ? [{ id: 'delivery-1' }]
+        : sql.includes('FROM messages') ? [messageRow] : [],
+    }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      let parsedHeaders;
+      for (const [index, [from, to]] of hops.entries()) {
+        await expect(forwardRuleMessage({
+          ...input,
+          ruleId: `rule-${index}`,
+          account: from,
+          recipient: to.email_address,
+          message: { id: `message-${index}`, parsedHeaders },
+        })).resolves.toBe('sent');
+        parsedHeaders = await deliveredHeaders(transport.sendMail.mock.calls[index][0]);
+      }
+      const queriesBeforeReturn = query.mock.calls.length;
+
+      await expect(forwardRuleMessage({
+        ...input,
+        recipient: second.email_address,
+        message: { id: 'message-4', parsedHeaders },
+      })).resolves.toBe('loop');
+
+      expect(query).toHaveBeenCalledTimes(queriesBeforeReturn);
+      expect(transport.sendMail).toHaveBeenCalledTimes(hops.length);
+      const tokens = parsedHeaders['x-mailflow-loop'].split(', ');
+      expect(tokens).toHaveLength(hops.length);
+      expect(new Set(tokens).size).toBe(hops.length);
+      for (const token of tokens) expect(token).toMatch(/^[0-9a-f]{16}$/);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = warn.mock.calls.flat().join(' ');
+      for (const [from] of hops) expect(logged).not.toContain(from.email_address);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('stops after ten forwarding mailboxes and passes on only well-formed tokens', async () => {
+    const tokens = Array.from({ length: 10 }, (_, i) => i.toString(16).repeat(16));
+    query.mockImplementation(async sql => ({
+      rows: sql.includes('INSERT INTO inbox_rule_forwards')
+        ? [{ id: 'delivery-1' }]
+        : sql.includes('FROM messages') ? [messageRow] : [],
+    }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(forwardRuleMessage({
+        ...input,
+        message: {
+          id: 'message-2',
+          parsedHeaders: parseRawHeaders(`X-MailFlow-Loop: ${tokens.join(', ')}`),
+        },
+      })).resolves.toBe('loop');
+      expect(query).not.toHaveBeenCalled();
+      expect(transport.sendMail).not.toHaveBeenCalled();
+
+      const nine = tokens.slice(1).join(', ');
+      await expect(forwardRuleMessage({
+        ...input,
+        message: {
+          id: 'message-3',
+          parsedHeaders: parseRawHeaders(`X-MailFlow-Loop: ${nine}, mailbox@example.com`),
+        },
+      })).resolves.toBe('sent');
+      const delivered = await deliveredHeaders(transport.sendMail.mock.calls[0][0]);
+      expect(delivered['x-mailflow-loop']).toMatch(new RegExp(`^${nine}, [0-9a-f]{16}$`));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

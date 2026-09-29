@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { query } from './db.js';
 import { sanitizeEmail } from './emailSanitizer.js';
@@ -5,6 +6,8 @@ import { createAccountSmtpTransport } from './smtpTransport.js';
 import { MAILER_ID } from './mailerIdentity.js';
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const LOOP_HEADER = 'X-MailFlow-Loop';
+const MAX_FORWARD_HOPS = 10;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -106,6 +109,26 @@ function forwardedHeaders(row) {
   ].filter(([, value]) => value);
 }
 
+// A forward is a new message, so when a copy lands back in a mailbox that forwards it (two
+// rules forwarding to each other, or one forwarding to its own alias) nothing ties it to the
+// mail it came from, and it would go round forever. Each forward carries the tokens of the
+// message it was made from plus its own mailbox's, so a mailbox that finds its own token has
+// already forwarded this mail. The token is per mailbox, not per rule or recipient, so a copy
+// that comes back cannot fan out through the mailbox's other forward rules. Hashed so the
+// header does not list every address on the way.
+function loopToken(account) {
+  return createHash('sha256')
+    .update(`mailflow-loop:${(account.email_address || '').trim().toLowerCase()}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+// Only well-formed tokens are passed on: the header may have come from the sender.
+function receivedLoopTokens(message) {
+  const value = message.parsedHeaders?.[LOOP_HEADER.toLowerCase()];
+  return typeof value === 'string' ? value.match(/\b[0-9a-f]{16}\b/g) || [] : [];
+}
+
 export function buildForwardMessage({
   row,
   account,
@@ -113,6 +136,7 @@ export function buildForwardMessage({
   text,
   html,
   attachments = [],
+  loopTokens = [],
 }) {
   const headers = forwardedHeaders(row);
   const forwardHeaderText = [
@@ -135,6 +159,7 @@ export function buildForwardMessage({
     // same strict outbound filters, and it is the mail most shaped like the relaying a
     // botnet heuristic looks for.
     xMailer: MAILER_ID,
+    headers: { [LOOP_HEADER]: [...loopTokens, loopToken(account)].join(', ') },
     subject: forwardSubject(row.subject),
     text: `${forwardHeaderText}\n\n${plainBody}`,
     ...(safeHtml ? { html: `${forwardHeaderHtml}${safeHtml}` } : {}),
@@ -240,6 +265,17 @@ export async function forwardRuleMessage({
   imapManager,
   recipient,
 }) {
+  const loopTokens = receivedLoopTokens(message);
+  if (
+    loopTokens.includes(loopToken(account)) ||
+    loopTokens.length >= MAX_FORWARD_HOPS
+  ) {
+    console.warn(
+      `ruleForwarder: rule ${ruleId} did not forward message ${message.id}: forwarding loop detected`
+    );
+    return 'loop';
+  }
+
   const reserved = await query(
     `INSERT INTO inbox_rule_forwards (rule_id, message_id)
      VALUES ($1, $2)
@@ -278,6 +314,7 @@ export async function forwardRuleMessage({
       row,
       account,
       recipient,
+      loopTokens,
       ...content,
     });
 
