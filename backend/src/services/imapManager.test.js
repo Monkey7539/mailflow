@@ -1933,6 +1933,83 @@ describe("connectAccount attaches 'error' before connect (#360)", () => {
   });
 });
 
+// A throw from connectAccount's setup (the connection policy's DB lookup, or a host the policy
+// rejects) used to escape before the try whose finally releases connectingAccounts. The account
+// then showed no error, and every later attempt (health check, Reconnect, a settings change) was
+// skipped as "Already connecting" until the process restarted.
+describe('connectAccount releases its lock when setup throws', () => {
+  const blockedHost = 'Host resolves to a private or reserved IP address';
+  const dbDown = 'timeout exceeded when trying to connect';
+  const acct = { id: 'acct-lock-1', user_id: 1, imap_host: 'mail.example.test', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+  const manager = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr.broadcast = vi.fn();
+    return mgr;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+  });
+  // vi.clearAllMocks() keeps queued *Once values. Drop them so a regression that skips the retry
+  // fails here, not in whichever later test would consume the leftovers.
+  afterEach(() => {
+    vi.restoreAllMocks();
+    getConnectionPolicy.mockReset();
+    resolveForConnection.mockReset();
+  });
+
+  it.each([
+    ['the connection policy rejects the host', blockedHost, resolveForConnection, () => {
+      getConnectionPolicy.mockResolvedValueOnce({ allowPrivateHosts: false, allowInsecureTls: false });
+      resolveForConnection.mockRejectedValueOnce(new Error(blockedHost));
+    }],
+    ['the policy lookup fails', dbDown, getConnectionPolicy, () => {
+      getConnectionPolicy.mockRejectedValueOnce(new Error(dbDown));
+    }],
+  ])('%s', async (_label, detail, step, fail) => {
+    const mgr = manager();
+
+    fail();
+    const result = await mgr.connectAccount(acct).catch(err => err);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
+    expect(result).toBe(false);
+    expect(ImapFlow).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET sync_error = $1 WHERE id = $2', [detail, acct.id]);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: detail }, acct.user_id);
+
+    // The next health-check tick or Reconnect click tries again rather than being skipped.
+    fail();
+    await expect(mgr.connectAccount(acct)).resolves.toBe(false);
+    expect(step).toHaveBeenCalledTimes(2);
+  });
+
+  // Taking the lock only after setup would also stop the leak, but would let a second caller start
+  // a parallel connect while the first is still resolving the host.
+  it('still holds it while setup is pending, so a concurrent call is skipped', async () => {
+    const mgr = manager();
+    let failPolicy;
+    getConnectionPolicy.mockReturnValueOnce(new Promise((_, reject) => { failPolicy = reject; }));
+
+    const first = mgr.connectAccount(acct).catch(err => err);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(getConnectionPolicy).toHaveBeenCalledTimes(1);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(true);
+    await expect(mgr.connectAccount(acct)).resolves.toBe(false);
+    expect(getConnectionPolicy).toHaveBeenCalledTimes(1);
+
+    failPolicy(new Error(dbDown));
+    expect(await first).toBe(false);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
+  });
+});
+
 describe('account error reporting: transient failures must not paint the account red', () => {
   const account = { id: 'acct-1', user_id: 'u1', email_address: 'a@example.com' };
   const ctx = () => ({ _syncErrorState: new Map(), _accountErrorStreak: new Map(), broadcast: vi.fn() });
