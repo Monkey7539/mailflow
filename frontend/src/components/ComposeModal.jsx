@@ -214,6 +214,15 @@ export default function ComposeModal() {
   const [draftFolder, setDraftFolder] = useState(() => composeData?.draftFolder ?? null);
   const [draftAccountId, setDraftAccountId] = useState(() => composeData?.accountId ?? null);
   const [savingDraft, setSavingDraft] = useState(false);
+  // Send and Discard delete the saved copy as the composer closes. A save still in flight then
+  // appends a newer one after they have read draftUid, and the unmounted component drops its
+  // uid, so they wait for that save and read the copy from here instead.
+  const draftCopyRef = useRef({
+    uid: composeData?.draftUid ?? null,
+    folder: composeData?.draftFolder ?? null,
+    accountId: composeData?.accountId ?? null,
+  });
+  const draftSaveRef = useRef(null);
   const [attachments, setAttachments] = useState([]);
   const [fwdAttachments, setFwdAttachments] = useState(() => composeData?.forwardedAttachments || []);
 
@@ -821,9 +830,7 @@ export default function ComposeModal() {
       idempotencyKeyRef.current = null;
       const replyThreadId = isReply ? composeData?.threadId : null;
       closeCompose();
-      if (draftUid != null && draftFolder != null && draftAccountId) {
-        api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-      }
+      deleteDraftCopy();
       // Prefer the Sent folder the backend actually resolved to; fall back to the account's
       // mapping only if the response didn't carry one. Avoids navigating "View" to a stale
       // mapping (e.g. a non-selectable "[Gmail]" parent) that the send path bypassed (#386).
@@ -890,6 +897,8 @@ export default function ComposeModal() {
     const { accountId, aliasId } = resolveFrom(fromValue);
     if (!accountId) return;
     setSavingDraft(true);
+    let settle;
+    draftSaveRef.current = new Promise(resolve => { settle = resolve; });
     try {
       const bodyToSend = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
       const result = await api.saveDraft({
@@ -914,6 +923,7 @@ export default function ComposeModal() {
           : {}),
       });
       if (result.uid != null) {
+        draftCopyRef.current = { uid: result.uid, folder: result.folder, accountId };
         setDraftUid(result.uid);
         setDraftFolder(result.folder);
         setDraftAccountId(accountId);
@@ -950,6 +960,15 @@ export default function ComposeModal() {
       console.error('Save draft failed:', err.message);
     } finally {
       setSavingDraft(false);
+      settle();
+    }
+  };
+
+  const deleteDraftCopy = async () => {
+    await draftSaveRef.current;
+    const { uid, folder, accountId } = draftCopyRef.current;
+    if (uid != null && folder != null && accountId) {
+      api.deleteDraft(accountId, uid, folder).catch(() => {});
     }
   };
 
@@ -1581,9 +1600,7 @@ export default function ComposeModal() {
             <button
               onClick={() => {
                 setShowDiscardSheet(false);
-                if (draftUid != null && draftFolder != null && draftAccountId) {
-                  api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-                }
+                deleteDraftCopy();
                 closeCompose();
               }}
               style={{ width: '100%', padding: '16px 20px', textAlign: 'left', background: 'none', border: 'none', color: 'var(--red)', fontSize: 16, fontWeight: 500, cursor: 'pointer', borderBottom: '1px solid var(--border-subtle)', WebkitTapHighlightColor: 'transparent' }}
@@ -2333,9 +2350,7 @@ export default function ComposeModal() {
             <button
               onClick={() => {
                 setShowCloseDialog(false);
-                if (draftUid != null && draftFolder != null && draftAccountId) {
-                  api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-                }
+                deleteDraftCopy();
                 closeCompose();
               }}
               style={{ padding: '8px 16px', background: 'none', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--red)', fontSize: 13, cursor: 'pointer', textAlign: 'center' }}
