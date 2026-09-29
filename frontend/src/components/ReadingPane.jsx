@@ -39,11 +39,22 @@ export default function ReadingPane() {
   // the one matched message rather than its conversation.
   if (!shouldUseConversationPane({ mode, searchQuery, message: selected })) return <MessagePane />;
 
+  // The conversation's actions take what the list shows of it, not every folder and account
+  // the thread spans: its copies in the folder and account being viewed. A message opened from
+  // a notification, a link or the GTD sidebar is not a row of the list and can live elsewhere,
+  // where the view would pick the wrong copies, such as the Sent reply while Sent is open, so
+  // its own folder and account stand in.
+  const listed = (messages || []).some(message => message.id === selected.id);
+  const scope = listed
+    ? { row: selected, accountId: selectedAccountId, folder: selectedFolder }
+    : { row: selected, accountId: selected.account_id, folder: selected.folder };
+
   return (
     <ConversationPane
       threadId={selected.thread_id}
       folder={selectedFolder}
       unified={!selectedAccountId}
+      scope={scope}
       // Which message the reader picked. Selecting a different message inside the same
       // thread does not change threadId, so without this the pane had no way to know a
       // click had happened and nothing opened.

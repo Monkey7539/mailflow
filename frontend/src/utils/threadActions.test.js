@@ -1,9 +1,10 @@
 // Tests for the thread-level actions.
 //
 // The contract worth pinning is the one that is easy to get wrong when an action goes
-// from one message to many: every message in the thread is removed and every one comes
-// back, the request is held for the undo window rather than sent immediately, and spam
-// deliberately spares the reader's own replies.
+// from one message to many: every message the action covers is removed and every one
+// comes back, the request is held for the undo window rather than sent immediately,
+// archive and delete cover only what the list behind the pane is showing, move only the
+// account whose folder was picked, and spam deliberately spares the reader's own replies.
 //
 // Real store, real api layer, stubbed fetch and stubbed clock.
 
@@ -50,6 +51,10 @@ const THREAD = [
 ];
 const ACCOUNTS = [{ id: 'acct', email_address: 'me@x.z', aliases: [], folder_mappings: { sent: 'Sent' } }];
 
+// What the pane passes when the conversation was opened from the unified inbox. a3 is the
+// newest inbox message, so it is the row the threaded list shows.
+const INBOX_VIEW = { row: THREAD[2], accountId: null, folder: 'INBOX' };
+
 // The authoritative lookup the pane supplies. It returns a thread that has GAINED a
 // message since the pane rendered, which is the staleness this module exists to handle.
 const LATE_REPLY = { id: 'a4', account_id: 'acct', folder: 'INBOX', subject: 'Re: Hello', from_email: 'them@x.z', date: '2026-01-04T00:00:00Z', is_read: false };
@@ -72,10 +77,10 @@ beforeEach(() => {
 });
 
 describe('archiveThread', () => {
-  test('removes the whole thread at once and holds the request for the undo window', async () => {
-    archiveThread(THREAD, { t, addNotification });
+  test('removes the conversation at once and holds the request for the undo window', async () => {
+    archiveThread(THREAD, { t, addNotification, scope: INBOX_VIEW });
 
-    assert.deepEqual(ids(), [], 'every message in the thread disappears immediately');
+    assert.deepEqual(ids(), ['a2'], 'both inbox messages disappear immediately, and the Sent reply is not touched');
     assert.equal(notifications.length, 1, 'one notification for the conversation, not one per message');
 
     // Well into the undo window, and still nothing sent. Asserting this only
@@ -88,12 +93,12 @@ describe('archiveThread', () => {
     await tick(UNDO_WINDOW + 50);
     assert.equal(requests.length, 1, 'one bulk request for the whole thread');
     assert.match(requests[0].url, /bulk-archive/);
-    assert.deepEqual(requests[0].body.ids.sort(), ['a1', 'a2', 'a3'], 'all three ids in a single call');
+    assert.deepEqual(requests[0].body.ids.sort(), ['a1', 'a3'], 'both inbox ids in a single call, and the Sent reply stays in Sent');
   });
 
   test('undo puts every message back and sends nothing', async () => {
-    archiveThread(THREAD, { t, addNotification });
-    assert.deepEqual(ids(), []);
+    archiveThread(THREAD, { t, addNotification, scope: INBOX_VIEW });
+    assert.deepEqual(ids(), ['a2']);
 
     notifications[0].onUndo();
     assert.deepEqual(ids(), ['a1', 'a2', 'a3'], 'the whole conversation is restored, not just one message');
@@ -104,7 +109,7 @@ describe('archiveThread', () => {
 
   test('a failed request restores the thread and reports it', async () => {
     failNext = true;
-    archiveThread(THREAD, { t, addNotification });
+    archiveThread(THREAD, { t, addNotification, scope: INBOX_VIEW });
     await tick(UNDO_WINDOW + 50);
 
     assert.deepEqual(ids(), ['a1', 'a2', 'a3'], 'a thread that failed to archive must come back');
@@ -114,11 +119,11 @@ describe('archiveThread', () => {
 });
 
 describe('deleteThread', () => {
-  test('deletes every message in one call', async () => {
-    deleteThread(THREAD, { t, addNotification });
+  test('deletes the conversation in one call and leaves the Sent reply alone', async () => {
+    deleteThread(THREAD, { t, addNotification, scope: INBOX_VIEW });
     await tick(UNDO_WINDOW + 50);
     assert.match(requests[0].url, /bulk-delete/);
-    assert.deepEqual(requests[0].body.ids.sort(), ['a1', 'a2', 'a3']);
+    assert.deepEqual(requests[0].body.ids.sort(), ['a1', 'a3']);
   });
 });
 
@@ -126,12 +131,12 @@ describe('a reply that arrives while the conversation is open', () => {
   test('is included in the action, not left behind', async () => {
     // The pane only knows the three messages it rendered. Acting on that snapshot would
     // archive three and leave the fourth in the inbox, resurrecting the thread.
-    archiveThread(THREAD, { t, addNotification, fetchThread });
+    archiveThread(THREAD, { t, addNotification, fetchThread, scope: INBOX_VIEW });
     await tick(UNDO_WINDOW + 50);
 
     assert.deepEqual(
       requests.at(-1).body.ids.sort(),
-      ['a1', 'a2', 'a3', 'a4'],
+      ['a1', 'a3', 'a4'],
       'the late reply is archived along with the rest of the thread',
     );
   });
@@ -147,7 +152,7 @@ describe('a reply that arrives while the conversation is open', () => {
 
 describe('moveThread', () => {
   test('moves the whole conversation into the chosen folder', async () => {
-    moveThread(THREAD, 'Archive/2026', { t, addNotification });
+    moveThread(THREAD, 'Archive/2026', { t, addNotification, scope: INBOX_VIEW });
     assert.deepEqual(ids(), [], 'the conversation leaves the current folder at once');
     assert.equal(notifications[0].body, 'Archive/2026', 'the toast names where it went');
 
@@ -159,7 +164,7 @@ describe('moveThread', () => {
   });
 
   test('undo brings the conversation back and moves nothing', async () => {
-    moveThread(THREAD, 'Archive/2026', { t, addNotification });
+    moveThread(THREAD, 'Archive/2026', { t, addNotification, scope: INBOX_VIEW });
     notifications[0].onUndo();
     assert.deepEqual(ids(), ['a1', 'a2', 'a3']);
     await tick(UNDO_WINDOW + 50);
@@ -201,6 +206,98 @@ describe('spamThread', () => {
     await tick(UNDO_WINDOW + 50);
     const spammed = requests.map(r => r.url.match(/messages\/([^/]+)\/spam/)?.[1]).filter(Boolean).sort();
     assert.deepEqual(spammed, ['a1', 'a3'], 'only the correspondent\'s messages are reported');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The pane shows every copy of the conversation, but the list it was opened from shows its
+// copies in one folder and, outside the unified inbox, one account. Archive and delete act on
+// what the list shows, as the list's own thread archive does (#361), and move on the account
+// whose folders the picker listed, as the list's own move does.
+
+// One email delivered to two accounts (#476), with A's Sent reply, A's unsent draft reply,
+// and an earlier message of the thread that A's reader had already deleted.
+const SPREAD = [
+  { id: 'a-old', account_id: 'A', folder: 'Trash', message_id: '<0@x>', subject: 'Plan', date: '2026-02-01T00:00:00Z', is_read: true },
+  { id: 'a-in', account_id: 'A', folder: 'INBOX', message_id: '<1@x>', subject: 'Re: Plan', date: '2026-02-02T00:00:00Z', is_read: false },
+  { id: 'b-in', account_id: 'B', folder: 'INBOX', message_id: '<1@x>', subject: 'Re: Plan', date: '2026-02-02T00:00:00Z', is_read: false },
+  { id: 'a-sent', account_id: 'A', folder: 'Sent', message_id: '<2@x>', subject: 'Re: Plan', date: '2026-02-03T00:00:00Z', is_read: true },
+  { id: 'a-draft', account_id: 'A', folder: 'Drafts', message_id: '<3@x>', subject: 'Re: Plan', date: '2026-02-04T00:00:00Z', is_read: true },
+];
+// The unified inbox lists the conversation as one row for both accounts' inbox copies.
+const GROUPED_ROW = { ...SPREAD[1], message_count: 2, unread_count: 2 };
+const UNIFIED = { row: GROUPED_ROW, accountId: null, folder: 'INBOX' };
+const sentIds = pattern => requests.find(r => pattern.test(r.url))?.body.ids.slice().sort();
+
+describe('a conversation spread across folders and accounts', () => {
+  beforeEach(() => {
+    useStore.getState().setMessages([{ ...GROUPED_ROW }]);
+    useStore.setState({ recentFolders: [] });
+  });
+
+  test('archive from the unified inbox takes every inbox copy and nothing filed elsewhere', async () => {
+    archiveThread(SPREAD, { t, addNotification, scope: UNIFIED });
+    await tick(UNDO_WINDOW + 50);
+    // Archiving is a move on IMAP: the Sent reply would leave Sent, the draft Drafts.
+    assert.deepEqual(sentIds(/bulk-archive/), ['a-in', 'b-in']);
+  });
+
+  test('archive from one account\'s inbox stays in it, for a reply that arrives late too', async () => {
+    const late = [
+      { id: 'a-late', account_id: 'A', folder: 'INBOX', message_id: '<4@x>', date: '2026-02-05T00:00:00Z', is_read: false },
+      { id: 'a-late-sent', account_id: 'A', folder: 'Sent', message_id: '<5@x>', date: '2026-02-06T00:00:00Z', is_read: true },
+    ];
+    archiveThread(SPREAD, {
+      t, addNotification,
+      scope: { row: SPREAD[1], accountId: 'A', folder: 'INBOX' },
+      fetchThread: async () => ({ messages: [...SPREAD, ...late] }),
+    });
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(sentIds(/bulk-archive/), ['a-in', 'a-late'], 'the thread re-read at commit is held to the same view');
+  });
+
+  test('delete never sends a message that is already in Trash or Drafts', async () => {
+    // bulk-delete expunges those instead of moving them to Trash, so sending them destroyed
+    // the draft reply and the message the reader had already deleted. The ids sent come from
+    // the thread as re-read at commit, here with a second draft saved during the undo window.
+    const lateDraft = { id: 'a-draft-2', account_id: 'A', folder: 'Drafts', message_id: '<6@x>', date: '2026-02-05T00:00:00Z', is_read: true };
+    deleteThread(SPREAD, {
+      t, addNotification,
+      scope: UNIFIED,
+      fetchThread: async () => ({ messages: [...SPREAD, lateDraft] }),
+    });
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(sentIds(/bulk-delete/), ['a-in', 'b-in']);
+  });
+
+  test('move sends only the account whose folders the picker listed', async () => {
+    // The picker lists the row's account, A. bulk-move skips an account that has no folder at
+    // that path and still answers ok, and the path was recorded as a recent folder of B too.
+    moveThread(SPREAD, 'Projects', { t, addNotification, scope: UNIFIED });
+    await tick(UNDO_WINDOW + 50);
+    const moved = sentIds(/bulk-move/);
+    assert.ok(moved.includes('a-in') && moved.every(id => id.startsWith('a-')), `only A's copies are sent, got ${moved}`);
+    assert.deepEqual(useStore.getState().recentFolders, [{ accountId: 'A', path: 'Projects' }], 'Projects is not recorded as a folder of B');
+  });
+
+  test('move sends the row itself when the thread holds none of its account\'s copies', async () => {
+    // A message opened from a notification, from an account the unified thread leaves out.
+    // Filtering the thread by its account leaves nothing, and sending nothing would close the
+    // pane without moving anything or saying so.
+    const row = { id: 'c-in', account_id: 'C', folder: 'INBOX', message_id: '<1@x>', date: '2026-02-02T00:00:00Z', is_read: true };
+    moveThread(SPREAD, 'Projects', { t, addNotification, scope: { row, accountId: 'C', folder: 'INBOX' } });
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(sentIds(/bulk-move/), ['c-in']);
+    assert.deepEqual(useStore.getState().recentFolders, [{ accountId: 'C', path: 'Projects' }]);
+  });
+
+  test('the list row is acted on when the thread holds only its inbox twin', async () => {
+    // Gmail files a labelled message in INBOX and in the label's folder, and the thread keeps
+    // only the INBOX copy. Archiving from the Projects folder takes the copy the list shows.
+    const row = { ...SPREAD[1], id: 'a-proj', folder: 'Projects' };
+    archiveThread(SPREAD, { t, addNotification, scope: { row, accountId: 'A', folder: 'Projects' } });
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(sentIds(/bulk-archive/), ['a-proj']);
   });
 });
 
