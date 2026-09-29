@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn(), pool: {} }));
-vi.mock('../index.js', () => ({ imapManager: { disconnectUser: vi.fn() } }));
+vi.mock('../index.js', () => ({ imapManager: { disconnectUser: vi.fn(), closeSockets: vi.fn() } }));
 vi.mock('../services/encryption.js', () => ({
   decrypt: value => value,
   encrypt: value => value,
