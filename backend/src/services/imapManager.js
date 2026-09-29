@@ -2481,11 +2481,15 @@ export class ImapManager {
       }
     }
 
-    // Refresh OAuth token if needed before connecting
-    account = await ensureFreshToken(account);
-    const { resolved, policy } = await resolveAccountHost(account);
     let client;
     try {
+      // Refresh OAuth token if needed before connecting. Both setup steps stay inside the try so
+      // a failed policy lookup, or a host the policy rejects, is recorded as the account's error
+      // and releases connectingAccounts; otherwise every later attempt is skipped as a duplicate
+      // until the process restarts.
+      account = await ensureFreshToken(account);
+      const { resolved, policy } = await resolveAccountHost(account);
+
       // Connect via the shared helper: it attaches the #360 handshake-error listener, races the
       // connect against a 30s timeout (client.connect() has none — a slow/unresponsive server like
       // purelymail on a cold start would otherwise hang forever, wedging retries while
