@@ -1845,7 +1845,7 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
 // COPY resolves false on a NO rather than throwing, so a full quota or a missing destination
 // destroyed the message (postalsys/imapflow#406). Emulate it here and delete only once the
 // server has confirmed the copy.
-async function moveUids(client, range, toFolder) {
+async function moveUids(account, client, range, toFolder) {
   // imapflow's own test for MOVE (hasCapability in lib/tools.js), where IMAP4rev2 includes
   // it. This must never say yes where imapflow says no, or its unchecked fallback runs.
   const caps = client.capabilities;
@@ -1858,10 +1858,63 @@ async function moveUids(client, range, toFolder) {
   // The copy has landed, so a failed delete leaves the message in both folders rather than
   // losing it. imapflow's fallback reports that as moved too; callers that retry a failed
   // move (snooze wake-up) would otherwise add another copy on every attempt.
-  if (!(await client.messageDelete(range, { uid: true, silent: true }))) {
+  if (!(await deleteUids(account, client, range, { silent: true }))) {
     console.warn(`Emulated move ${client.mailbox?.path} → ${toFolder} of UID(s) ${range}: copied, but the source could not be deleted — the message is now in both folders`);
   }
   return copied;
+}
+
+const protectedExpungeSem = createKeyedSemaphore(1);
+
+// client.messageDelete without its data loss. imapflow expunges by UID only when the server has
+// UIDPLUS (RFC 4315). Without it the EXPUNGE is mailbox-wide: it also destroys every message
+// another client has flagged \Deleted and not expunged yet, which that client can still undelete.
+// Take their flag off around the EXPUNGE and put it back. When they cannot be protected, expunge
+// nothing and resolve false, as a refused EXPUNGE does.
+//
+// One at a time per account and folder. The pool gives an account several sessions, and two of
+// these overlapping in one folder undo each other: one puts \Deleted back on the messages it
+// protected just before the other's EXPUNGE, or clears it on the other's target.
+async function deleteUids(account, client, range, options = {}) {
+  const expunge = () => client.messageDelete(range, { ...options, uid: true });
+  // Deliberately stricter than imapflow's test, which IMAP4rev2 also passes: when the two
+  // disagree, the result is protection that was not needed, never an unprotected EXPUNGE.
+  if (client.capabilities?.has('UIDPLUS')) return expunge();
+  const folder = client.mailbox?.path;
+  const key = `${account.id}:${folder}`;
+  try {
+    // Bounded like the pool's own wait: every waiter holds a pooled connection, so a stalled
+    // delete must not pin the account's whole pool behind it.
+    await protectedExpungeSem.acquire(key, { timeoutMs: ACQUIRE_TIMEOUT_MS });
+  } catch {
+    console.warn(`Not expunging UID(s) ${range} in ${folder}: an earlier delete there has not finished after ${ACQUIRE_TIMEOUT_MS / 1000}s`);
+    return false;
+  }
+  try {
+    // A non-array result (undefined: no mailbox selected, false: SEARCH failed) cannot say what
+    // to protect, and carrying on would read it as "nothing else is flagged".
+    const flagged = await client.search({ deleted: true }, { uid: true });
+    if (!Array.isArray(flagged)) {
+      console.warn(`Not expunging UID(s) ${range} in ${folder}: the \\Deleted SEARCH returned ${flagged}, so other flagged messages cannot be protected`);
+      return false;
+    }
+    const ours = new Set(String(range).split(',').map(Number));
+    const others = flagged.filter(uid => !ours.has(uid)).join(',');
+    if (!others) return await expunge();
+    try {
+      if (!(await client.messageFlagsRemove(others, ['\\Deleted'], { uid: true }))) {
+        console.warn(`Not expunging UID(s) ${range} in ${folder}: could not clear \\Deleted on UID(s) ${others} to protect them`);
+        return false;
+      }
+      return await expunge();
+    } finally {
+      if (!(await client.messageFlagsAdd(others, ['\\Deleted'], { uid: true }))) {
+        console.warn(`Could not put \\Deleted back on UID(s) ${others} in ${folder}, which another client had flagged for deletion`);
+      }
+    }
+  } finally {
+    protectedExpungeSem.release(key);
+  }
 }
 
 export class ImapManager {
@@ -6124,7 +6177,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await moveUids(client, String(uid), toFolder);
+          const result = await moveUids(account, client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) {
             newUid = result.uidMap.get(Number(uid)) || null;
@@ -6253,7 +6306,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await moveUids(client, String(uid), toFolder);
+          const result = await moveUids(account, client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
         } finally {
@@ -6283,7 +6336,7 @@ export class ImapManager {
           }
           if (!found || found !== bare(expectMessageId)) return false;
         }
-        const result = await client.messageDelete(String(uid), { uid: true });
+        const result = await deleteUids(account, client, String(uid));
         if (result === false) throw new Error('messageDelete returned false — server did not confirm deletion');
         return true;
       } finally {
@@ -6394,7 +6447,7 @@ export class ImapManager {
       const serverUidMap = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await moveUids(client, uids.map(String), toFolder);
+          const result = await moveUids(account, client, uids.map(String), toFolder);
           if (result === false) throw new Error('bulk messageMove returned false — server did not confirm move');
           return result?.uidMap?.size ? result.uidMap : null;
         } finally {
@@ -6510,46 +6563,14 @@ export class ImapManager {
   // Permanently delete a batch of UIDs already in the given folder (two-step:
   // flag \Deleted + expunge) in a single IMAP command sequence.
   // Returns { succeeded, failed } — subsets of the input uids array.
-  //
-  // With UIDPLUS: UID EXPUNGE targets only the specified UIDs — safe.
-  // Without UIDPLUS: plain EXPUNGE removes ALL \Deleted messages in the mailbox.
-  // To prevent collateral damage, we temporarily unflag any other \Deleted messages
-  // before expunging, then restore them in a finally block.
   async bulkPermanentDelete(account, uids, folder) {
     if (!uids.length) return { succeeded: [], failed: [] };
     try {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(folder);
         try {
-          const hasUidPlus = client.capabilities?.has('UIDPLUS');
-          if (hasUidPlus) {
-            const result = await client.messageDelete(uids.map(String).join(','), { uid: true });
-            if (result === false) throw new Error('bulk messageDelete returned false — server did not confirm deletion');
-          } else {
-            // No UIDPLUS: protect other \Deleted messages from the broad EXPUNGE.
-            const ourSet = new Set(uids.map(Number));
-            const allDeleted = await client.search({ deleted: true }, { uid: true });
-            // Without UIDPLUS the EXPUNGE below is mailbox-wide, so this search is the only
-            // thing protecting other messages that are already flagged for deletion. A
-            // non-array result (undefined: no mailbox selected, false: SEARCH failed) means
-            // we cannot know what to protect. Abort: carrying on with an empty list would
-            // read as "nothing else is flagged" and permanently destroy them.
-            if (!Array.isArray(allDeleted)) {
-              throw new Error(`deleted-flag SEARCH returned ${allDeleted} — cannot protect other flagged messages from a mailbox-wide EXPUNGE`);
-            }
-            const othersDeleted = allDeleted.filter(uid => !ourSet.has(uid));
-            if (othersDeleted.length > 0) {
-              await client.messageFlagsRemove(othersDeleted.join(','), ['\\Deleted'], { uid: true });
-            }
-            try {
-              const result = await client.messageDelete(uids.map(String).join(','), { uid: true });
-              if (result === false) throw new Error('bulk messageDelete returned false — server did not confirm deletion');
-            } finally {
-              if (othersDeleted.length > 0) {
-                await client.messageFlagsAdd(othersDeleted.join(','), ['\\Deleted'], { uid: true });
-              }
-            }
-          }
+          const result = await deleteUids(account, client, uids.map(String).join(','));
+          if (result === false) throw new Error('bulk messageDelete returned false — server did not confirm deletion');
         } finally {
           lock.release();
         }
