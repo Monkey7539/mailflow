@@ -4478,6 +4478,7 @@ describe('permanentDeleteMessage with expectMessageId', () => {
           if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
         }
       }),
+      search: vi.fn().mockResolvedValue([]),
       messageDelete: vi.fn().mockResolvedValue(true),
     });
     ImapFlow.mockImplementation(function () { return client; });
