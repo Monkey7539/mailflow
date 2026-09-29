@@ -5,20 +5,15 @@ import { api } from '../utils/api.js';
 
 export default function LockScreen() {
   const { t } = useTranslation();
-  const { user, setUser, setLocked, loadPreferences } = useStore();
+  const { user, setLocked, loadPreferences, signOut } = useStore();
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [unlocking, setUnlocking] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  async function handleSignOut() {
+  function handleSignOut() {
     setSigningOut(true);
-    const signedOut = await api.logout().then(() => true, () => false);
-    localStorage.removeItem('mailflow_locked_message');
-    // If the sign-out failed, the session may still be alive, and unlocked if the lock request
-    // failed too. Keep the lock then, so the next load sends it again.
-    if (signedOut) setLocked(false);
-    setUser(null);
+    signOut();
   }
 
   async function handleUnlock(e) {
