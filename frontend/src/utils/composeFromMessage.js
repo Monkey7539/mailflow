@@ -9,6 +9,10 @@ export function isComposeSendShortcut(event) {
     && (!!event.ctrlKey !== !!event.metaKey);
 }
 
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function parseAddressField(raw) {
   try {
     const arr = Array.isArray(raw) ? raw : JSON.parse(raw || '[]');
@@ -71,7 +75,7 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
     ? `\n\n---\nOn ${replyDate}, ${replyFromStr} wrote:\n${replyBody.text.split('\n').map(l => '> ' + l).join('\n')}`
     : '';
   const quotedBodyHtml = replyBody?.html
-    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">On ${replyDate}, ${replyFromStr} wrote:</p>${replyBody.html}</div>`
+    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">On ${escapeHtml(replyDate)}, ${escapeHtml(replyFromStr)} wrote:</p>${replyBody.html}</div>`
     : null;
 
   openCompose({
@@ -106,7 +110,7 @@ export async function openForwardFromMessage(message, { openCompose, getMessageB
 
   const fwdText = `\n\n---------- Forwarded message ----------\nFrom: ${fwdFromStr}\nDate: ${fwdDate}\nSubject: ${safeSubject}${toStr ? `\nTo: ${toStr}` : ''}${ccStr ? `\nCc: ${ccStr}` : ''}\n\n${fwdBody?.text || ''}`;
   const fwdHtml = fwdBody?.html
-    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">---------- Forwarded message ----------<br>From: ${fwdFromStr}<br>Date: ${fwdDate}<br>Subject: ${safeSubject}${toStr ? `<br>To: ${toStr}` : ''}${ccStr ? `<br>Cc: ${ccStr}` : ''}</p>${fwdBody.html}</div>`
+    ? `<div style="border-left:3px solid var(--border,#ccc);padding-left:12px;margin-top:12px;color:var(--text-secondary,#666)"><p style="margin:0 0 6px;font-size:12px">---------- Forwarded message ----------<br>From: ${escapeHtml(fwdFromStr)}<br>Date: ${escapeHtml(fwdDate)}<br>Subject: ${escapeHtml(safeSubject)}${toStr ? `<br>To: ${escapeHtml(toStr)}` : ''}${ccStr ? `<br>Cc: ${escapeHtml(ccStr)}` : ''}</p>${fwdBody.html}</div>`
     : null;
 
   openCompose({
