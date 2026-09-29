@@ -1092,6 +1092,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
           transport = createSmtpTransport(acctResolved, {
             port: acct.smtp_port,
             secure: acct.smtp_port === 465,
+            requireTLS: acct.smtp_port !== 465 && !policy.allowInsecureTls,
             auth: smtpAuth, tls: acctTls,
           });
           fromHeader = `${acct.name} <${acct.email_address}>`;
