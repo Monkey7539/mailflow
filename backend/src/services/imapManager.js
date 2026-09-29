@@ -21,6 +21,7 @@ import { getConnectionPolicy } from './connectionPolicy.js';
 import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { generateVCard } from '../utils/vcard.js';
+import { mimeToExtension } from '../utils/inlineImages.js';
 import { randomUUID } from 'crypto';
 
 
@@ -561,6 +562,7 @@ export function extractBodyFromMsg(msg) {
     if (part.type === 'text/html' && !html) html = decoded;
     else if (part.type === 'text/plain' && !text) text = decoded;
   }
+  listUnreferencedInlineImages(results, html);
   return { html, text, attachments: results.attachments };
 }
 
@@ -757,31 +759,80 @@ export function walkStructure(node, results) {
   }
 }
 
-function walkNode(node, results) {
+// An inline image is shown only where the HTML references its Content-ID, so one
+// the HTML never references, or any when there is no HTML body (a photo sent
+// inline with a plain-text message), is listed as an attachment instead. A
+// reference ends where its URL does: at whitespace, a quote, ')', an angle
+// bracket or the '&' of &quot;. So cid:logo-dark is not a reference to logo.
+function listUnreferencedInlineImages(results, html) {
+  const referenced = new Set();
+  for (const [, cid] of (html || '').matchAll(/cid:<?([^\s"'<>)&]+)>?/gi)) referenced.add(cid.toLowerCase());
+  for (const img of results.inlineImages || []) {
+    if (referenced.has(img.cid.toLowerCase())) continue;
+    results.attachments.push({
+      part: img.part,
+      filename: img.filename || `image.${mimeToExtension(img.type.split('/')[1])}`,
+      type: img.type,
+      encoding: img.encoding,
+      size: img.size,
+      disposition: img.disposition,
+    });
+  }
+}
+
+function findPart(node, partNum) {
+  if (!node) return null;
+  if (node.part === partNum) return node;
+  for (const child of node.childNodes || []) {
+    const found = findPart(child, partNum);
+    if (found) return found;
+  }
+  return null;
+}
+
+function walkNode(node, results, parentType) {
   if (!node) return;
   const type = (node.type || '').toLowerCase();
-  if (node.childNodes && node.childNodes.length > 0) {
-    for (const child of node.childNodes) walkNode(child, results);
-    return;
-  }
   const disposition = (node.disposition || '').toLowerCase();
   const rawFilename = node.dispositionParameters?.filename || node.parameters?.name || null;
   const filename = rawFilename ? rawFilename.replace(BIDI_OVERRIDE_RE, '').trim() || 'attachment' : null;
+  // imapflow gives a message/rfc822 part the enclosed email's structure as
+  // childNodes. Walking into an attached email would make its HTML the body in
+  // place of a plain-text note, and a bounce's returned message the body in
+  // place of the failure reason (RFC 6522 puts that message after the report).
+  // An unnamed one outside a report that is inline or undisposed, such as a
+  // list's DMARC wrap, is the post itself and is still read as the body.
+  const attachedEmail = type === 'message/rfc822'
+    && (disposition === 'attachment' || filename || parentType === 'multipart/report');
+  if (node.childNodes && node.childNodes.length > 0 && !attachedEmail) {
+    for (const child of node.childNodes) walkNode(child, results, type);
+    return;
+  }
   // A part explicitly marked Content-Disposition: attachment is an attachment
   // no matter its MIME type. Checking the text/* types first used to absorb
   // attached .html/.txt files into the message body: the paperclip showed
   // (detectAttachments keys on disposition) but the file never appeared in
   // the attachment list — and an attached HTML file could even replace the
   // real message body.
-  if (disposition === 'attachment') {
+  if (disposition === 'attachment' || attachedEmail) {
     results.attachments.push({
       part: node.part || '1',
-      filename: filename || 'attachment',
+      filename: filename || (attachedEmail ? 'message.eml' : 'attachment'),
       type: node.type || 'application/octet-stream',
       encoding: node.encoding || 'base64',
       size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
       disposition,
     });
+    if (attachedEmail) {
+      // The files inside an attached email stay listed, each with its own
+      // download and risk badge, because MailFlow cannot open an .eml; its text
+      // and inline images are that email's body, not this one's. imapflow numbers
+      // a single-part email's body like its wrapper, and that part number fetches
+      // the whole .eml, so it is not listed again.
+      const enclosed = { textParts: [], attachments: [] };
+      for (const child of node.childNodes || []) walkStructure(child, enclosed);
+      results.attachments.push(...enclosed.attachments.filter(a => a.part !== (node.part || '1')));
+    }
   } else if (type === 'text/html' || type === 'application/xhtml+xml' || type === 'text/plain') {
     results.textParts.push({
       part: node.part || '1',
@@ -816,6 +867,9 @@ function walkNode(node, results) {
       encoding: node.encoding || 'base64',
       // Content-ID header value is wrapped in angle brackets — strip them
       cid: (node.id || '').replace(/^<|>$/g, ''),
+      filename,
+      size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
+      disposition,
     });
   } else if (filename) {
     // Named non-text part without an explicit disposition — still an attachment.
@@ -5891,6 +5945,9 @@ export class ImapManager {
           }
         }
 
+        // Before Step 3, which replaces the cid: references this looks for.
+        listUnreferencedInlineImages(results, html);
+
         // Step 3: replace cid: references in HTML with data: URIs so inline
         // images render inside the sandboxed srcdoc iframe
         if (html && inlineImages.length > 0) {
@@ -6065,8 +6122,9 @@ export class ImapManager {
           if (msg.bodyStructure) {
             const r = { textParts: [], attachments: [] };
             walkStructure(msg.bodyStructure, r);
-            const att = r.attachments.find(a => a.part === partNum);
-            if (att) encoding = att.encoding;
+            // Inline images the body never shows are listed at body time, not by this walk.
+            const att = r.attachments.find(a => a.part === partNum) || findPart(msg.bodyStructure, partNum);
+            if (att?.encoding) encoding = att.encoding;
           }
           const buf = msg.bodyParts?.get(partNum);
           if (buf) {
