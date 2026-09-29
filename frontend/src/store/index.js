@@ -127,10 +127,47 @@ export const useStore = create((set, get) => ({
         senderFaviconsLoaded: false,
         senderFavicons: false,
         senderFaviconsSaving: false,
+        // An expired session signs out without reloading the page. Without this, the next user
+        // to sign in here would see the previous user's mail and open compose, and would have
+        // the previous user's settings until loadPreferences replaced them, or for the whole
+        // session where the new user has never saved their own.
+        messages: [], searchResults: [], searchQuery: '', selectedMessageId: null,
+        threadMessages: {}, expandedThreadId: null,
+        accounts: [], accountsReady: false, folders: {},
+        notifications: [], backfillProgress: {},
+        gtdSections: null, categoryCounts: {}, activeGtdTab: null,
+        composing: false, composeData: null, messageWindows: [],
+        enabledPlugins: [], autoLockMinutes: 0, blockRemoteImages: true,
+        imageWhitelist: { addresses: [], domains: [] }, shortcuts: {}, aiActions: null,
+        hiddenFolders: {}, categorizationEnabled: false, gtdPetSlug: null,
       } : {}),
     }));
   },
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
+  // The sidebar and the lock screen both sign out through here.
+  signOut: async () => {
+    // The logout response may carry an OIDC end-session URL when the account signed in
+    // through a provider with RP-initiated logout enabled; navigating there also clears
+    // the upstream SSO session. Falls back to /login otherwise. (#310)
+    const res = await api.logout().catch(() => ({}));
+    // Appearance/localization prefs (theme, font, layout, language) are deliberately
+    // NOT cleared: keeping them means the login screen and the next visit retain the
+    // last-used look instead of snapping back to the default dark theme (issue #208).
+    // They are re-synced from the account's server-side preferences after login.
+    // The keys below are mailbox/session state that can reference the previous user's
+    // accounts or folders, so they are cleared on sign-out.
+    [
+      'mailflow_notification_sound', 'mailflow_custom_sound', 'mailflow_custom_sound_name',
+      'mailflow_page_size', 'mailflow_scroll_mode', 'mailflow_sync_interval',
+      'mailflow_threaded_view', 'mailflow_plaintext_email',
+      'mailflow_hover_quick_actions', 'mailflow_swipe_actions',
+      'mailflow_expanded_accounts', 'mailflow_collapsed_folders',
+      'mailflow_locked_message',
+    ].forEach(k => localStorage.removeItem(k));
+    get().setUser(null);
+    get().setLocked(false);
+    window.location.href = res?.endSessionUrl || '/login';
+  },
 
   // Plugin activation — the per-user set of activated plugin ids (users.preferences.enabledPlugins).
   // Hydrated in loadPreferences and mutated only via setPluginActivated (the Plugins settings
