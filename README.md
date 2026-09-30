@@ -527,6 +527,18 @@ git pull && \
 
 ## Backup and Restore
 
+Settings → Backup (admin only) downloads a backup of the installation's data: users, email accounts, rules, contacts, settings, plugin data and antispam training. Cached mail is downloaded again from the mail servers after a restore, unless **Include cached mail** is on, which adds the local copy of every synced message to the file. Without it, the newest unread messages in each inbox arrive as new mail after a restore, so inbox rules, forwarding included, run on them again.
+
+The file does not hold what is set in `.env`. A new server needs the same `ENCRYPTION_KEY`, and the same VAPID keys and OAuth client settings if they are set there; with new VAPID keys, push notifications stop until each browser subscribes again.
+
+The file holds password hashes, pending invite links and the accounts' credentials. The credentials are encrypted with `ENCRYPTION_KEY`; the rest is readable, and so is every message when cached mail is included, so keep the file safe.
+
+Restoring replaces everything on the server with the file's contents, then MailFlow restarts. Docker, pm2 and the systemd unit in `contrib/` start it again; a MailFlow started by hand has to be started again the same way. Anyone whose account is not in the backup is signed out, and the passwords are the ones in the backup. A backup restores only on the MailFlow version that made it: to move to a newer version, restore it on its own version first, then update, so the update converts its data as usual.
+
+If your own reverse proxy sits in front of MailFlow, let `/api/admin/backup` through without a request size limit, without buffering and with long timeouts, as `frontend/nginx.conf` does. A native install set up before this version needs that location copied from `contrib/nginx.conf` into its nginx config.
+
+The database can also be copied as-is with a dump:
+
 ```bash
 # Backup database
 docker exec mailflow-postgres pg_dump -U mailflow mailflow \
