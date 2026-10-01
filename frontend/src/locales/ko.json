@@ -872,6 +872,8 @@
       "smtpHost": "SMTP 호스트",
       "imapHostPh": "imap.gmail.com",
       "signatureSection": "서명",
+      "autoRecipientsSection": "자동 참조 및 숨은참조",
+      "autoRecipientsDesc": "이 계정 또는 별칭으로 작성하는 모든 새 메일, 답장, 전달에 일반 수신자로 추가되며, 직접 삭제할 수 있습니다. 주소는 쉼표로 구분하세요.",
       "saveChanges": "변경사항 저장",
       "smtpSection": "SMTP 설정",
       "smtpAuthUserPh": "위의 사용자 이름과 동일",
