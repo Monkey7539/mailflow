@@ -269,6 +269,10 @@ const SAME_VALUE_ALLOWED = {
   // "SSO" — acronym, same in de, en, es, fr, it, ru
   'admin.tabs.sso': [['cs', 'de', 'en', 'es', 'fr', 'it', 'pl', 'ptBR', 'ru']],
 
+  // "Backup" — loanword used as-is in it and ptBR; "Restaurar…" is the same verb in es and ptBR
+  'admin.tabs.backup':    [['en', 'it', 'ptBR']],
+  'admin.backup.restore': [['es', 'ptBR']],
+
   // "Telefon" / "Projekt" — established Polish/German technical loanwords
   'contacts.fields.phone': [['cs', 'de', 'pl']],
   'todoist.project':       [['cs', 'de', 'pl']],
@@ -582,6 +586,7 @@ const DYNAMIC_KEYS = new Set([
   'admin.tabs.integrations',
   'admin.tabs.users',
   'admin.tabs.sso',
+  'admin.tabs.backup',
   'admin.tabs.security',
   'admin.tabs.notifications',
   'admin.tabs.shortcuts',
