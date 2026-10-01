@@ -876,6 +876,8 @@
       "smtpAuthUserPh": "Uguale al nome utente sopra",
       "smtpAuthPass": "Password SMTP",
       "signatureSection": "Firma",
+      "autoRecipientsSection": "Cc e Bcc automatici",
+      "autoRecipientsDesc": "Questi indirizzi vengono aggiunti come destinatari normali, che puoi rimuovere, a ogni nuovo messaggio, risposta e inoltro che scrivi da questo account o dai suoi alias. Separa gli indirizzi con una virgola.",
       "saveChanges": "Salva modifiche",
       "addAccount": "Aggiungi account",
       "saving": "Salvataggio…",

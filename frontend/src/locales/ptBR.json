@@ -878,6 +878,8 @@
       "smtpAuthUserPh": "Igual ao nome de usuário acima",
       "smtpAuthPass": "Senha SMTP",
       "signatureSection": "Assinatura",
+      "autoRecipientsSection": "Cc e Cco automáticos",
+      "autoRecipientsDesc": "Esses endereços são adicionados como destinatários normais, que você pode remover, a cada nova mensagem, resposta e encaminhamento que você escrever a partir desta conta ou de seus apelidos. Separe os endereços por vírgula.",
       "saveChanges": "Salvar alterações",
       "addAccount": "Adicionar conta",
       "saving": "Salvando…",

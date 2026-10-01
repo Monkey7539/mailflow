@@ -878,6 +878,8 @@
       "smtpAuthUserPh": "Same as username above",
       "smtpAuthPass": "SMTP password",
       "signatureSection": "Signature",
+      "autoRecipientsSection": "Automatic Cc and Bcc",
+      "autoRecipientsDesc": "Added as normal recipients, which you can remove, to every new message, reply and forward you write from this account or its aliases. Separate addresses with commas.",
       "saveChanges": "Save changes",
       "addAccount": "Add account",
       "saving": "Saving…",

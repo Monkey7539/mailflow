@@ -894,6 +894,8 @@
       "smtpAuthUserPh": "Taka sama jak nazwa użytkownika powyżej",
       "smtpAuthPass": "Hasło SMTP",
       "signatureSection": "Podpis",
+      "autoRecipientsSection": "Automatyczne DW i UDW",
+      "autoRecipientsDesc": "Te adresy są dodawane jako zwykli odbiorcy, których możesz usunąć, do każdej nowej wiadomości, odpowiedzi i wiadomości przekazywanej dalej z tego konta lub jego aliasów. Oddziel adresy przecinkami.",
       "saveChanges": "Zapisz zmiany",
       "addAccount": "Dodaj konto",
       "saving": "Zapisywanie…",

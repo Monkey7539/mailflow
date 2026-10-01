@@ -876,6 +876,8 @@
       "smtpAuthUserPh": "Igual que el usuario de arriba",
       "smtpAuthPass": "Contraseña SMTP",
       "signatureSection": "Firma",
+      "autoRecipientsSection": "Cc y Cco automáticos",
+      "autoRecipientsDesc": "Estas direcciones se añaden como destinatarios normales, que puedes quitar, a cada mensaje nuevo, respuesta y reenvío que escribas desde esta cuenta o sus alias. Separa las direcciones con comas.",
       "saveChanges": "Guardar cambios",
       "addAccount": "Añadir cuenta",
       "saving": "Guardando…",
