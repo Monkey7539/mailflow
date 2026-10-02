@@ -166,7 +166,7 @@ describe('POST /api/admin/backup/restore', () => {
   it('answers a refused upload even when most of it is still unread', async () => {
     m.backup.restoreBackup.mockImplementation(m.backup.actual.restoreBackup);
     client.query.mockResolvedValue({ rows: [{ version: '0061_message_bcc_addresses' }] });
-    const manifest = { mailflow: 'backup', format: 1, scope: 'setup', schemaVersion: '0999_future', tables: [], sequences: {}, keyCheck: 'enc:x' };
+    const manifest = { mailflow: 'backup', format: m.backup.BACKUP_FORMAT, scope: 'setup', schemaVersion: '0999_future', tables: [], sequences: {}, keyCheck: 'enc:x' };
     const filler = Array.from({ length: 80 }, () => JSON.stringify({ table: 'users', rows: [{ id: 'u', username: randomBytes(30000).toString('base64') }] }));
     const res = await post(gzipSync([JSON.stringify(manifest), ...filler].join('\n')));
     expect(res.status).toBe(400);

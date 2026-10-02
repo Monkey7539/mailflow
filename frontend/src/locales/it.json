@@ -1611,7 +1611,7 @@
       "create": "Scarica il backup",
       "restoreTitle": "Ripristina un backup",
       "restoreIntro": "Il ripristino sostituisce tutti gli utenti, gli account, le impostazioni e i messaggi in cache di questo server con il contenuto del file. Poi MailFlow si riavvia. Chi non ha un account nel backup viene disconnesso, e le password diventano quelle del backup.",
-      "versionNote": "Un backup si ripristina solo sulla versione di MailFlow che l'ha creato. Per passare a una versione più recente, ripristina prima il backup sulla sua versione, poi aggiorna.",
+      "versionNote": "Un backup si ripristina solo su una versione di MailFlow con lo stesso schema del database di quella che l'ha creato. Se lo schema di questa versione è più recente, ripristina il backup sulla versione che l'ha creato, poi aggiorna.",
       "chooseFile": "Scegli un file di backup",
       "restore": "Ripristina…",
       "confirmWarn": "Tutto ciò che si trova su questo server verrà sostituito da {{name}}. L'operazione non può essere annullata.",

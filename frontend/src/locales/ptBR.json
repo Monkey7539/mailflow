@@ -1611,7 +1611,7 @@
       "create": "Baixar backup",
       "restoreTitle": "Restaurar um backup",
       "restoreIntro": "A restauração substitui todos os usuários, contas, configurações e mensagens em cache deste servidor pelo conteúdo do arquivo. Depois o MailFlow reinicia. Quem não tiver conta no backup é desconectado, e as senhas passam a ser as do backup.",
-      "versionNote": "Um backup só é restaurado na versão do MailFlow que o criou. Para mudar para uma versão mais nova, restaure o backup primeiro na versão dele e depois atualize.",
+      "versionNote": "Um backup só é restaurado em uma versão do MailFlow com o mesmo esquema de banco de dados da versão que o criou. Se o esquema desta versão for mais novo, restaure o backup na versão que o criou e depois atualize.",
       "chooseFile": "Escolher um arquivo de backup",
       "restore": "Restaurar…",
       "confirmWarn": "Tudo neste servidor será substituído por {{name}}. Isso não pode ser desfeito.",

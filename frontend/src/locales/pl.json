@@ -1630,7 +1630,7 @@
       "create": "Pobierz kopię zapasową",
       "restoreTitle": "Przywróć kopię zapasową",
       "restoreIntro": "Przywracanie zastępuje wszystkich użytkowników, konta, ustawienia i wiadomości z pamięci podręcznej na tym serwerze zawartością pliku. Następnie MailFlow uruchamia się ponownie. Osoby, których kont nie ma w kopii, zostają wylogowane, a obowiązują hasła z kopii.",
-      "versionNote": "Kopię zapasową można przywrócić tylko w wersji MailFlow, która ją utworzyła. Aby przejść na nowszą wersję, najpierw przywróć kopię w jej własnej wersji, a potem zaktualizuj.",
+      "versionNote": "Kopię zapasową można przywrócić tylko w wersji MailFlow o tym samym schemacie bazy danych co wersja, która ją utworzyła. Jeśli ta wersja ma nowszy schemat, przywróć kopię w wersji, która ją utworzyła, a potem zaktualizuj.",
       "chooseFile": "Wybierz plik kopii zapasowej",
       "restore": "Przywróć…",
       "confirmWarn": "Wszystko na tym serwerze zostanie zastąpione przez {{name}}. Tej operacji nie można cofnąć.",

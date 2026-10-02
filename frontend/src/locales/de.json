@@ -1611,7 +1611,7 @@
       "create": "Sicherung herunterladen",
       "restoreTitle": "Sicherung wiederherstellen",
       "restoreIntro": "Beim Wiederherstellen werden alle Benutzer, Konten, Einstellungen und zwischengespeicherten Nachrichten auf diesem Server durch den Inhalt der Datei ersetzt. MailFlow startet anschließend neu. Wer kein Konto in der Sicherung hat, wird abgemeldet, und es gelten die Passwörter aus der Sicherung.",
-      "versionNote": "Eine Sicherung lässt sich nur mit der MailFlow-Version wiederherstellen, die sie erstellt hat. Um auf eine neuere Version zu wechseln, stellen Sie die Sicherung zuerst auf ihrer eigenen Version wieder her und aktualisieren dann.",
+      "versionNote": "Eine Sicherung lässt sich nur mit einer MailFlow-Version wiederherstellen, die dasselbe Datenbankschema hat wie die Version, die sie erstellt hat. Ist das Schema dieser Version neuer, stellen Sie die Sicherung mit der Version wieder her, die sie erstellt hat, und aktualisieren dann.",
       "chooseFile": "Sicherungsdatei auswählen",
       "restore": "Wiederherstellen…",
       "confirmWarn": "Alles auf diesem Server wird durch {{name}} ersetzt. Das lässt sich nicht rückgängig machen.",

@@ -1611,7 +1611,7 @@
       "create": "Télécharger la sauvegarde",
       "restoreTitle": "Restaurer une sauvegarde",
       "restoreIntro": "La restauration remplace tous les utilisateurs, comptes, réglages et messages en cache de ce serveur par le contenu du fichier. MailFlow redémarre ensuite. Les personnes dont le compte ne figure pas dans la sauvegarde sont déconnectées, et les mots de passe deviennent ceux de la sauvegarde.",
-      "versionNote": "Une sauvegarde ne se restaure que sur la version de MailFlow qui l'a créée. Pour passer à une version plus récente, restaurez d'abord la sauvegarde sur sa propre version, puis mettez à jour.",
+      "versionNote": "Une sauvegarde ne se restaure que sur une version de MailFlow ayant le même schéma de base de données que celle qui l'a créée. Si le schéma de cette version est plus récent, restaurez la sauvegarde sur la version qui l'a créée, puis mettez à jour.",
       "chooseFile": "Choisir un fichier de sauvegarde",
       "restore": "Restaurer…",
       "confirmWarn": "Tout le contenu de ce serveur sera remplacé par {{name}}. Cette action est irréversible.",

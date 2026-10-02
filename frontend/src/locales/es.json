@@ -1611,7 +1611,7 @@
       "create": "Descargar copia de seguridad",
       "restoreTitle": "Restaurar una copia de seguridad",
       "restoreIntro": "Restaurar sustituye todos los usuarios, cuentas, ajustes y mensajes en caché de este servidor por el contenido del archivo. Después MailFlow se reinicia. Se cierra la sesión de quien no tenga cuenta en la copia de seguridad, y las contraseñas pasan a ser las de la copia.",
-      "versionNote": "Una copia de seguridad solo se restaura en la versión de MailFlow que la creó. Para pasar a una versión más reciente, restaura primero la copia en su propia versión y luego actualiza.",
+      "versionNote": "Una copia de seguridad solo se restaura en una versión de MailFlow con el mismo esquema de base de datos que la versión que la creó. Si el esquema de esta versión es más reciente, restaura la copia en la versión que la creó y luego actualiza.",
       "chooseFile": "Elegir un archivo de copia de seguridad",
       "restore": "Restaurar…",
       "confirmWarn": "Todo lo que hay en este servidor será sustituido por {{name}}. Esto no se puede deshacer.",

@@ -10,7 +10,9 @@ import { createGunzip, createGzip } from 'zlib';
 import pg from 'pg';
 import { decrypt, encrypt, isEncrypted } from './encryption.js';
 
-export const BACKUP_FORMAT = 1;
+// Format 1, written before json and jsonb travelled as text, could not tell a JSON null from
+// SQL NULL, so it is not read.
+export const BACKUP_FORMAT = 2;
 export const BACKUP_SCOPES = ['setup', 'full'];
 
 // Every table in the schema belongs to exactly one of these groups. backup.test.js checks
@@ -67,6 +69,8 @@ const MAX_ROW_CHARS = MAX_LINE_CHARS - 4096;
 
 // These types, and arrays of them, are read as PostgreSQL's own text rather than through a
 // JavaScript Date or number, which would drop microseconds and turn infinity or NaN into null.
+// json and jsonb are read as text too: JSON.parse would make a JSON null indistinguishable from
+// SQL NULL, and turn 2.50 into 2.5 and long numbers into doubles.
 const TEXT_TYPE_OIDS = new Set([
   17, 1001, // bytea
   20, 1016, // int8
@@ -75,7 +79,9 @@ const TEXT_TYPE_OIDS = new Set([
   1082, 1182, 1083, 1183, 1114, 1115, 1184, 1185, // date, time, timestamp, timestamptz
   1186, 1187, 1266, 1270, // interval, timetz
   1700, 1231, // numeric
+  114, 199, 3802, 3807, // json, jsonb
 ]);
+const JSON_TYPES = new Set(['json', 'jsonb']);
 const textTypes = {
   getTypeParser: (oid, format) => (TEXT_TYPE_OIDS.has(oid) ? value => value : pg.types.getTypeParser(oid, format)),
 };
@@ -108,7 +114,7 @@ export async function unclassifiedTables(client) {
 // are left out: PostgreSQL computes them, and refuses a value for them on the way back in.
 async function listColumns(client) {
   const { rows } = await client.query(
-    `SELECT table_name, column_name, udt_name, is_nullable,
+    `SELECT table_name, column_name, udt_name,
             pg_get_serial_sequence(quote_ident(table_name), column_name) AS sequence
        FROM information_schema.columns WHERE table_schema = 'public' AND is_generated = 'NEVER'
        ORDER BY table_name, ordinal_position`,
@@ -117,7 +123,7 @@ async function listColumns(client) {
   const sequences = [];
   for (const r of rows) {
     if (!columns.has(r.table_name)) columns.set(r.table_name, []);
-    columns.get(r.table_name).push({ name: r.column_name, type: r.udt_name, notNull: r.is_nullable === 'NO' });
+    columns.get(r.table_name).push({ name: r.column_name, type: r.udt_name });
     if (r.sequence) sequences.push({ table: r.table_name, column: r.column_name, sequence: r.sequence });
   }
   return { columns, sequences };
@@ -325,6 +331,9 @@ function checkManifest(manifest, currentVersion) {
   if (manifest.format > BACKUP_FORMAT) {
     throw new BackupFileError('This backup was made by a newer version of MailFlow. Update MailFlow, then restore it.');
   }
+  if (manifest.format < BACKUP_FORMAT) {
+    throw new BackupFileError('This backup uses an earlier file format, which this version of MailFlow does not read. Update MailFlow on the server it came from, make a new backup there, and restore that.');
+  }
   const sequences = manifest.sequences ?? {};
   if (!BACKUP_SCOPES.includes(manifest.scope) || typeof manifest.schemaVersion !== 'string'
     || !Array.isArray(manifest.tables) || !manifest.tables.every(t => typeof t === 'string')
@@ -436,10 +445,10 @@ async function restoreLines(client, reader, { beforeWrite, onProgress }) {
       const unknown = rowColumns.filter(c => !known.has(c));
       if (unknown.length) throw new BackupFileError(`The backup's ${entry.table} rows have columns this installation does not: ${unknown.join(', ')}.`);
       const cols = rowColumns.map(c => known.get(c));
-      // json_populate_recordset reads a JSON null as SQL NULL, so a JSON null the column held
-      // (it can only be one in a NOT NULL column) is put back explicitly.
-      const values = cols.map(c => ((c.type === 'json' || c.type === 'jsonb') && c.notNull
-        ? `COALESCE(${ident(c.name)}, 'null'::${c.type})` : ident(c.name)));
+      // A json or jsonb value travels as PostgreSQL's text for it, in a JSON string, and SQL NULL
+      // as JSON null. json_populate_recordset hands such a column the JSON string itself, and
+      // #>> '{}' unwraps the text inside, which the cast then reads exactly as it was written.
+      const values = cols.map(c => (JSON_TYPES.has(c.type) ? `(${ident(c.name)} #>> '{}')::${c.type}` : ident(c.name)));
       // The rows keep their ids, so an identity column takes the file's value rather than a new one.
       const result = await client.query(
         `INSERT INTO ${ident(entry.table)} (${cols.map(c => ident(c.name)).join(', ')}) OVERRIDING SYSTEM VALUE

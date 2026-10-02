@@ -1611,7 +1611,7 @@
       "create": "Download backup",
       "restoreTitle": "Restore a backup",
       "restoreIntro": "Restoring replaces every user, account, setting and cached message on this server with the contents of the file. MailFlow then restarts. Anyone whose account is not in the backup is signed out, and the passwords are the ones in the backup.",
-      "versionNote": "A backup restores only on the MailFlow version that made it. To move to a newer version, restore the backup on its own version first, then update.",
+      "versionNote": "A backup restores only on a MailFlow version with the same database schema as the one that made it. If this version's schema is newer, restore the backup on the version that made it, then update.",
       "chooseFile": "Choose a backup file",
       "restore": "Restore…",
       "confirmWarn": "Everything on this server is replaced by {{name}}. This cannot be undone.",
