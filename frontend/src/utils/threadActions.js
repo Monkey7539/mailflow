@@ -23,6 +23,16 @@ import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDel
 // So the cache renders; the server decides what to act on. `allowCache` has to be asked for
 // explicitly, and nothing currently asks, which is the point: a future caller has to think about
 // staleness rather than inherit it by default.
+//
+// The thread also spans accounts. One email delivered to two of the reader's accounts is two
+// mailbox items, and the thread route returns both so the conversation can show them (#476),
+// while the bulk endpoints check only the user. Outside the unified inbox a row stands for its
+// own account's copies, so an action on it takes only those. `accountId` is the account whose
+// copies an action takes, and null takes every copy, as a unified-inbox row counts every
+// unified account's.
+export const inAccount = (messages, accountId) => (accountId
+  ? messages.filter(message => message?.account_id === accountId)
+  : messages);
 
 /**
  * @param message      the row the action was invoked on
@@ -30,14 +40,17 @@ import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDel
  * @param cached       previously fetched sub-messages, used only when allowCache is true
  * @param fetchThread  () => Promise<{ messages }> — authoritative fetch
  * @param allowCache   opt in to the snapshot; only safe when staleness cannot change the outcome
+ * @param accountId    the account whose copies to take; null takes every account's
  */
-export async function resolveThreadMessages({ message, isThreadRow, cached, fetchThread, allowCache = false }) {
+export async function resolveThreadMessages({ message, isThreadRow, cached, fetchThread, allowCache = false, accountId = null }) {
   if (!isThreadRow) return [message];
-  if (allowCache && Array.isArray(cached) && cached.length > 0) return cached;
-  const data = await fetchThread();
+  const listed = allowCache && Array.isArray(cached) && cached.length > 0
+    ? cached
+    : (await fetchThread())?.messages;
+  const messages = inAccount(Array.isArray(listed) ? listed : [], accountId);
   // An empty or malformed response must not silently reduce the action to nothing: fall back to
   // the row itself, which is the same conservative choice the previous implementation made.
-  return data?.messages?.length ? data.messages : [message];
+  return messages.length ? messages : [message];
 }
 
 // ---------------------------------------------------------------------------
@@ -54,12 +67,15 @@ export async function resolveThreadMessages({ message, isThreadRow, cached, fetc
 // server, for the staleness reason documented at the top of this file. A reply that landed
 // while the conversation was open must be archived along with the rest of it, not left
 // behind to resurrect the thread.
+//
+// Each returns whether it took anything, since a filter can leave nothing to act on (Spam spares
+// the reader's own mail, Snooze takes only an inbox copy) and the pane closes only on success.
 
 const UNDO_WINDOW_MS = 4500;
 
 export function runThreadAction({ messages, commit, resolve, notification, addNotification, onRemove, onRestore }) {
   const targets = normalizeConversation(messages);
-  if (!targets.length) return;
+  if (!targets.length) return false;
 
   const unread = targets.filter(message => !message.is_read);
   const store = useStore.getState();
@@ -101,6 +117,7 @@ export function runThreadAction({ messages, commit, resolve, notification, addNo
       restore();
     },
   });
+  return true;
 }
 
 const subjectOf = (messages, t) =>
@@ -108,19 +125,20 @@ const subjectOf = (messages, t) =>
 
 // fetchThread is the authoritative lookup, supplied by the pane that knows the thread id
 // and folder. Omitting it falls back to the messages on screen.
-const liveThread = (fetchThread) => fetchThread
+const liveThread = (fetchThread, accountId) => fetchThread
   ? (targets) => resolveThreadMessages({
       message: targets[0],
       isThreadRow: true,
       fetchThread,
+      accountId,
     })
   : null;
 
-export function archiveThread(messages, { t, addNotification, fetchThread }) {
-  runThreadAction({
-    messages,
+export function archiveThread(messages, { t, addNotification, fetchThread, accountId = null }) {
+  return runThreadAction({
+    messages: inAccount(messages, accountId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, accountId),
     commit: async (targets) => {
       const result = await api.bulkArchive(conversationActionIds(targets));
       // Not an error: the account simply has no archive folder mapped, and the user
@@ -138,11 +156,11 @@ export function archiveThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function deleteThread(messages, { t, addNotification, fetchThread }) {
-  runThreadAction({
-    messages,
+export function deleteThread(messages, { t, addNotification, fetchThread, accountId = null }) {
+  return runThreadAction({
+    messages: inAccount(messages, accountId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, accountId),
     // The delete guards stop a sync already in flight from resurrecting the rows
     // between the optimistic removal and the commit.
     onRemove: targets => targets.forEach(message => setPendingDelete(message.id)),
@@ -160,11 +178,11 @@ export function deleteThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function moveThread(messages, folder, { t, addNotification, fetchThread }) {
-  runThreadAction({
-    messages,
+export function moveThread(messages, folder, { t, addNotification, fetchThread, accountId = null }) {
+  return runThreadAction({
+    messages: inAccount(messages, accountId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: liveThread(fetchThread, accountId),
     commit: async (targets) => {
       await api.bulkMove(conversationActionIds(targets), folder);
       // Recorded per account, since a thread can span several.
@@ -186,10 +204,10 @@ export function moveThread(messages, folder, { t, addNotification, fetchThread }
 
 // Reporting spam acts on the correspondent's messages only. Sweeping the reader's own
 // replies into the spam folder would train the filter on their own address.
-export function spamThread(messages, { t, addNotification, accounts = [], fetchThread }) {
-  const visible = conversationSpamTargets(messages, accounts);
-  const resolveLive = liveThread(fetchThread);
-  runThreadAction({
+export function spamThread(messages, { t, addNotification, accounts = [], fetchThread, accountId = null }) {
+  const visible = conversationSpamTargets(inAccount(messages, accountId), accounts);
+  const resolveLive = liveThread(fetchThread, accountId);
+  return runThreadAction({
     messages: visible,
     addNotification,
     // Re-apply the same exclusion to whatever the server returns, so a reply sent during
@@ -207,10 +225,10 @@ export function spamThread(messages, { t, addNotification, accounts = [], fetchT
 
 // Snooze takes the newest inbox message rather than the thread: the others are already
 // filed or sent, and re-delivering them would duplicate the conversation on return.
-export function snoozeThread(messages, until, { t, addNotification }) {
-  const target = newestSnoozeTarget(messages);
-  if (!target) return;
-  runThreadAction({
+export function snoozeThread(messages, until, { t, addNotification, accountId = null }) {
+  const target = newestSnoozeTarget(inAccount(messages, accountId));
+  if (!target) return false;
+  return runThreadAction({
     messages: [target],
     addNotification,
     commit: async (list) => { await api.snoozeMessage(list[0].id, until); },

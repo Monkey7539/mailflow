@@ -8,9 +8,10 @@
 // Same loader hooks as MessagePane.render.test.js: node --test cannot parse JSX, and
 // react-i18next is stubbed because a real i18n instance would test i18next.
 
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { setImmediate } from 'node:timers';
 import { registerHooks } from 'node:module';
 import { JSDOM } from 'jsdom';
 import { transform } from 'sucrase';
@@ -88,8 +89,12 @@ globalThis.fetch = async (url, opts = {}) => {
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const ConversationPane = (await import('./ConversationPane.jsx')).default;
+const ReadingPane = (await import('./ReadingPane.jsx')).default;
+const { useStore } = await import('../store/index.js');
+const { registerCollector } = await import('../plugins/registry.js');
 const { shortcutBus } = await import('../utils/shortcutBus.js');
 const { api } = await import('../utils/api.js');
+const { useGtdTriage } = await import('../hooks/useGtdTriage.js');
 
 let root;
 before(() => { root = createRoot(document.getElementById('root')); });
@@ -308,5 +313,339 @@ describe('conversation actions', () => {
     assert.equal(printWin.printed, 1);
     assert.match(printWin.writes.join(''), /body of m1/);
     assert.doesNotMatch(printWin.writes.join(''), /body of m3/);
+  });
+});
+
+// One email delivered to two of the reader's accounts (#476). The pane keeps showing both
+// copies, but what it does to the conversation, and the card it opens, belong to the account
+// of the row it was opened from. Mounted through ReadingPane, which is what decides that.
+describe('a conversation another account also received', () => {
+  // acct-b's copy of m3: same Message-ID and Date, listed after m3 as the thread route breaks
+  // the tie (date, account_id, id), so it is the newest message on screen.
+  const B3 = { ...THREAD[2], id: 'b3', account_id: 'acct-b', thread_id: '<1@x>' };
+  const ROW = { ...THREAD[2], thread_id: '<1@x>', message_count: 2, unread_count: 1 };
+  // The list's cache of the row's conversation once the reader has expanded it.
+  const EXPANDED = { '<1@x>': [...THREAD.map(m => ({ ...m, thread_id: '<1@x>' })), B3] };
+  // A link can open a message whose account the thread route does not cover (a disabled
+  // account), so the pane shows only other accounts' copies of its conversation.
+  const ORPHAN = { ...B3, id: 'c3', account_id: 'acct-c' };
+  const requests = [];
+  // The thread route serves [...THREAD, B3] unless a test serves a thread id of its own, and
+  // answers only once a promise a test holds there resolves.
+  const served = {};
+  const held = {};
+  let realFetch;
+  before(() => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts = {}) => {
+      const u = String(url);
+      requests.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
+      if (u.includes('/mail/thread?')) {
+        const id = new URLSearchParams(u.split('?')[1]).get('id');
+        if (held[id]) await held[id];
+        return { ok: true, status: 200, json: async () => ({ messages: (served[id] || [...THREAD, B3]).map(m => ({ ...m })) }) };
+      }
+      if (/\/accounts\/[^/]+\/folders/.test(u)) return { ok: true, status: 200, json: async () => [{ path: 'INBOX', name: 'INBOX' }, { path: 'Projects', name: 'Projects' }] };
+      return realFetch(url, opts);
+    };
+  });
+  after(() => { globalThis.fetch = realFetch; });
+
+  const wait = ms => React.act(async () => { await new Promise(r => setTimeout(r, ms)); });
+  const click = async el => {
+    await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await wait(50);
+  };
+  // Clicks an action and runs out its undo window on a mocked clock. These tests are about which
+  // copies an action takes, not when, and waiting out the real window in each of them made this
+  // one of the slowest files in the suite.
+  const commitWindow = async el => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await React.act(async () => { mock.timers.tick(4600); await new Promise(r => setImmediate(r)); });
+    } finally {
+      // What the window left behind (the delete guards' expiry, a recent-folder save) runs now.
+      // A module still holding a mocked timer would clear an unrelated one in a later window.
+      await React.act(async () => { mock.timers.runAll(); await new Promise(r => setImmediate(r)); });
+      mock.timers.reset();
+    }
+  };
+  const open = async ({ selectedAccountId = 'acct', selected = ROW, threadMessages = {}, rows = [ROW], folder = 'INBOX' } = {}) => {
+    requests.length = 0;
+    await React.act(async () => {
+      useStore.setState({
+        conversationMode: 'pane', selectedAccountId, selectedFolder: folder, searchQuery: '',
+        searchResults: [], messages: rows, threadMessages, selectedMessageId: selected.id,
+        markReadBehavior: 'immediate', recentFolders: [], notifications: [],
+      });
+      root.render(React.createElement(ReadingPane, { key: `${selectedAccountId}-${selected.id}-${Math.random()}` }));
+    });
+    await wait(50);
+  };
+  // Every request to the endpoint, so ids sent in a second request are not missed.
+  const sentIds = pattern => requests.filter(r => pattern.test(r.url)).flatMap(r => r.body?.ids || []).sort();
+  const threadFetches = () => requests.filter(r => r.url.includes('/mail/thread?'));
+  const button = title => document.querySelector(`button[title="${title}"]`);
+  const openIds = () => [...openCards()].map(c => c.closest('[data-message-id]')?.dataset.messageId).sort();
+  const cardIds = () => [...document.querySelectorAll('[data-message-id]')].map(c => c.dataset.messageId).sort();
+  // A boolean, not the element: a failing assertion on a jsdom node makes assert diff the whole
+  // document, which runs the test out of memory instead of reporting the failure.
+  const pickerOpen = () => Boolean(document.querySelector('input[placeholder="contextMenu.folders.search"]'));
+  const textShown = text => [...document.querySelectorAll('span, div')].some(el => el.textContent === text);
+  const menuEntry = name => [...document.querySelectorAll('span, div')].filter(el => el.textContent === name).at(-1);
+
+  test('opening it marks the row account\'s copy read, not the other account\'s', async () => {
+    await open();
+    const read = requests.filter(r => r.url.includes('/bulk-read')).flatMap(r => r.body.ids);
+    assert.ok(read.includes('m3'), 'the row\'s own copy is marked read');
+    assert.ok(!read.includes('b3'), 'the other account\'s copy is left unread');
+  });
+
+  test('Delete sends only the row account\'s copies', async () => {
+    await open();
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['m1', 'm2', 'm3']);
+  });
+
+  test('picking the other account\'s copy under the row still acts on the row\'s account', async () => {
+    // The list expands the row with both copies, which look the same there and in the cards,
+    // so which of the two the reader clicked must not decide whose mail is deleted.
+    await open({ selected: B3, threadMessages: EXPANDED });
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['m1', 'm2', 'm3']);
+  });
+
+  test('picking the other account\'s copy under the row opens that copy alone', async () => {
+    // Opening the row's own copy beside it marked that copy read, while the list row, whose
+    // unread count follows the list's own mark-read and not a card's, stayed bold.
+    await open({ selected: B3, threadMessages: EXPANDED });
+    assert.deepEqual(openIds(), ['b3']);
+    const read = requests.filter(r => r.url.includes('/bulk-read')).flatMap(r => r.body.ids);
+    assert.ok(!read.includes('m3'), 'the row\'s own copy is left as it was');
+  });
+
+  test('Move lists the row account\'s folders and moves only its copies', async () => {
+    await open();
+    await click(button('contextMenu.moveToFolder'));
+    assert.ok(requests.some(r => r.url.includes('/accounts/acct/folders')), 'the picker lists the row account\'s folders');
+    assert.ok(!requests.some(r => r.url.includes('/accounts/acct-b/folders')), 'not the other account\'s');
+    await commitWindow(menuEntry('Projects'));
+    assert.deepEqual(sentIds(/bulk-move/), ['m1', 'm2', 'm3']);
+  });
+
+  test('Move in the unified inbox still sends every unified account\'s copies', async () => {
+    // A unified row stands for every unified account's copies, and the server moves each copy
+    // where its own account has that folder.
+    await open({ selectedAccountId: null });
+    await click(button('contextMenu.moveToFolder'));
+    await commitWindow(menuEntry('Projects'));
+    assert.deepEqual(sentIds(/bulk-move/), ['b3', 'm1', 'm2', 'm3']);
+  });
+
+  test('the snooze picker hands the row account\'s copy to the menu behind it', async (t) => {
+    // Its Back row leads to the full menu, whose plugin items (GTD classify) act on the copy the
+    // picker opened on. b3 is the newest message on screen, but it is acct-b's.
+    const handed = [];
+    registerCollector('context-menu-actions', { pluginId: 'probe-476', build: ctx => { handed.push(ctx.message.id); return []; } });
+    const enabledPlugins = useStore.getState().enabledPlugins;
+    // Inside act: the picker is still open, and the store change re-renders it.
+    t.after(() => React.act(async () => { useStore.setState({ enabledPlugins }); }));
+    await open();
+    await React.act(async () => { useStore.setState({ enabledPlugins: ['probe-476'] }); });
+    await click(button('contextMenu.snooze.label'));
+    assert.ok(textShown('contextMenu.snooze.threeHours'), 'the snooze picker is open');
+    assert.deepEqual([...new Set(handed)], ['m3']);
+  });
+
+  test('an open picker closes when the reader moves to another conversation', async () => {
+    const OTHER = { ...ROW, id: 'x1', message_id: '<9@x>', thread_id: '<9@x>' };
+    await open({ rows: [ROW, OTHER] });
+    await click(button('contextMenu.moveToFolder'));
+    assert.ok(pickerOpen(), 'the picker is open');
+    await React.act(async () => { useStore.setState({ selectedMessageId: OTHER.id }); });
+    await wait(50);
+    assert.equal(pickerOpen(), false, 'a pick cannot land on the next conversation');
+  });
+
+  test('an open picker closes when the conversation is opened for another account', async () => {
+    // A notification tap for acct-b's copy of the same conversation keeps the thread id.
+    await open();
+    await click(button('contextMenu.moveToFolder'));
+    assert.ok(pickerOpen(), 'the picker is open');
+    await React.act(async () => { useStore.setState({ threadMessages: { '__dl_b3': [B3] }, selectedMessageId: B3.id }); });
+    await wait(50);
+    assert.equal(pickerOpen(), false, 'acct\'s folders are not offered for acct-b\'s copies');
+  });
+
+  test('a picker opened while the next conversation loads closes when that one lands', async () => {
+    // The previous conversation's cards and buttons stay on screen until the next one arrives. A
+    // picker opened on them kept that conversation's copy for its menu (the folders listed, GTD
+    // classify) while its pick went to the conversation that had landed.
+    const NEXT = [
+      { ...THREAD[0], id: 'x1', message_id: '<20@x>', thread_id: '<20@x>', subject: 'Other' },
+      { ...THREAD[2], id: 'x2', message_id: '<21@x>', thread_id: '<20@x>', subject: 'Re: Other' },
+    ];
+    served['<20@x>'] = NEXT;
+    const OTHER = { ...NEXT[1], message_count: 2, unread_count: 0 };
+    await open({ rows: [ROW, OTHER] });
+    let land;
+    held['<20@x>'] = new Promise(resolve => { land = resolve; });
+    await React.act(async () => { useStore.setState({ selectedMessageId: OTHER.id }); });
+    await wait(20);
+    assert.deepEqual(cardIds(), ['b3', 'm1', 'm2', 'm3'], 'the previous conversation is still on screen');
+    await click(button('contextMenu.snooze.label'));
+    assert.ok(textShown('contextMenu.snooze.threeHours'), 'a picker opens on it');
+    await React.act(async () => { land(); delete held['<20@x>']; });
+    await wait(50);
+    assert.deepEqual(cardIds(), ['x1', 'x2'], 'the next conversation landed');
+    assert.equal(textShown('contextMenu.snooze.threeHours'), false, 'and the picker opened on the previous one is gone');
+  });
+
+  test('a message opened from a notification in another account\'s view acts on its own account\'s copies', async () => {
+    // MailApp parks a deep-linked message in threadMessages without changing the selected
+    // account, so the opened message, not the sidebar, says which account the action is for.
+    await open({ selected: B3, threadMessages: { '__dl_b3': [B3] } });
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['b3']);
+  });
+
+  test('a notification tapped while the row\'s conversation is cached still acts on its own account', async () => {
+    // Expanding the row cached the same copy under the thread id. The tap, not the cache, says
+    // which copy the reader opened; picking it from the list later ends that (MessageList).
+    await open({ selected: B3, threadMessages: { ...EXPANDED, '__dl_b3': [B3] } });
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['b3']);
+  });
+
+  test('in the unified inbox a message opened from a notification acts like the row there', async () => {
+    // Which copy the unified list shows as the row is the server's tie-break, invisible to the
+    // reader, so the opened copy and the row act on the same thing: every unified account's copies.
+    await open({ selectedAccountId: null, selected: B3, threadMessages: { '__dl_b3': [B3] }, rows: [] });
+    assert.ok(threadFetches().every(r => /unified=true/.test(r.url)), 'the conversation is the unified inbox\'s');
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['b3', 'm1', 'm2', 'm3']);
+  });
+
+  test('in the unified inbox a refresh that lists the opened message changes nothing in the pane', async () => {
+    // A push tap opens its message before the first list load, which then brings it in as the
+    // unified row. The pane must not refetch, close the cards the reader opened, or change what
+    // its buttons act on.
+    await open({ selectedAccountId: null, selected: B3, threadMessages: { '__dl_b3': [B3] }, rows: [] });
+    await click(document.querySelector('[data-message-id="m1"] [aria-expanded]'));
+    assert.deepEqual(openIds(), ['b3', 'm1']);
+    const fetched = threadFetches().length;
+    await React.act(async () => { useStore.setState({ messages: [{ ...B3, message_count: 2, unread_count: 0 }] }); });
+    await wait(50);
+    assert.equal(threadFetches().length, fetched, 'the conversation is not fetched again');
+    assert.deepEqual(openIds(), ['b3', 'm1'], 'the cards the reader opened stay open');
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['b3', 'm1', 'm2', 'm3']);
+  });
+
+  test('Move and Snooze open nothing when the conversation holds none of that account\'s copies', async (t) => {
+    // Moving or snoozing the copies on screen would act on other accounts' mail.
+    const warned = [];
+    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
+    await open({ selected: ORPHAN, threadMessages: { '__dl_c3': [ORPHAN] } });
+    await click(button('contextMenu.moveToFolder'));
+    assert.ok(!requests.some(r => /\/accounts\/[^/]+\/folders/.test(r.url)), 'no account\'s folders are listed');
+    assert.equal(pickerOpen(), false, 'no move picker opens');
+    await click(button('contextMenu.snooze.label'));
+    assert.equal(textShown('contextMenu.snooze.threeHours'), false, 'no snooze picker opens');
+    assert.ok(button('message.delete'), 'the pane is still there');
+    assert.equal(warned.length, 2, 'each refusal is logged');
+  });
+
+  test('Archive, Delete and Spam leave the pane open and say why when it holds none of that account\'s copies', async (t) => {
+    // Nothing on screen is that account's, so there is nothing to act on. Clearing the pane as
+    // if the action had worked would hide that.
+    const warned = [];
+    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
+    for (const title of ['message.archive', 'message.delete', 'contextMenu.markAsSpam']) {
+      await open({ selected: ORPHAN, threadMessages: { '__dl_c3': [ORPHAN] } });
+      await commitWindow(button(title));
+      assert.equal(useStore.getState().selectedMessageId, 'c3', `${title} does not close the pane as if it had worked`);
+      assert.ok(button(title), `${title} leaves the conversation on screen`);
+      assert.ok(!requests.some(r => /bulk-archive|bulk-delete|\/messages\/[^/]+\/spam/.test(r.url)), `${title} sends nothing`);
+    }
+    assert.equal(warned.length, 3, 'each refusal is logged');
+    assert.match(warned[0], /acct-c/);
+  });
+
+  // The account has copies on screen, but none the action takes. Unscoped, the action took
+  // acct-b's copy instead; scoped, it takes nothing, which must not look like success either.
+  test('Snooze with none of the account\'s copies in its inbox leaves the pane open and says why', async (t) => {
+    // In acct's Archive view the row's copies are filed, and Snooze takes only an inbox copy.
+    const FILED = [
+      { ...THREAD[0], id: 'a6o', folder: 'Archive', message_id: '<6@x>', thread_id: '<6@x>' },
+      { ...THREAD[2], id: 'a6n', folder: 'Archive', message_id: '<7@x>', thread_id: '<6@x>' },
+      { ...THREAD[2], id: 'b6n', account_id: 'acct-b', message_id: '<7@x>', thread_id: '<6@x>' },
+    ];
+    served['<6@x>'] = FILED;
+    const row = { ...FILED[1], message_count: 2, unread_count: 0 };
+    const warned = [];
+    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
+    await open({ selected: row, rows: [row], folder: 'Archive' });
+    await click(button('contextMenu.snooze.label'));
+    await commitWindow(menuEntry('contextMenu.snooze.threeHours'));
+    assert.equal(useStore.getState().selectedMessageId, 'a6n', 'the pane is not closed as if the snooze had worked');
+    assert.ok(button('message.delete'), 'the conversation stays on screen');
+    assert.ok(!requests.some(r => /\/snooze$/.test(r.url)), 'nothing is snoozed');
+    assert.equal(warned.length, 1, 'the refusal is logged');
+  });
+
+  test('Spam with only the reader\'s own mail in the account leaves the pane open and says why', async (t) => {
+    // In acct's Sent view the row's copies are the reader's own, which Spam spares.
+    const OWN = [
+      { ...THREAD[1], id: 's1', folder: 'Sent', message_id: '<11@x>', thread_id: '<11@x>' },
+      { ...THREAD[1], id: 's2', folder: 'Sent', message_id: '<12@x>', thread_id: '<11@x>', date: '2026-01-04T10:00:00Z' },
+      { ...THREAD[2], id: 'b13', account_id: 'acct-b', message_id: '<13@x>', thread_id: '<11@x>', date: '2026-01-05T10:00:00Z' },
+    ];
+    served['<11@x>'] = OWN;
+    const row = { ...OWN[1], message_count: 2, unread_count: 0 };
+    const warned = [];
+    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
+    await open({ selected: row, rows: [row], folder: 'Sent' });
+    await commitWindow(button('contextMenu.markAsSpam'));
+    assert.equal(useStore.getState().selectedMessageId, 's2', 'the pane is not closed as if the report had worked');
+    assert.ok(button('message.delete'), 'the conversation stays on screen');
+    assert.ok(!requests.some(r => /\/spam$/.test(r.url)), 'nothing is reported');
+    assert.equal(warned.length, 1, 'the refusal is logged');
+  });
+
+  test('in the unified inbox the conversation still acts on every account\'s copies', async () => {
+    await open({ selectedAccountId: null });
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['b3', 'm1', 'm2', 'm3']);
+  });
+
+  test('a GTD row whose copy is gone opens none of another account\'s mail in its account\'s view', async (t) => {
+    // The click recovers through the row's thread, which now holds only acct-b's copy. Parked, that
+    // copy would have the pane act for acct-b from acct's row. The unified inbox still opens it.
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(api, 'getMessage', async () => { throw Object.assign(new Error('Not found'), { status: 404 }); });
+    served['<30@x>'] = [{ ...B3, id: 'b30', message_id: '<30@x>', thread_id: '<30@x>' }];
+    const row = { id: 'a30', account_id: 'acct', message_id: '<30@x>', thread_key: '<30@x>', is_read: true };
+    const { scheduleGtdSectionsFetch } = useStore.getState();
+    let triage;
+    const Rail = () => { triage = useGtdTriage(); return null; };
+    const railContainer = document.body.appendChild(document.createElement('div'));
+    const rail = createRoot(railContainer);
+    await React.act(async () => {
+      useStore.setState({ scheduleGtdSectionsFetch: () => {} });
+      rail.render(React.createElement(Rail));
+    });
+    t.after(() => React.act(async () => {
+      rail.unmount();
+      railContainer.remove();
+      useStore.setState({ scheduleGtdSectionsFetch });
+    }));
+    for (const [selectedAccountId, selected] of [['acct', ROW.id], [null, 'b30']]) {
+      await open({ selectedAccountId });
+      await React.act(async () => { await triage.openRow(row); });
+      await wait(50);
+      assert.equal(useStore.getState().selectedMessageId, selected, `selected in ${selectedAccountId || 'the unified'} view`);
+    }
   });
 });

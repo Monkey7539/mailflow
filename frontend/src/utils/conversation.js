@@ -72,17 +72,23 @@ export const conversationRefreshKey = message => message?.thread_id
   : null;
 
 export function resolveConversationSelection({ selectedMessageId, pool = [], threadMessages = {} }) {
-  const selectedMessage = pool.find(message => message.id === selectedMessageId)
+  const listed = pool.find(message => message.id === selectedMessageId);
+  const selectedMessage = listed
     || Object.values(threadMessages).flat().find(message => message.id === selectedMessageId)
     || null;
   const conversationMessage = selectedMessage?.thread_id
     ? pool.find(message => message.thread_id === selectedMessage.thread_id) || selectedMessage
     : selectedMessage;
+  // A message opened from a notification, a link or the GTD sidebar is parked under __dl_<id>
+  // without switching account (MailApp, utils/gtd.js), so it is not a row of the list on screen.
+  const parked = !listed
+    && Boolean(threadMessages[`__dl_${selectedMessageId}`]?.some(message => message.id === selectedMessageId));
 
   return {
     selectedMessage,
     conversationMessage,
     refreshKey: conversationRefreshKey(conversationMessage),
+    parked,
   };
 }
 

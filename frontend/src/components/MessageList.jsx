@@ -44,6 +44,7 @@ import {
   unreadCountsByAccount,
 } from '../utils/threadedArchive.js';
 import { createUndoableCommit, UNDO_COMMIT_DELAY_MS, UNDO_WINDOW_MS } from '../utils/undoableAction.js';
+import { resolveConversationSelection } from '../utils/conversation.js';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -796,6 +797,8 @@ export default function MessageList() {
   // than the expansion-time cache: a thread gains messages while you look at it, and acting on
   // the snapshot left newer ones unread (unreachable, since the row then rendered as read) or,
   // on the delete and move paths, silently untouched. See utils/threadActions.js.
+  // The thread holds every enabled account's copies, but outside the unified inbox the row
+  // stands for its own account's only, so that is all the action takes.
   const resolveMessagesForThreadAction = useCallback(async (message, { allowCache = false } = {}) => {
     const tid = message.thread_id || message.id;
     const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
@@ -805,6 +808,7 @@ export default function MessageList() {
       cached: threadMessages[tid],
       allowCache,
       fetchThread: () => api.getThread(tid, effectiveFolder, isUnified),
+      accountId: isUnified ? null : message.account_id,
     });
   }, [isThreadListRow, threadMessages, selectedAccountId, selectedFolder, isUnified]);
 
@@ -814,19 +818,25 @@ export default function MessageList() {
     if (useStore.getState().loadingThread === threadId) setLoadingThread(null);
   }, [clearThreadMessages, setLoadingThread]);
 
+  // In one account's view an expanded conversation also lists another account's copies (#476),
+  // which the action left alone; a unified-inbox row stands for every copy.
   const setCachedThreadRead = useCallback((message, read) => {
     const tid = message.thread_id || message.id;
     if (threadMessages[tid]) {
-      setThreadMessages(tid, threadMessages[tid].map(msg => ({ ...msg, is_read: read })));
+      setThreadMessages(tid, threadMessages[tid].map(msg => (
+        isUnified || msg.account_id === message.account_id ? { ...msg, is_read: read } : msg
+      )));
     }
-  }, [threadMessages, setThreadMessages]);
+  }, [threadMessages, setThreadMessages, isUnified]);
 
   const setCachedThreadStarred = useCallback((message, starred) => {
     const tid = message.thread_id || message.id;
     if (threadMessages[tid]) {
-      setThreadMessages(tid, threadMessages[tid].map(msg => ({ ...msg, is_starred: starred })));
+      setThreadMessages(tid, threadMessages[tid].map(msg => (
+        isUnified || msg.account_id === message.account_id ? { ...msg, is_starred: starred } : msg
+      )));
     }
-  }, [threadMessages, setThreadMessages]);
+  }, [threadMessages, setThreadMessages, isUnified]);
 
   const setMessagesReadState = useCallback(async (message, read) => {
     const isThreadRow = isThreadListRow(message);
@@ -2004,7 +2014,7 @@ export default function MessageList() {
     };
 
     const onArchive = () => {
-      const { messages, searchResults, searchQuery, selectedMessageId, threadMessages } = getState();
+      const { messages, searchResults, searchQuery, selectedMessageId, threadMessages, selectedAccountId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       const ids = [...scRef.current.selectedIds];
       if (ids.length > 0) {
@@ -2013,6 +2023,17 @@ export default function MessageList() {
       } else if (selectedMessageId) {
         const msg = findVisibleArchiveMessage(pool, selectedMessageId, threadMessages);
         if (!msg) return;
+        // In one account's view a message opened from a notification, a link or the GTD sidebar
+        // speaks for its own account (ReadingPane), even when a row's cached conversation also
+        // holds it (#476). Archiving a row of another account would take that account's copies,
+        // which the reading pane's own Archive leaves alone.
+        const { selectedMessage: opened, parked } = resolveConversationSelection({
+          selectedMessageId, pool: [...messages, ...searchResults], threadMessages,
+        });
+        if (selectedAccountId && parked && opened?.account_id !== msg.account_id) {
+          console.warn(`Message ${selectedMessageId} belongs to account ${opened?.account_id}, not to the row that holds it; nothing archived`);
+          return;
+        }
         // #449: through the context-action path, whose undoable wrapper delays the real
         // archive and shows the undo toast — calling archiveVisibleMessage directly
         // committed instantly, which made the keyboard's own archive the one action
@@ -2475,6 +2496,12 @@ export default function MessageList() {
   };
 
   const handleSelect = async (message) => {
+    // A notification, link or GTD open parks its message under __dl_<id>, and the entry outlives
+    // that open. Picked from the list, the message is a row of this view or sits under one, so a
+    // leftover entry must not keep it parked: ReadingPane would scope the conversation's actions
+    // to the message's own account rather than the row's.
+    const parkedKey = `__dl_${message.id}`;
+    if (useStore.getState().threadMessages[parkedKey]) clearThreadMessages(parkedKey);
     if (isDraftsFolder) {
       try {
         const [bodyData, bcc] = await Promise.all([

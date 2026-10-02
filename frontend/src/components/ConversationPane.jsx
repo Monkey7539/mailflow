@@ -8,7 +8,7 @@ import {
   conversationMembershipKey,
   newestConversationMessage,
 } from '../utils/conversation.js';
-import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread } from '../utils/threadActions.js';
+import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount } from '../utils/threadActions.js';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
@@ -33,11 +33,13 @@ function ThreadBtn({ onClick, title, children }) {
 // The whole conversation, stacked, with only what the reader has opened rendered.
 //
 // The thread endpoint already returns every message across folders, Sent replies included,
-// deduplicated by Message-ID preferring the INBOX copy, so this needs no scope parameter of
-// its own.
+// deduplicated by Message-ID preferring the INBOX copy, so showing it needs no scope parameter
+// of its own. It also holds another account's copy of the same email (#476), which stays on
+// screen. accountId, the account whose copies the actions take (ReadingPane says which), keeps
+// the actions and the card that opens to that account's copies; null keeps every copy.
 //
 // Design from #317 by YunQue0912.
-export default function ConversationPane({ threadId, folder, unified = false, selectedMessageId = null }) {
+export default function ConversationPane({ threadId, folder, unified = false, accountId = null, selectedMessageId = null }) {
   const { t } = useTranslation();
   const addNotification = useStore(s => s.addNotification);
   const accounts = useStore(s => s.accounts);
@@ -47,8 +49,8 @@ export default function ConversationPane({ threadId, folder, unified = false, se
   const [expanded, setExpanded] = useState(() => new Set());
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  // { x, y, view } — the move and snooze pickers are ContextMenu's, opened straight
-  // into the relevant sub-view rather than reimplemented here.
+  // { x, y, view, message } — the move and snooze pickers are ContextMenu's, opened straight
+  // into the relevant sub-view rather than reimplemented here. message is the copy they open on.
   const [picker, setPicker] = useState(null);
   const [aiStatus, setAiStatus] = useState(null);
 
@@ -56,6 +58,10 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     api.ai.status().then(setAiStatus).catch(() => {});
   }, []);
   const aiEnabled = Boolean(aiStatus?.enabled && aiStatus?.features?.summarize);
+
+  // Read when the conversation arrives, without making the pick a reason to fetch it again.
+  const pickedRef = useRef(selectedMessageId);
+  pickedRef.current = selectedMessageId;
 
   useEffect(() => {
     if (!threadId) { setMessages([]); return; }
@@ -67,15 +73,29 @@ export default function ConversationPane({ threadId, folder, unified = false, se
         if (cancelled) return;
         const ordered = normalizeConversation(data?.messages || []);
         setMessages(ordered);
+        // A picker opened on the previous conversation's cards while this one loaded (below).
+        setPicker(null);
         // Opens on the newest message, the way every threaded client does: the reader
         // almost always wants the latest reply, and expanding everything would render a
-        // document per message.
-        setExpanded(initialExpandedMessageIds(ordered));
+        // document per message. The newest of accountId's copies, since opening a card marks it
+        // read. When the reader picked the other account's copy under the row, that copy opens on
+        // its own (the effect below): opening the row's copy beside it would mark that read too,
+        // behind a list row whose unread count does not follow.
+        const picked = ordered.find(message => message.id === pickedRef.current);
+        setExpanded(accountId && picked && picked.account_id !== accountId
+          ? new Set()
+          : initialExpandedMessageIds(inAccount(ordered, accountId)));
       })
       .catch(err => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [threadId, folder, unified]);
+  }, [threadId, folder, unified, accountId]);
+
+  // The pane stays mounted from one conversation to the next, so an open picker would
+  // otherwise apply its pick to a conversation it was not opened on. The previous
+  // conversation's cards and buttons stay on screen until the next one lands, so a picker can
+  // still be opened on them after this runs; the fetch above closes that one when it lands.
+  useEffect(() => { setPicker(null); }, [threadId, accountId]);
 
   // Opening a message from the list opens it here too. Picking a different message in the
   // same thread leaves threadId untouched, so the pane used to re-render with identical
@@ -96,17 +116,34 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     return next;
   });
 
+  // A link can open a message whose account the thread route leaves out (a disabled one), so the
+  // pane can hold none of that account's copies. Every action would then take nothing, and
+  // closing the pane as if one had worked is the silent failure this guard exists to avoid.
+  const holdsNoCopyToActOn = () => {
+    if (inAccount(messages, accountId).length) return false;
+    console.warn(`Conversation ${threadId} holds no copy of account ${accountId}; nothing to act on`);
+    return true;
+  };
+
   // Acting on the conversation empties the reading pane: every message it was showing
   // has just been removed from the list behind it.
   const runAction = (action) => {
-    action(messages, {
+    if (holdsNoCopyToActOn()) return;
+    const scheduled = action(messages, {
       t,
       addNotification,
       accounts,
+      accountId,
       // The authoritative list, re-read when the action actually commits, so a reply
       // that arrived while this conversation was open is not left behind.
       fetchThread: () => api.getThread(threadId, folder, unified),
     });
+    // The copies on screen can still leave an action nothing to take: Snooze takes only an INBOX
+    // copy, and Spam only mail the reader did not send. The pane stays then too, as above.
+    if (!scheduled) {
+      console.warn(`Conversation ${threadId} holds nothing this action applies to${accountId ? ` in account ${accountId}` : ''}; nothing to act on`);
+      return;
+    }
     setSelectedMessage(null);
   };
 
@@ -131,9 +168,14 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     printInWindow(win, buildPrintDocument(entries));
   };
 
+  // Both pickers open on the newest of accountId's copies (of any account's in the unified inbox):
+  // the move picker lists that copy's account's folders, and the snooze picker's Back row leads
+  // to the full menu, whose plugin items (GTD classify) act on that copy.
   const openPicker = (event, view) => {
+    if (holdsNoCopyToActOn()) return;
+    const pickerMessage = newestConversationMessage(inAccount(messages, accountId));
     const rect = event.currentTarget.getBoundingClientRect();
-    setPicker({ x: rect.left, y: rect.bottom + 4, view });
+    setPicker({ x: rect.left, y: rect.bottom + 4, view, message: pickerMessage });
   };
 
   // Every branch that returns from here fills the reading area, for the same flex reason
@@ -202,7 +244,7 @@ export default function ConversationPane({ threadId, folder, unified = false, se
         <ContextMenu
           x={picker.x}
           y={picker.y}
-          message={newestConversationMessage(messages)}
+          message={picker.message}
           variant="conversation"
           defaultMoveView={picker.view === 'move'}
           defaultSnoozeView={picker.view === 'snooze'}
