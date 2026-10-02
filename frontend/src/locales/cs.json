@@ -1271,7 +1271,7 @@
       "create": "Stáhnout zálohu",
       "restoreTitle": "Obnovit ze zálohy",
       "restoreIntro": "Obnovení nahradí všechny uživatele, účty, nastavení a zprávy v mezipaměti na tomto serveru obsahem souboru. MailFlow se poté restartuje. Kdo nemá účet v záloze, bude odhlášen, a platí hesla ze zálohy.",
-      "versionNote": "Zálohu lze obnovit jen ve verzi MailFlow, která ji vytvořila. Chcete-li přejít na novější verzi, obnovte zálohu nejprve v její vlastní verzi a potom aktualizujte.",
+      "versionNote": "Zálohu lze obnovit jen ve verzi MailFlow se stejným schématem databáze jako verze, která ji vytvořila. Má-li tato verze novější schéma, obnovte zálohu ve verzi, která ji vytvořila, a potom aktualizujte.",
       "chooseFile": "Vybrat soubor zálohy",
       "restore": "Obnovit…",
       "confirmWarn": "Vše na tomto serveru bude nahrazeno souborem {{name}}. Tuto akci nelze vrátit zpět.",
