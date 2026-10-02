@@ -278,6 +278,26 @@
       "button": "Classer avec l'IA",
       "done": "Classé comme {{category}}",
       "error": "La classification par IA a échoué."
+    },
+    "preview": {
+      "open": "Aperçu",
+      "label": "Aperçu de {{name}}",
+      "position": "{{current}} sur {{total}}",
+      "download": "Télécharger",
+      "print": "Imprimer",
+      "preparingPrint": "Préparation… {{done}}/{{total}}",
+      "close": "Fermer",
+      "zoomIn": "Zoom avant",
+      "zoomOut": "Zoom arrière",
+      "fit": "Ajuster à l’écran",
+      "previous": "Pièce jointe précédente",
+      "next": "Pièce jointe suivante",
+      "failed": "Impossible d’afficher ce fichier.",
+      "unsupported": "Ce fichier ne semble pas être un PDF ou une image valide, il n’est donc pas affiché ici.",
+      "password": "Ce PDF est protégé par un mot de passe. Saisissez-le pour l’ouvrir.",
+      "passwordLabel": "Mot de passe du PDF",
+      "passwordSubmit": "Ouvrir",
+      "passwordIncorrect": "Mot de passe incorrect. Réessayez."
     }
   },
   "messageList": {
@@ -657,6 +677,15 @@
         "label": "Marquer Délégué",
         "description": "Classer le message sélectionné comme Délégué"
       },
+      "gtdReference": {
+        "description": "Classer le message sélectionné en Référence"
+      },
+      "gtdSomeday": {
+        "description": "Classer le message sélectionné en Un jour"
+      },
+      "gtdDone": {
+        "description": "Terminer le message GTD sélectionné"
+      },
       "toggleRightSidebar": {
         "label": "Afficher ou masquer la barre latérale droite",
         "description": "Masquer ou afficher la barre latérale droite"
@@ -849,6 +878,8 @@
       "smtpAuthUserPh": "Identique au nom d'utilisateur ci-dessus",
       "smtpAuthPass": "Mot de passe SMTP",
       "signatureSection": "Signature",
+      "autoRecipientsSection": "Cc et Cci automatiques",
+      "autoRecipientsDesc": "Ces adresses sont ajoutées comme destinataires normaux, que vous pouvez retirer, à chaque nouveau message, réponse et transfert que vous rédigez depuis ce compte ou ses alias. Séparez les adresses par des virgules.",
       "saveChanges": "Enregistrer les modifications",
       "addAccount": "Ajouter un compte",
       "saving": "Enregistrement…",
@@ -1164,7 +1195,7 @@
       "description": "Cliquez sur un raccourci pour le réassigner. Appuyez sur Échap pour annuler l'enregistrement.",
       "resetAll": "Réinitialiser tous les raccourcis",
       "recording": "Appuyez sur une touche…",
-      "conflict": "La touche {{key}} était déjà assignée à {{action}} — elle a été réassignée.",
+      "conflict": "La touche {{key}} est attribuée à plusieurs actions. {{action}} est prioritaire.",
       "resetDefault": "Réinitialiser par défaut",
       "remove": "Supprimer le raccourci",
       "footer": "Appuyez sur ? n'importe où dans l'application pour voir la référence des raccourcis."
@@ -1761,6 +1792,7 @@
     "undoFailed": "Impossible d'annuler l'étiquette",
     "removed": "Étiquette retirée",
     "removeFailed": "Impossible de retirer l'étiquette",
+    "onlyCopy": "C'est la seule copie du message : retirer le libellé la supprimerait. Archivez-le ou déplacez-le plutôt.",
     "done": "Marquer comme terminé",
     "doneFailed": "Impossible de marquer comme terminé",
     "doneArchiveFailed": "Marqué comme terminé, mais l'archivage a échoué — toujours dans la boîte de réception",

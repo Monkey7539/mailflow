@@ -30,11 +30,11 @@ export async function resolveLabelCopyUid(message, folder) {
 // Apply a label: ensure the label folder exists, then COPY the message into it (leaving the
 // original in place). imapManager.copyMessage also emits the section-refresh event. No-op when
 // the message already lives in the label folder. `message` needs { uid, folder }.
-export async function applyLabel(imapManager, account, message, labelFolder) {
+export async function applyLabel(imapManager, account, message, labelFolder, { forceCopy = false } = {}) {
   if (message.folder === labelFolder) {
     return { applied: false, uid: message.uid, reason: 'already-there' };
   }
-  const existingUid = await resolveLabelCopyUid(message, labelFolder);
+  const existingUid = forceCopy ? null : await resolveLabelCopyUid(message, labelFolder);
   if (existingUid != null) {
     return { applied: false, uid: existingUid, reason: 'already-labelled' };
   }
@@ -115,4 +115,18 @@ export async function markThreadRead(imapManager, account, message) {
     return { inboxCopy, error: err };
   }
   return { inboxCopy };
+}
+
+// Best-effort \Seen on one copy, for when a copy other than INBOX is the durable one (GTD Done
+// archiving a message's only copy, #524). The DB side is markThreadRead's fan-out; without the
+// flag the next sync of the destination folder reads the copy back as unread. Never throws.
+// `message` needs { uid, folder, is_read }.
+export async function markCopySeen(imapManager, account, message) {
+  if (message.is_read) return {};
+  try {
+    await imapManager.setFlag(account, message.uid, message.folder, '\\Seen', true);
+  } catch (err) {
+    return { error: err };
+  }
+  return {};
 }

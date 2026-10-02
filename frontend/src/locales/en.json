@@ -278,6 +278,26 @@
       "button": "Classify with AI",
       "done": "Classified as {{category}}",
       "error": "AI classification failed."
+    },
+    "preview": {
+      "open": "Preview",
+      "label": "Preview of {{name}}",
+      "position": "{{current}} of {{total}}",
+      "download": "Download",
+      "print": "Print",
+      "preparingPrint": "Preparing… {{done}}/{{total}}",
+      "close": "Close",
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
+      "fit": "Fit to screen",
+      "previous": "Previous attachment",
+      "next": "Next attachment",
+      "failed": "This file could not be displayed.",
+      "unsupported": "This file does not look like a valid PDF or image, so it is not shown here.",
+      "password": "This PDF is password-protected. Enter its password to open it.",
+      "passwordLabel": "PDF password",
+      "passwordSubmit": "Open",
+      "passwordIncorrect": "Incorrect password. Try again."
     }
   },
   "messageList": {
@@ -657,6 +677,15 @@
         "label": "Mark Delegated",
         "description": "Classify the selected message as Delegated"
       },
+      "gtdReference": {
+        "description": "Classify the selected message as Reference"
+      },
+      "gtdSomeday": {
+        "description": "Classify the selected message as Someday"
+      },
+      "gtdDone": {
+        "description": "Mark the selected GTD message done"
+      },
       "toggleRightSidebar": {
         "label": "Toggle right sidebar",
         "description": "Hide or show the right sidebar"
@@ -851,6 +880,8 @@
       "smtpAuthUserPh": "Same as username above",
       "smtpAuthPass": "SMTP password",
       "signatureSection": "Signature",
+      "autoRecipientsSection": "Automatic Cc and Bcc",
+      "autoRecipientsDesc": "Added as normal recipients, which you can remove, to every new message, reply and forward you write from this account or its aliases. Separate addresses with commas.",
       "saveChanges": "Save changes",
       "addAccount": "Add account",
       "saving": "Saving…",
@@ -1164,7 +1195,7 @@
       "description": "Click a key binding to reassign it. Press Esc to cancel recording.",
       "resetAll": "Reset all to defaults",
       "recording": "Press a key…",
-      "conflict": "Key {{key}} was already assigned to {{action}} — it has been reassigned.",
+      "conflict": "Key {{key}} is assigned to multiple actions. {{action}} takes priority.",
       "resetDefault": "Reset to default",
       "remove": "Remove shortcut",
       "footer": "Press ? anywhere in the app to see the current shortcut reference."
@@ -1761,6 +1792,7 @@
     "undoFailed": "Couldn't undo label",
     "removed": "Label removed",
     "removeFailed": "Couldn't remove label",
+    "onlyCopy": "This is the only copy of the message, so removing the label would delete it. Archive or move it instead.",
     "done": "Mark done",
     "doneFailed": "Couldn't mark done",
     "doneArchiveFailed": "Marked done, but archiving failed — still in your Inbox",

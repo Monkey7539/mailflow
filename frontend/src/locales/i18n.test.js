@@ -165,10 +165,10 @@ const SAME_VALUE_ALLOWED = {
   'admin.integrations.google.clientId': [['fr', 'it'], ['en', 'ptBR']],
 
 
-  // email placeholder — example.com address looks the same in en, ru, zhCN
-  'admin.accounts.emailPh':    [['en', 'ru', 'zhCN']],
-  'admin.aliases.emailPh':     [['de', 'en', 'ru', 'zhCN']],
-  'admin.privacy.addDomainPh': [['cs', 'de', 'en', 'pl', 'ru', 'zhCN']],
+  // email placeholder — example.com address looks the same across these locales
+  'admin.accounts.emailPh':    [['en', 'ko', 'ru', 'zhCN']],
+  'admin.aliases.emailPh':     [['de', 'en', 'ko', 'ru', 'zhCN']],
+  'admin.privacy.addDomainPh': [['cs', 'de', 'en', 'ko', 'pl', 'ru', 'zhCN']],
 
   // ── Antispam v0.2 ──────────────────────────────────────────────────────────
   // "Antispam" — international loanword, same spelling in en, it, de, es, fr, cs
@@ -188,14 +188,15 @@ const SAME_VALUE_ALLOWED = {
   'spam.verdict.spam':            [['cs', 'de', 'en', 'es', 'fr', 'it', 'pl', 'ptBR']],
   // authserv-id example — a literal hostname, identical in every locale
   'admin.accounts.trustedAuthservPlaceholder': 'any',
-  'admin.privacy.addSenderPh': [['en', 'ru', 'zhCN']],
+  'admin.privacy.addSenderPh': [['en', 'ko', 'ru', 'zhCN']],
+  'admin.blockList.emailPlaceholder': [['en', 'ko']],
   'admin.aliases.replyToLabel': [['en', 'pl']],
 
   'admin.rules.actionForwardPlaceholder': [['es', 'it']],
-  'admin.sso.domainsPh':       [['de', 'en', 'pl', 'ru', 'zhCN']],
+  'admin.sso.domainsPh':       [['de', 'en', 'ko', 'pl', 'ru', 'zhCN']],
   'admin.users.invitePh':      [['cs', 'de', 'en', 'ru', 'zhCN']],
-  'compose.bccPh':             [['de', 'en', 'pl', 'ru', 'zhCN']],
-  'compose.ccPh':              [['de', 'en', 'pl', 'ru', 'zhCN']],
+  'compose.bccPh':             [['de', 'en', 'ko', 'pl', 'ru', 'zhCN']],
+  'compose.ccPh':              [['de', 'en', 'ko', 'pl', 'ru', 'zhCN']],
   'compose.toPh':              [['en', 'ru', 'zhCN']],
 
   // "Port" — universal technical term, same in de, en, fr
@@ -266,8 +267,8 @@ const SAME_VALUE_ALLOWED = {
   // "Single Sign-On" — international term, same in de, en, it
   'admin.sso.title': [['de', 'en', 'it']],
 
-  // "SSO" — acronym, same in de, en, es, fr, it, ru
-  'admin.tabs.sso': [['cs', 'de', 'en', 'es', 'fr', 'it', 'pl', 'ptBR', 'ru']],
+  // "SSO" — international acronym
+  'admin.tabs.sso': [['cs', 'de', 'en', 'es', 'fr', 'it', 'ko', 'pl', 'ptBR', 'ru']],
 
   // "Backup" — loanword used as-is in it and ptBR; "Restaurar…" is the same verb in es and ptBR
   'admin.tabs.backup':    [['en', 'it', 'ptBR']],
@@ -331,7 +332,7 @@ const SAME_VALUE_ALLOWED = {
   // "Permanent" — same in en and fr; "Permanente" same in es and it
   'admin.security.mfaDeviceTrustForever': [['en', 'fr'], ['es', 'it', 'ptBR']],
   // email placeholder — en and ru share same format
-  'admin.security.recoveryEmailPh': [['en', 'ru', 'zhCN']],
+  'admin.security.recoveryEmailPh': [['en', 'ko', 'ru', 'zhCN']],
 
   // ── Email categorization ───────────────────────────────────────────────────
   // URL placeholder — identical in all locales
@@ -535,6 +536,14 @@ const SAME_VALUE_ALLOWED = {
   // is the natural word for the wide preset in both Italian and Portuguese.
   'messageList.layouts.compact.label': [['en', 'fr'], ['es', 'ptBR']],
   'messageList.layouts.wide.label':    [['it', 'ptBR']],
+
+  // ── Attachment viewer ─────────────────────────────────────────────────────
+  // "Imprimir" / "Preparando…" / "Abrir" / "{{current}} de {{total}}" are spelled the same in
+  // Spanish and Portuguese; Czech and Polish share "{{current}} z {{total}}".
+  'message.preview.print':          [['es', 'ptBR']],
+  'message.preview.preparingPrint': [['es', 'ptBR']],
+  'message.preview.position':       [['es', 'ptBR'], ['cs', 'pl']],
+  'message.preview.passwordSubmit': [['es', 'ptBR']],
 };
 
 // Locale-specific plural forms are allowed per locale. A locale may add forms

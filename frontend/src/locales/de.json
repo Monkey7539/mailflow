@@ -278,6 +278,26 @@
       "button": "Mit KI klassifizieren",
       "done": "Klassifiziert als {{category}}",
       "error": "KI-Klassifizierung fehlgeschlagen."
+    },
+    "preview": {
+      "open": "Vorschau",
+      "label": "Vorschau von {{name}}",
+      "position": "{{current}} von {{total}}",
+      "download": "Herunterladen",
+      "print": "Drucken",
+      "preparingPrint": "Wird vorbereitet… {{done}}/{{total}}",
+      "close": "Schließen",
+      "zoomIn": "Vergrößern",
+      "zoomOut": "Verkleinern",
+      "fit": "An Bildschirm anpassen",
+      "previous": "Vorheriger Anhang",
+      "next": "Nächster Anhang",
+      "failed": "Diese Datei konnte nicht angezeigt werden.",
+      "unsupported": "Diese Datei scheint kein gültiges PDF oder Bild zu sein und wird daher hier nicht angezeigt.",
+      "password": "Dieses PDF ist passwortgeschützt. Geben Sie das Passwort ein, um es zu öffnen.",
+      "passwordLabel": "PDF-Passwort",
+      "passwordSubmit": "Öffnen",
+      "passwordIncorrect": "Falsches Passwort. Versuchen Sie es erneut."
     }
   },
   "messageList": {
@@ -657,6 +677,15 @@
         "label": "Als Delegiert markieren",
         "description": "Die ausgewählte Nachricht als Delegiert einordnen"
       },
+      "gtdReference": {
+        "description": "Ausgewählte Nachricht als Referenz einordnen"
+      },
+      "gtdSomeday": {
+        "description": "Ausgewählte Nachricht als Irgendwann einordnen"
+      },
+      "gtdDone": {
+        "description": "Ausgewählte GTD-Nachricht abschließen"
+      },
       "toggleRightSidebar": {
         "label": "Rechte Seitenleiste umschalten",
         "description": "Rechte Seitenleiste aus- oder einblenden"
@@ -780,6 +809,8 @@
       "smtpAuthUserPh": "Wie Benutzername oben",
       "smtpAuthPass": "SMTP-Passwort",
       "signatureSection": "Signatur",
+      "autoRecipientsSection": "Automatische Cc- und Bcc-Empfänger",
+      "autoRecipientsDesc": "Diese Adressen werden jeder neuen Nachricht, Antwort und Weiterleitung, die Sie über dieses Konto oder seine Aliasse schreiben, als normale Empfänger hinzugefügt, die Sie wieder entfernen können. Mehrere Adressen durch Kommas trennen.",
       "saveChanges": "Änderungen speichern",
       "addAccount": "Konto hinzufügen",
       "saving": "Wird gespeichert…",
@@ -1093,7 +1124,7 @@
       "description": "Auf eine Tastenkombination klicken, um sie neu zuzuweisen. Esc drücken, um die Aufnahme abzubrechen.",
       "resetAll": "Alle auf Standard zurücksetzen",
       "recording": "Taste drücken…",
-      "conflict": "Taste {{key}} war bereits {{action}} zugewiesen — neu zugewiesen.",
+      "conflict": "Taste {{key}} ist mehreren Aktionen zugewiesen. {{action}} hat Vorrang.",
       "resetDefault": "Auf Standard zurücksetzen",
       "remove": "Kürzel entfernen",
       "footer": "Überall in der App ? drücken, um die aktuelle Kürzelbeschreibung zu sehen."
@@ -1761,6 +1792,7 @@
     "undoFailed": "Label konnte nicht rückgängig gemacht werden",
     "removed": "Label entfernt",
     "removeFailed": "Label konnte nicht entfernt werden",
+    "onlyCopy": "Dies ist die einzige Kopie der Nachricht. Das Entfernen der Markierung würde sie löschen. Archivieren oder verschieben Sie sie stattdessen.",
     "done": "Als erledigt markieren",
     "doneFailed": "Konnte nicht als erledigt markiert werden",
     "doneArchiveFailed": "Als erledigt markiert, aber Archivieren fehlgeschlagen – noch im Posteingang",

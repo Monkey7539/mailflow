@@ -28,7 +28,8 @@ async function request(method, path, body, extraHeaders) {
       window.dispatchEvent(new CustomEvent('mailflow:session_expired'));
     }
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
-    const e = new Error(err.error || 'Request failed'); e.status = res.status; throw e;
+    // The status rides along so a caller can tell a refusal (409) from a failure.
+    throw Object.assign(new Error(err.error || 'Request failed'), { status: res.status });
   }
   return res.json();
 }

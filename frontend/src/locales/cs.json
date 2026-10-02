@@ -399,6 +399,26 @@
       "button": "Zařadit pomocí AI",
       "done": "Zařazeno do kategorie {{category}}",
       "error": "Zařazení pomocí AI se nezdařilo."
+    },
+    "preview": {
+      "open": "Náhled",
+      "label": "Náhled: {{name}}",
+      "position": "{{current}} z {{total}}",
+      "download": "Stáhnout",
+      "print": "Tisk",
+      "preparingPrint": "Příprava… {{done}}/{{total}}",
+      "close": "Zavřít",
+      "zoomIn": "Přiblížit",
+      "zoomOut": "Oddálit",
+      "fit": "Přizpůsobit obrazovce",
+      "previous": "Předchozí příloha",
+      "next": "Další příloha",
+      "failed": "Tento soubor nelze zobrazit.",
+      "unsupported": "Tento soubor nevypadá jako platné PDF nebo obrázek, proto se zde nezobrazuje.",
+      "password": "Toto PDF je chráněno heslem. Zadejte heslo, abyste ho otevřeli.",
+      "passwordLabel": "Heslo k PDF",
+      "passwordSubmit": "Otevřít",
+      "passwordIncorrect": "Nesprávné heslo. Zkuste to znovu."
     }
   },
   "compose": {
@@ -599,6 +619,7 @@
     "classifyFailed": "Štítek se nepodařilo použít",
     "removed": "Štítek odebrán",
     "removeFailed": "Štítek se nepodařilo odebrat",
+    "onlyCopy": "Toto je jediná kopie zprávy, odebráním štítku by se smazala. Místo toho ji archivujte nebo přesuňte.",
     "done": "Označit jako hotové",
     "doneFailed": "Nepodařilo se označit jako hotové",
     "doneArchiveFailed": "Označeno jako hotové, ale archivace se nezdařila — zpráva zůstává v Doručené poště",
@@ -735,6 +756,15 @@
       "gtdDelegated": {
         "label": "Označit Delegováno",
         "description": "Zařadit vybranou zprávu jako Delegováno"
+      },
+      "gtdReference": {
+        "description": "Zařadit vybranou zprávu jako Podklady"
+      },
+      "gtdSomeday": {
+        "description": "Zařadit vybranou zprávu jako Někdy"
+      },
+      "gtdDone": {
+        "description": "Dokončit vybranou zprávu GTD"
       },
       "toggleRightSidebar": {
         "label": "Pravý postranní panel",
@@ -1031,6 +1061,8 @@
       "smtpAuthUserPh": "Stejné jako uživatelské jméno výše",
       "smtpAuthPass": "Heslo SMTP",
       "signatureSection": "Podpis",
+      "autoRecipientsSection": "Automatická kopie a skrytá kopie",
+      "autoRecipientsDesc": "Tyto adresy se přidávají jako běžní příjemci, které můžete odebrat, ke každé nové zprávě, odpovědi a přeposlané zprávě z tohoto účtu nebo jeho aliasů. Adresy oddělte čárkami.",
       "saveChanges": "Uložit změny",
       "addAccount": "Přidat účet",
       "saving": "Ukládání…",
@@ -1225,7 +1257,7 @@
       "description": "Kliknutím na klávesovou zkratku ji změníte. Nahrávání zrušíte stisknutím Esc.",
       "resetAll": "Obnovit vše na výchozí hodnoty",
       "recording": "Stiskněte klávesu…",
-      "conflict": "Klávesa {{key}} už byla přiřazena akci {{action}} — přiřazení bylo změněno.",
+      "conflict": "Klávesa {{key}} je přiřazena více akcím. Přednost má {{action}}.",
       "resetDefault": "Obnovit výchozí",
       "remove": "Odebrat zkratku",
       "footer": "Aktuální přehled zkratek zobrazíte stisknutím ? kdekoliv v aplikaci."

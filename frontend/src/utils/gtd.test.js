@@ -19,7 +19,6 @@ import {
   openGtdThreadWithAutoRead,
   sectionBadge,
   openDeepLinkMessage,
-  classifyThread,
   unclassifyThread,
   pickThreadMessage,
   isSelectedRow,
@@ -1520,41 +1519,6 @@ describe('openGtdThreadWithAutoRead', () => {
   });
 });
 
-// Classify = COPY into the state's label folder; unclassify strips one. Both just fire the
-// API call, reconverge the GTD sections store, and notify — deps injected (like openDeepLinkMessage)
-// so the success and failure-notification paths are unit-testable without a real store/API.
-describe('classifyThread', () => {
-  const t = (key) => key;
-
-  it('classifies, reconverges the GTD sections store, then notifies success', async () => {
-    const calls = [];
-    const deps = {
-      gtdClassify: async (id, state) => { calls.push(['classify', id, state]); },
-      addNotification: (n) => calls.push(['notify', n.title, n.body]),
-      scheduleGtdSectionsFetch: () => calls.push(['schedule']),
-      t,
-    };
-    await classifyThread('m1', 'todo', deps);
-    assert.deepEqual(calls, [
-      ['classify', 'm1', 'todo'],
-      ['schedule'],
-      ['notify', 'gtd.classified', 'gtd.state.todo'],
-    ]);
-  });
-
-  it('notifies a classify failure instead of the GTD sections store when the API call rejects', async () => {
-    const calls = [];
-    const deps = {
-      gtdClassify: async () => { throw new Error('boom'); },
-      addNotification: (n) => calls.push(['notify', n.title, n.body]),
-      scheduleGtdSectionsFetch: () => calls.push(['schedule']),
-      t,
-    };
-    await classifyThread('m1', 'todo', deps);
-    assert.deepEqual(calls, [['notify', 'gtd.classifyFailed', 'gtd.state.todo']]);
-  });
-});
-
 describe('unclassifyThread', () => {
   const t = (key) => key;
 
@@ -1584,5 +1548,16 @@ describe('unclassifyThread', () => {
     };
     await unclassifyThread('m1', 'todo', deps);
     assert.deepEqual(calls, [['notify', 'gtd.removeFailed', 'gtd.state.todo']]);
+  });
+  it('says why when the server refuses because the GTD folder holds the only copy', async () => {
+    const calls = [];
+    const deps = {
+      gtdUnclassify: async () => { throw Object.assign(new Error('only copy'), { status: 409 }); },
+      addNotification: (n) => calls.push(['notify', n.title, n.body]),
+      scheduleGtdSectionsFetch: () => calls.push(['schedule']),
+      t,
+    };
+    await unclassifyThread('m1', 'todo', deps);
+    assert.deepEqual(calls, [['notify', 'gtd.removeFailed', 'gtd.onlyCopy']]);
   });
 });

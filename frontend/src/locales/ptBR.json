@@ -278,6 +278,26 @@
       "button": "Classificar com IA",
       "done": "Classificado como {{category}}",
       "error": "Falha na classificação por IA."
+    },
+    "preview": {
+      "open": "Visualizar",
+      "label": "Visualização de {{name}}",
+      "position": "{{current}} de {{total}}",
+      "download": "Baixar",
+      "print": "Imprimir",
+      "preparingPrint": "Preparando… {{done}}/{{total}}",
+      "close": "Fechar",
+      "zoomIn": "Aumentar zoom",
+      "zoomOut": "Diminuir zoom",
+      "fit": "Ajustar à tela",
+      "previous": "Anexo anterior",
+      "next": "Próximo anexo",
+      "failed": "Não foi possível exibir este arquivo.",
+      "unsupported": "Este arquivo não parece ser um PDF ou uma imagem válida, por isso não é exibido aqui.",
+      "password": "Este PDF é protegido por senha. Digite a senha para abri-lo.",
+      "passwordLabel": "Senha do PDF",
+      "passwordSubmit": "Abrir",
+      "passwordIncorrect": "Senha incorreta. Tente novamente."
     }
   },
   "messageList": {
@@ -657,6 +677,15 @@
         "label": "Marcar como Delegada",
         "description": "Classificar a mensagem selecionada como Delegada"
       },
+      "gtdReference": {
+        "description": "Classificar a mensagem selecionada como Referência"
+      },
+      "gtdSomeday": {
+        "description": "Classificar a mensagem selecionada como Algum dia"
+      },
+      "gtdDone": {
+        "description": "Concluir a mensagem GTD selecionada"
+      },
       "toggleRightSidebar": {
         "label": "Alternar barra lateral direita",
         "description": "Ocultar ou mostrar a barra lateral direita"
@@ -851,6 +880,8 @@
       "smtpAuthUserPh": "Igual ao nome de usuário acima",
       "smtpAuthPass": "Senha SMTP",
       "signatureSection": "Assinatura",
+      "autoRecipientsSection": "Cc e Cco automáticos",
+      "autoRecipientsDesc": "Esses endereços são adicionados como destinatários normais, que você pode remover, a cada nova mensagem, resposta e encaminhamento que você escrever a partir desta conta ou de seus apelidos. Separe os endereços por vírgula.",
       "saveChanges": "Salvar alterações",
       "addAccount": "Adicionar conta",
       "saving": "Salvando…",
@@ -1164,7 +1195,7 @@
       "description": "Clique em um atalho para reatribuí-lo. Pressione Esc para cancelar a gravação.",
       "resetAll": "Restaurar todos os padrões",
       "recording": "Pressione uma tecla…",
-      "conflict": "A tecla {{key}} já estava atribuída a {{action}} — ela foi reatribuída.",
+      "conflict": "A tecla {{key}} está atribuída a várias ações. {{action}} tem prioridade.",
       "resetDefault": "Restaurar padrão",
       "remove": "Remover atalho",
       "footer": "Pressione ? em qualquer lugar do app para ver a referência atual de atalhos."
@@ -1761,6 +1792,7 @@
     "undoFailed": "Não foi possível desfazer a etiqueta",
     "removed": "Etiqueta removida",
     "removeFailed": "Não foi possível remover a etiqueta",
+    "onlyCopy": "Esta é a única cópia da mensagem, então remover o marcador a excluiria. Arquive ou mova-a em vez disso.",
     "done": "Marcar como concluída",
     "doneFailed": "Não foi possível marcar como concluída",
     "doneArchiveFailed": "Marcada como concluída, mas o arquivamento falhou — ainda está na sua Caixa de entrada",

@@ -33,27 +33,30 @@ import { resolveArchiveFolder, isAllMailFolder, adjustFolderCounts } from '../ut
 // row keeps the stale source uid at the destination — guard (Archive, uid) too, and hold that
 // guard for the sync that learns the real uid only when the row was actually moved; a lost
 // race (rowCount 0) or a throw releases it immediately, since there is nothing to protect.
-export async function archiveInboxCopy(imapManager, account, inboxCopy) {
+// `fromFolder` defaults to INBOX. GTD's /done also passes a label folder, to archive a copy that
+// is the message's only one instead of deleting it; the caller has marked the thread read, so the
+// counts move no unread either way.
+export async function archiveInboxCopy(imapManager, account, inboxCopy, fromFolder = 'INBOX') {
   const accountId = account.id;
   const archiveFolder = await resolveArchiveFolder(accountId, account.folder_mappings);
   if (!archiveFolder) return { archived: false, noArchiveFolder: true };
 
   const allMail = await isAllMailFolder(accountId, archiveFolder);
-  imapManager._guardMoveUid(accountId, 'INBOX', inboxCopy.uid);
+  imapManager._guardMoveUid(accountId, fromFolder, inboxCopy.uid);
   let destGuardHeld = false;
   try {
-    const newUid = await imapManager.moveMessage(account, inboxCopy.uid, 'INBOX', archiveFolder);
+    const newUid = await imapManager.moveMessage(account, inboxCopy.uid, fromFolder, archiveFolder);
     let applied;
     if (allMail) {
-      const del = await query("DELETE FROM messages WHERE id = $1 AND folder = 'INBOX'", [inboxCopy.id]);
+      const del = await query('DELETE FROM messages WHERE id = $1 AND folder = $2', [inboxCopy.id, fromFolder]);
       applied = del.rowCount > 0;
     } else if (newUid != null) {
-      const upd = await query("UPDATE messages SET folder = $1, uid = $2 WHERE id = $3 AND folder = 'INBOX'", [archiveFolder, newUid, inboxCopy.id]);
+      const upd = await query('UPDATE messages SET folder = $1, uid = $2 WHERE id = $3 AND folder = $4', [archiveFolder, newUid, inboxCopy.id, fromFolder]);
       applied = upd.rowCount > 0;
     } else {
       imapManager._guardMoveUid(accountId, archiveFolder, inboxCopy.uid);
       destGuardHeld = true;
-      const upd = await query("UPDATE messages SET folder = $1 WHERE id = $2 AND folder = 'INBOX'", [archiveFolder, inboxCopy.id]);
+      const upd = await query('UPDATE messages SET folder = $1 WHERE id = $2 AND folder = $3', [archiveFolder, inboxCopy.id, fromFolder]);
       applied = upd.rowCount > 0;
       // Hold the destination guard for the sync that learns the real uid only when we
       // actually moved the row; a lost race releases it immediately (nothing to protect).
@@ -63,12 +66,12 @@ export async function archiveInboxCopy(imapManager, account, inboxCopy) {
     }
     if (applied) {
       // Counts: the caller has already marked the thread read, so both sides move zero unread.
-      adjustFolderCounts(accountId, 'INBOX', -1, 0);
+      adjustFolderCounts(accountId, fromFolder, -1, 0);
       if (!allMail) adjustFolderCounts(accountId, archiveFolder, 1, 0);
     }
     return { archived: applied, noArchiveFolder: false };
   } finally {
-    imapManager._unguardMoveUid(accountId, 'INBOX', inboxCopy.uid);
+    imapManager._unguardMoveUid(accountId, fromFolder, inboxCopy.uid);
     // Release the destination guard when its DB write throws before normal handoff.
     if (destGuardHeld) imapManager._unguardMoveUid(accountId, archiveFolder, inboxCopy.uid);
   }

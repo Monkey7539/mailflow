@@ -278,6 +278,26 @@
       "button": "Clasificar con IA",
       "done": "Clasificado como {{category}}",
       "error": "La clasificación con IA falló."
+    },
+    "preview": {
+      "open": "Vista previa",
+      "label": "Vista previa de {{name}}",
+      "position": "{{current}} de {{total}}",
+      "download": "Descargar",
+      "print": "Imprimir",
+      "preparingPrint": "Preparando… {{done}}/{{total}}",
+      "close": "Cerrar",
+      "zoomIn": "Acercar",
+      "zoomOut": "Alejar",
+      "fit": "Ajustar a la pantalla",
+      "previous": "Adjunto anterior",
+      "next": "Adjunto siguiente",
+      "failed": "No se pudo mostrar este archivo.",
+      "unsupported": "Este archivo no parece ser un PDF o una imagen válidos, por eso no se muestra aquí.",
+      "password": "Este PDF está protegido con contraseña. Escribe la contraseña para abrirlo.",
+      "passwordLabel": "Contraseña del PDF",
+      "passwordSubmit": "Abrir",
+      "passwordIncorrect": "Contraseña incorrecta. Inténtalo de nuevo."
     }
   },
   "messageList": {
@@ -657,6 +677,15 @@
         "label": "Marcar Delegado",
         "description": "Clasificar el mensaje seleccionado como Delegado"
       },
+      "gtdReference": {
+        "description": "Clasificar el mensaje seleccionado como Referencia"
+      },
+      "gtdSomeday": {
+        "description": "Clasificar el mensaje seleccionado como Algún día"
+      },
+      "gtdDone": {
+        "description": "Completar el mensaje GTD seleccionado"
+      },
       "toggleRightSidebar": {
         "label": "Alternar la barra lateral derecha",
         "description": "Ocultar o mostrar la barra lateral derecha"
@@ -849,6 +878,8 @@
       "smtpAuthUserPh": "Igual que el usuario de arriba",
       "smtpAuthPass": "Contraseña SMTP",
       "signatureSection": "Firma",
+      "autoRecipientsSection": "Cc y Cco automáticos",
+      "autoRecipientsDesc": "Estas direcciones se añaden como destinatarios normales, que puedes quitar, a cada mensaje nuevo, respuesta y reenvío que escribas desde esta cuenta o sus alias. Separa las direcciones con comas.",
       "saveChanges": "Guardar cambios",
       "addAccount": "Añadir cuenta",
       "saving": "Guardando…",
@@ -1164,7 +1195,7 @@
       "description": "Haz clic en un atajo para reasignarlo. Pulsa Esc para cancelar la grabación.",
       "resetAll": "Restablecer todos los valores predeterminados",
       "recording": "Pulsa una tecla…",
-      "conflict": "La tecla {{key}} ya estaba asignada a {{action}} — ha sido reasignada.",
+      "conflict": "La tecla {{key}} está asignada a varias acciones. Tiene prioridad {{action}}.",
       "resetDefault": "Restablecer predeterminado",
       "remove": "Eliminar atajo",
       "footer": "Pulsa ? en cualquier lugar de la aplicación para ver la referencia de atajos."
@@ -1761,6 +1792,7 @@
     "undoFailed": "No se pudo deshacer la etiqueta",
     "removed": "Etiqueta eliminada",
     "removeFailed": "No se pudo quitar la etiqueta",
+    "onlyCopy": "Es la única copia del mensaje, así que quitar la etiqueta lo eliminaría. Archívalo o muévelo en su lugar.",
     "done": "Marcar como hecho",
     "doneFailed": "No se pudo marcar como hecho",
     "doneArchiveFailed": "Marcado como hecho, pero falló el archivado: sigue en la bandeja de entrada",

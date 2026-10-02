@@ -36,7 +36,7 @@ If you contribute code, please read the [Contributor License Agreement](CLA.md).
 - **Attachments** — send and receive file attachments across all accounts
 - **Multiple layouts** — classic, compact, wide reader, vertical split, and more
 - **Multiple themes** — dark, light, and several color schemes; custom CSS field for per-user style overrides
-- **Multi-language UI** — English, French, Spanish, Italian, German, Russian, Simplified Chinese, Polish, Czech, and Brazilian Portuguese
+- **Multi-language UI** — English, French, Spanish, Italian, German, Russian, Simplified Chinese, Polish, Czech, Brazilian Portuguese, and Korean
 - **Full-text search** — across all connected accounts simultaneously
 - **Real-time notifications** — WebSocket-powered new-mail toasts and web push notifications
 - **PWA** — installable as a desktop or mobile app with push notification support
@@ -77,9 +77,12 @@ itself:
 - **Reference** — kept until you remove the label or mark the thread done.
 
 Label the selected thread from the keyboard — **t** for Todo, **w** for Watch,
-**d** for Delegated (all remappable in the keyboard-shortcut settings) — or from the
-context menu, which also covers Someday and Reference. Each state's folder name is
-configurable per account, and accounts with GTD off behave exactly as before.
+**d** for Delegated, **v** for Reference, **b** for Someday, and **Shift+E** for Done
+(all remappable in the keyboard-shortcut settings) — or from the context menu. Each state's folder name is
+configurable per account. Applying a GTD state preserves every member in the target before removing the
+thread's old GTD copies. Inbox and ordinary labels remain intact. A state switch
+ends pending Undo windows; an initial classification still offers Undo when supported. Accounts
+with GTD off behave exactly as before.
 
 ---
 
