@@ -1,13 +1,15 @@
-import { createHash } from 'crypto';
+import { createHmac } from 'crypto';
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { query } from './db.js';
+import { deriveKey } from './encryption.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
 import { MAILER_ID } from './mailerIdentity.js';
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const LOOP_HEADER = 'X-MailFlow-Loop';
-const MAX_FORWARD_HOPS = 10;
+// The most tokens a forward carries: its own and the newest nine it received.
+const MAX_LOOP_TOKENS = 10;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -114,11 +116,16 @@ function forwardedHeaders(row) {
 // mail it came from, and it would go round forever. Each forward carries the tokens of the
 // message it was made from plus its own mailbox's, so a mailbox that finds its own token has
 // already forwarded this mail. The token is per mailbox, not per rule or recipient, so a copy
-// that comes back cannot fan out through the mailbox's other forward rules. Hashed so the
-// header does not list every address on the way.
+// that comes back cannot fan out through the mailbox's other forward rules. It is an HMAC of
+// the address under a key derived from ENCRYPTION_KEY: a sender knows the address but not the
+// key, so cannot work out a mailbox's token to stop its rules forwarding their mail, and the
+// header does not list the addresses on the way. Only this instance recomputes its own tokens;
+// other instances' tokens are passed on as they are.
 function loopToken(account) {
-  return createHash('sha256')
-    .update(`mailflow-loop:${(account.email_address || '').trim().toLowerCase()}`)
+  const key = deriveKey('rule-forward-loop');
+  if (!key) throw new Error('ENCRYPTION_KEY is not set or invalid — cannot make the forward loop token');
+  return createHmac('sha256', key)
+    .update((account.email_address || '').trim().toLowerCase())
     .digest('hex')
     .slice(0, 16);
 }
@@ -159,7 +166,12 @@ export function buildForwardMessage({
     // same strict outbound filters, and it is the mail most shaped like the relaying a
     // botnet heuristic looks for.
     xMailer: MAILER_ID,
-    headers: { [LOOP_HEADER]: [...loopTokens, loopToken(account)].join(', ') },
+    // The newest nine received tokens and this mailbox's: the header stays short, and tokens a
+    // sender adds are pushed out instead of stopping the forward. A loop through up to ten
+    // mailboxes is still caught; one through more is not.
+    headers: {
+      [LOOP_HEADER]: [...loopTokens.slice(-(MAX_LOOP_TOKENS - 1)), loopToken(account)].join(', '),
+    },
     subject: forwardSubject(row.subject),
     text: `${forwardHeaderText}\n\n${plainBody}`,
     ...(safeHtml ? { html: `${forwardHeaderHtml}${safeHtml}` } : {}),
@@ -266,10 +278,7 @@ export async function forwardRuleMessage({
   recipient,
 }) {
   const loopTokens = receivedLoopTokens(message);
-  if (
-    loopTokens.includes(loopToken(account)) ||
-    loopTokens.length >= MAX_FORWARD_HOPS
-  ) {
+  if (loopTokens.includes(loopToken(account))) {
     console.warn(
       `ruleForwarder: rule ${ruleId} did not forward message ${message.id}: forwarding loop detected`
     );
