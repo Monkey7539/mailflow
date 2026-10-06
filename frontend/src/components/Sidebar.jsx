@@ -8,6 +8,7 @@ import { folderDisplayName } from '../utils/folderDisplay.js';
 import {
   activateOnKey,
   buildFolderTree,
+  subtreeUnread,
   collapsedTooltip,
   FOLDER_ORDER_DRAG_TYPE,
   folderDropPosition,
@@ -1506,11 +1507,16 @@ export default function Sidebar() {
                             <button onClick={() => setRenamingFolder(null)} style={{ background: 'var(--bg-tertiary)', border: 'none', borderRadius: 4, color: 'var(--text-secondary)', padding: '2px 6px', cursor: 'pointer', fontSize: 11 }}>✕</button>
                           </div>
                         ) : (
-                          !folder.no_select && (() => {
-                            const b = unreadBadge({ count: folder.unread_count, known: folder.counts_known !== false,
-                              stale: folder.counts_stale, observedAt: folder.server_counts_at });
+                          (() => {
+                            // Collapsed with subfolders: the total including them (#536).
+                            const rolledUp = hasChildren && !isExpanded;
+                            if (folder.no_select && !rolledUp) return null;
+                            const b = rolledUp
+                              ? unreadBadge(subtreeUnread(node, path => accountHiddenPaths.includes(path)))
+                              : unreadBadge({ count: folder.unread_count, known: folder.counts_known !== false,
+                                stale: folder.counts_stale, observedAt: folder.server_counts_at });
                             return b && (
-                              <span title={b.title} style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8, flexShrink: 0 }}>
+                              <span title={rolledUp ? `${b.title}, including subfolders` : b.title} style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8, flexShrink: 0 }}>
                                 {b.text}
                               </span>
                             );

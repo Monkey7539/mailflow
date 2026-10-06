@@ -15,7 +15,7 @@ import { BUILTIN_SUMMARIZE } from '../aiActions.js';
 import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
 import MessageBodyView from './MessageBodyView.jsx';
 import { copyToClipboard } from '../utils/clipboard.js';
-import { folderMatchesQuery, favoriteMoveTargets } from '../utils/folderDisplay.js';
+import { folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import SpamBadge from './SpamBadge.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
@@ -1084,10 +1084,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   }, [showMovePicker]);
 
   const recentForMove = message
-    ? recentFolders
-        .filter(r => r.accountId === message.account_id && r.path !== message.folder)
-        .map(r => movePickerFolders.find(f => f.path === r.path))
-        .filter(Boolean)
+    ? recentMoveTargets(recentFolders, movePickerFolders, {
+        accountId: message.account_id, currentFolder: message.folder,
+      })
     : [];
   const favoritesForMove = message
     ? favoriteMoveTargets(favoriteFolders, movePickerFolders, {

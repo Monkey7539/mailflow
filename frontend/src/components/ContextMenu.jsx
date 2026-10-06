@@ -8,7 +8,7 @@ import { downloadEml } from '../utils/downloadEml.js';
 import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
-import { folderMatchesQuery, favoriteMoveTargets } from '../utils/folderDisplay.js';
+import { folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { useMobile } from '../hooks/useMobile.js';
 
@@ -664,10 +664,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                     </>
                   );
                 }
-                const recentForAccount = recentFolders
-                  .filter(r => r.accountId === message.account_id && r.path !== message.folder)
-                  .map(r => (moveFolders || []).find(f => f.path === r.path))
-                  .filter(Boolean);
+                const recentForAccount = recentMoveTargets(recentFolders, moveFolders, {
+                  accountId: message.account_id, currentFolder: message.folder,
+                });
                 const favoritesForAccount = favoriteMoveTargets(favoriteFolders, moveFolders, {
                   accountId: message.account_id, currentFolder: message.folder, exclude: recentForAccount,
                 });

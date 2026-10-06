@@ -25,7 +25,7 @@ import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
-import { folderDisplayName, folderMatchesQuery } from '../utils/folderDisplay.js';
+import { folderDisplayName, folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
 import SpamBadge from './SpamBadge.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
@@ -127,7 +127,7 @@ export default function MessageList() {
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
     swipeActions,
-    folders, favoriteFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
+    folders, favoriteFolders, recentFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
     searchAllFolders, setSearchAllFolders,
@@ -3699,38 +3699,56 @@ export default function MessageList() {
                         const q = pickerSearch.trim().toLowerCase();
                         const displayed = pickerFolders
                           .filter(f => f.path !== selectedFolder && (!q || folderMatchesQuery(f, q)));
+                        // Recent and favorite targets above the full list, as in the single-message
+                        // pickers (#551). The bulk picker only opens for one account's messages.
+                        const target = { accountId: selectedMsgs[0]?.account_id, currentFolder: selectedFolder };
+                        const recent = q ? [] : recentMoveTargets(recentFolders, pickerFolders, target);
+                        const favorites = q ? [] : favoriteMoveTargets(favoriteFolders, pickerFolders, { ...target, exclude: recent });
+                        const heading = label => (
+                          <div style={{ padding: '8px 12px 4px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                            {label}
+                          </div>
+                        );
+                        const divider = <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />;
+                        const item = (f, key) => (
+                          <button
+                            key={key}
+                            onClick={() => handleBulkMove([...selectedIds], selectedMsgs, f.path)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 8,
+                              width: '100%', padding: '8px 12px',
+                              background: 'none', border: 'none',
+                              color: 'var(--text-primary)', fontSize: 13,
+                              cursor: 'pointer', textAlign: 'left',
+                              transition: 'background 0.1s',
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
+                            onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                          >
+                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                              <FolderIcon specialUse={f.special_use} />
+                            </span>
+                            <FolderPathLabel folder={f} label={f.favoriteLabel} />
+                          </button>
+                        );
                         return displayed.length === 0 ? (
                           <div style={{ padding: '12px 12px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                             {t('contextMenu.folders.empty')}
                           </div>
                         ) : (
                           <>
-                            {!q && (
-                              <div style={{ padding: '8px 12px 4px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                {t('messageList.moveToFolder')}
-                              </div>
-                            )}
-                            {displayed.map(f => (
-                              <button
-                                key={f.path}
-                                onClick={() => handleBulkMove([...selectedIds], selectedMsgs, f.path)}
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: 8,
-                                  width: '100%', padding: '8px 12px',
-                                  background: 'none', border: 'none',
-                                  color: 'var(--text-primary)', fontSize: 13,
-                                  cursor: 'pointer', textAlign: 'left',
-                                  transition: 'background 0.1s',
-                                }}
-                                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-                                onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                              >
-                                <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                                  <FolderIcon specialUse={f.special_use} />
-                                </span>
-                                <FolderPathLabel folder={f} />
-                              </button>
-                            ))}
+                            {recent.length > 0 && (<>
+                              {heading(t('contextMenu.folders.recent'))}
+                              {recent.map(f => item(f, `recent-${f.path}`))}
+                              {divider}
+                            </>)}
+                            {favorites.length > 0 && (<>
+                              {heading(t('contextMenu.folders.favorites'))}
+                              {favorites.map(f => item(f, `fav-${f.path}`))}
+                              {divider}
+                            </>)}
+                            {!q && heading(t('messageList.moveToFolder'))}
+                            {displayed.map(f => item(f, f.path))}
                           </>
                         );
                       })()}
@@ -3794,13 +3812,17 @@ export default function MessageList() {
                         const q = pickerSearch.trim().toLowerCase();
                         const displayed = pickerFolders
                           .filter(f => f.path !== selectedFolder && (!q || folderMatchesQuery(f, q)));
-                        return displayed.length === 0 ? (
-                          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                            {t('contextMenu.folders.empty')}
+                        const target = { accountId: selectedMsgs[0]?.account_id, currentFolder: selectedFolder };
+                        const recent = q ? [] : recentMoveTargets(recentFolders, pickerFolders, target);
+                        const favorites = q ? [] : favoriteMoveTargets(favoriteFolders, pickerFolders, { ...target, exclude: recent });
+                        const heading = label => (
+                          <div style={{ padding: '12px 20px 6px', fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-subtle)' }}>
+                            {label}
                           </div>
-                        ) : displayed.map(f => (
+                        );
+                        const item = (f, key) => (
                           <button
-                            key={f.path}
+                            key={key}
                             onClick={() => { handleBulkMove([...selectedIds], selectedMsgs, f.path); setShowFolderPicker(false); }}
                             style={{
                               display: 'flex', alignItems: 'center', gap: 14,
@@ -3815,9 +3837,29 @@ export default function MessageList() {
                             <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
                               <FolderIcon specialUse={f.special_use} />
                             </span>
-                            <FolderPathLabel folder={f} />
+                            <FolderPathLabel folder={f} label={f.favoriteLabel} />
                           </button>
-                        ));
+                        );
+                        if (displayed.length === 0) {
+                          return (
+                            <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
+                              {t('contextMenu.folders.empty')}
+                            </div>
+                          );
+                        }
+                        const sectioned = recent.length > 0 || favorites.length > 0;
+                        return (<>
+                          {recent.length > 0 && (<>
+                            {heading(t('contextMenu.folders.recent'))}
+                            {recent.map(f => item(f, `recent-${f.path}`))}
+                          </>)}
+                          {favorites.length > 0 && (<>
+                            {heading(t('contextMenu.folders.favorites'))}
+                            {favorites.map(f => item(f, `fav-${f.path}`))}
+                          </>)}
+                          {sectioned && heading(t('messageList.foldersHeading'))}
+                          {displayed.map(f => item(f, f.path))}
+                        </>);
                       })()}
                     </div>
                   </div>

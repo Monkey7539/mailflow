@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { resolveConversationMode, groupsMessageList, conversationModeTransition, isConversationMode } from '../utils/conversationMode.js';
 import { api } from '../utils/api.js';
+import { signOut as signOutAndLeave } from '../utils/signOut.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
 import { aiRuns } from '../utils/aiRunRegistry.js';
@@ -145,30 +146,20 @@ export const useStore = create((set, get) => ({
   },
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
   // The sidebar and the lock screen both sign out through here.
+  // The sidebar and the lock screen sign out here, through the shared helper (#523, #310).
   signOut: async () => {
-    // The logout response may carry an OIDC end-session URL when the account signed in
-    // through a provider with RP-initiated logout enabled; navigating there also clears
-    // the upstream SSO session. Falls back to /login otherwise. (#310)
-    const res = await api.logout().catch(() => null);
-    // Appearance/localization prefs (theme, font, layout, language) are deliberately
-    // NOT cleared: keeping them means the login screen and the next visit retain the
-    // last-used look instead of snapping back to the default dark theme (issue #208).
-    // They are re-synced from the account's server-side preferences after login.
-    // The keys below are mailbox/session state that can reference the previous user's
-    // accounts or folders, so they are cleared on sign-out.
-    [
-      'mailflow_notification_sound', 'mailflow_custom_sound', 'mailflow_custom_sound_name',
-      'mailflow_page_size', 'mailflow_scroll_mode', 'mailflow_sync_interval',
-      'mailflow_threaded_view', 'mailflow_plaintext_email',
-      'mailflow_hover_quick_actions', 'mailflow_swipe_actions',
-      'mailflow_expanded_accounts', 'mailflow_collapsed_folders',
-      'mailflow_locked_message',
-    ].forEach(k => localStorage.removeItem(k));
-    get().setUser(null);
-    // If the sign-out failed, the session may still be alive, and unlocked if the lock request
-    // failed too. Keep the lock then, so the next load sends it again.
-    if (res) get().setLocked(false);
-    window.location.href = res?.endSessionUrl || '/login';
+    localStorage.removeItem('mailflow_locked_message');
+    let loggedOut = false;
+    await signOutAndLeave({
+      setUser: get().setUser,
+      logout: async () => { const res = await api.logout(); loggedOut = true; return res; },
+      navigate: (url) => {
+        // If the sign-out failed, the session may still be alive, and unlocked if the lock
+        // request failed too. Keep the lock then, so the next load sends it again.
+        if (loggedOut) get().setLocked(false);
+        window.location.href = url;
+      },
+    });
   },
 
   // Plugin activation — the per-user set of activated plugin ids (users.preferences.enabledPlugins).

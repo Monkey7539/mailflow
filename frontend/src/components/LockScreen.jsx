@@ -11,6 +11,8 @@ export default function LockScreen() {
   const [unlocking, setUnlocking] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
+  // The same sign-out as the sidebar's: it clears this user's mailbox state and follows the
+  // SSO end-session URL when there is one, which this screen used to drop (#523).
   function handleSignOut() {
     setSigningOut(true);
     signOut();
