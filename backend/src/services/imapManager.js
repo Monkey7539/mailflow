@@ -540,6 +540,17 @@ const BIDI_OVERRIDE_RE = new RegExp(
   'g'
 );
 
+// The attachment list from the BODYSTRUCTURE sync fetches for every new message, without any body
+// part. It is the walk fetchMessageBody runs, so opening the message later stores the same list.
+// New mail is classified for spam at insert, before any body is fetched, and with the list left
+// empty the attachment rules and flags never saw a file (#457).
+export function attachmentsFromStructure(msg) {
+  if (!msg?.bodyStructure) return [];
+  const results = { textParts: [], attachments: [] };
+  walkStructure(msg.bodyStructure, results);
+  return results.attachments;
+}
+
 // Extract html/text/attachments from an already-fetched msg (no extra IMAP round-trip)
 export function extractBodyFromMsg(msg) {
   if (!msg.bodyStructure) return { html: null, text: null, attachments: [] };
@@ -3949,7 +3960,7 @@ export class ImapManager {
               console.warn(`Message sync skipped: IMAP FETCH returned no UID for ${account.email}/${folder}`);
               return;
             }
-            let safeHtml = null, text = null, atts = [];
+            let safeHtml = null, text = null, atts = attachmentsFromStructure(msg);
             if (prefetchBody && provider.fetchBody) {
               const body = extractBodyFromMsg(msg);
               safeHtml = body.html ? sanitizeEmail(body.html) : null;
@@ -4683,7 +4694,7 @@ export class ImapManager {
                   console.warn(`Backfill skipped: IMAP FETCH returned no UID for ${account.email}/${folder}`);
                   continue;
                 }
-                let safeHtml = null, bodyText = null, atts = [];
+                let safeHtml = null, bodyText = null, atts = attachmentsFromStructure(msg);
 
                 if (cfg.fetchBody) {
                   const body = extractBodyFromMsg(msg);

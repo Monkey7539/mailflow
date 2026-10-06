@@ -20,9 +20,10 @@ import {
 } from '../utils/gtd.js';
 import { formatDate } from '../utils/formatDate.js';
 import { advanceSelectionAfterRemoval } from '../utils/listSelection.js';
-import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
+import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkReadFor } from '../utils/markRead.js';
+import { saveSenderCategory } from '../utils/senderCategory.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { folderDisplayName, folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
@@ -2237,6 +2238,9 @@ export default function MessageList() {
           getMessageBody: api.getMessageBody,
         });
         break;
+      case 'forwardAsAttachment':
+        openForwardAsAttachmentFromMessage(message, { openCompose });
+        break;
       case 'bulkSelect':
         setSelectedIds(new Set([message.id]));
         break;
@@ -2426,21 +2430,38 @@ export default function MessageList() {
         break;
       }
       case 'setCategory': {
+        // Stored as chosen, 'primary' included, as the server does (#489).
         const newCategory = data || 'primary';
-        const dbCategory = newCategory === 'primary' ? null : newCategory;
         try {
           await api.setMessageCategory(message.id, newCategory);
           const inFilteredView = categorizationActive && activeCategory && activeCategory !== (newCategory || 'primary');
           if (inFilteredView) {
             removeMessage(message.id);
           } else {
-            updateMessage(message.id, { category: dbCategory });
+            updateMessage(message.id, { category: newCategory });
           }
           // Refresh category counts badge
           const countParams = selectedAccountId ? { accountId: selectedAccountId } : {};
           api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
         } catch (err) {
           console.error('setCategory failed:', err?.message);
+        }
+        break;
+      }
+      case 'setCategoryAlways': {
+        // "Always for this sender/domain" (#490): every loaded inbox message from that sender moves
+        // with it, and leaves a category tab it no longer belongs to.
+        const category = data?.category;
+        const saved = await saveSenderCategory(message, data?.scope, category, {
+          t, api, getState: useStore.getState,
+          onMatch: loaded => {
+            if (categorizationActive && activeCategory && activeCategory !== category) removeMessage(loaded.id);
+            else updateMessage(loaded.id, { category });
+          },
+        });
+        if (saved) {
+          const countParams = selectedAccountId ? { accountId: selectedAccountId } : {};
+          api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
         }
         break;
       }

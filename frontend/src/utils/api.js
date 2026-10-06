@@ -474,6 +474,8 @@ export const api = {
 
   // Manual category override for a single message
   setMessageCategory: (id, category) => request('PATCH', `/mail/messages/${id}/category`, { category }),
+  // "Always for this sender/domain" (#490): saves a set_category rule and recategorizes that sender's inbox mail.
+  setSenderCategory: (messageId, scope, category, name) => request('POST', '/rules/sender-category', { messageId, scope, category, name }),
 
   // Trigger unsubscribe for a newsletter message
   unsubscribeMessage: (id) => request('POST', `/mail/messages/${id}/unsubscribe`),

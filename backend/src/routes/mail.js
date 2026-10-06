@@ -2527,6 +2527,10 @@ router.patch('/messages/:id/category', async (req, res) => {
     return res.status(400).json({ error: 'Invalid category' });
   }
 
+  // A chosen category is stored as itself, 'primary' included. NULL means "not chosen": the
+  // ingest classifier leaves Primary that way, and the Recategorize backfill (which reads only
+  // NULL rows) and a re-synced row (COALESCE onto NULL) may still fill it in. Storing a chosen
+  // Primary as NULL let either one move the message back out of Primary (#489).
   const result = await query(
     `UPDATE messages SET category = $1
      FROM email_accounts a
@@ -2534,7 +2538,7 @@ router.patch('/messages/:id/category', async (req, res) => {
        AND messages.account_id = a.id
        AND a.user_id = $3
      RETURNING messages.id`,
-    [category === 'primary' ? null : category, id, req.session.userId]
+    [category, id, req.session.userId]
   );
   if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
   res.json({ ok: true, category });
