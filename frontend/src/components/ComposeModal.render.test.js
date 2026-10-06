@@ -381,6 +381,20 @@ describe('automatic Cc and Bcc (#491)', () => {
     } finally { await close(); }
   });
 
+  test('a message reopened by undo send keeps the Cc and Bcc it was sent with', async () => {
+    const accounts = [account('acct', { bcc: [ME] })];
+    const fresh = await mountCompose({}, { accounts });
+    try {
+      assert.deepEqual(chips('compose.bcc'), [ME], 'a new message from the account gets it');
+    } finally { await fresh(); }
+
+    // Sent without the automatic Bcc (the user removed it), then undone. No draft was saved.
+    const close = await mountCompose({ accountId: 'acct', to: ['x@example.invalid'], cc: [], bcc: [], subject: 'Plan', body: '<p>Plan</p>', restored: true }, { accounts });
+    try {
+      assert.equal(chips('compose.bcc'), null, 'the removed automatic Bcc does not come back');
+    } finally { await close(); }
+  });
+
   test('switching From before any save swaps only the automatic addresses', async () => {
     const accounts = [account('A', { bcc: ['a@example.invalid'] }), account('B', { bcc: ['b@example.invalid'] })];
     const close = await mountCompose({ to: ['x@example.invalid'], bcc: ['u@example.invalid'] }, { accounts });
@@ -620,6 +634,185 @@ describe('automatic Cc and Bcc (#491)', () => {
   });
 });
 
+describe('undo send', () => {
+  // Mounted the way MailApp mounts it, so closing the composer unmounts it and reopening it
+  // mounts a fresh one from the store's composeData.
+  const Host = () => (useStore(s => s.composing) ? React.createElement(ComposeModal) : null);
+  const posted = [];
+  const deleted = [];
+  const cancels = [];
+  let unmount;
+  before(async () => {
+    useStore.setState({
+      plaintextEmail: false,
+      notifications: [],
+      accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
+    });
+    api.post = async (path, payload) => {
+      posted.push({ path, payload });
+      return { ok: true, pending: true, pendingId: 'p1', sendAt: new Date(Date.now() + 10_000).toISOString(), remainingMs: 9_500 };
+    };
+    api.deleteDraft = async (...args) => { deleted.push(args); return { ok: true }; };
+    api.cancelSend = async (id) => { cancels.push(id); return { cancelled: true }; };
+    api.getSendStatus = async () => ({ status: 'pending' });
+    useStore.getState().openCompose({
+      accountId: 'acct',
+      draftUid: 7,
+      draftFolder: 'Drafts',
+      to: ['Bob <bob@example.invalid>'],
+      cc: [],
+      subject: 'Contract',
+      body: '<p>Here it is.</p>',
+      attachments: [{ name: 'contract.pdf', size: 3, type: 'application/pdf', data: 'QUJD' }],
+      priority: 'high',
+    });
+    const root = createRoot(document.getElementById('root'));
+    await React.act(async () => { root.render(React.createElement(Host)); });
+    await React.act(async () => {});
+    unmount = () => React.act(async () => root.unmount());
+  });
+  after(() => unmount());
+
+  test('Send hands the message to the server with an undo window and closes the composer', async () => {
+    const send = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'compose.send');
+    await React.act(async () => { send.click(); });
+    await React.act(async () => {});
+    assert.equal(posted.length, 1);
+    const { payload } = posted[0];
+    assert.equal(payload.undoSeconds, 10);
+    assert.deepEqual(payload.draft, { uid: 7, folder: 'Drafts', accountId: 'acct' });
+    assert.equal(payload.attachments[0].filename, 'contract.pdf');
+    assert.equal(payload.priority, 'high');
+    assert.equal(useStore.getState().composing, false);
+    assert.deepEqual(deleted, [], 'the draft stays until the server has delivered the message');
+    const bar = useStore.getState().notifications.find(n => n.onUndo);
+    assert.equal(bar.title, 'compose.undoSend.sending', 'the bar names the message (its subject)');
+    assert.equal(bar.undoMs, 9_500, 'Undo lasts what the server said was left');
+  });
+
+  test('Undo gives the message back as it was sent, attachments included', async () => {
+    const bar = useStore.getState().notifications.find(n => n.onUndo);
+    await React.act(async () => { await bar.onUndo(); });
+    await React.act(async () => {});
+    assert.deepEqual(cancels, ['p1']);
+    assert.equal(useStore.getState().composing, true);
+    const data = useStore.getState().composeData;
+    assert.equal(data.subject, 'Contract');
+    assert.deepEqual(data.to, ['Bob <bob@example.invalid>']);
+    assert.equal(data.priority, 'high');
+    assert.equal(data.draftUid, 7);
+    assert.match(document.body.textContent, /contract\.pdf/, 'the attachment is back in the composer');
+    assert.match(document.querySelector('.ProseMirror').editor.getHTML(), /Here it is\./);
+  });
+
+  test('the reopened message counts as unsaved, so its draft is brought up to date', async () => {
+    saved.length = 0;
+    await hideTab();
+    assert.equal(saved.length, 1, 'saved although nothing was typed since it reopened');
+    assert.equal(saved[0].existingUid, 7);
+    assert.equal(saved[0].subject, 'Contract');
+  });
+
+  test('a server without undo send delivers at once, and the draft is deleted from here', async () => {
+    posted.length = 0;
+    api.post = async (path, payload) => { posted.push({ path, payload }); return { ok: true }; };
+    const send = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'compose.send');
+    await React.act(async () => { send.click(); });
+    await React.act(async () => {});
+    assert.equal(useStore.getState().composing, false);
+    assert.deepEqual(deleted, [['acct', 8, 'Drafts']], 'the copy saved after the undo');
+    assert.equal(useStore.getState().notifications[0].title, 'compose.sent.title');
+  });
+});
+
+describe('undo send, message without attachments', () => {
+  // With nothing to set it apart from its draft, only being a reopened message keeps it from
+  // looking saved: closing it would then drop whatever was typed after the last autosave.
+  const Host = () => (useStore(s => s.composing) ? React.createElement(ComposeModal) : null);
+  let unmount;
+  before(async () => {
+    useStore.setState({ plaintextEmail: false, notifications: [] });
+    api.post = async () => ({ ok: true, pending: true, pendingId: 'p2', sendAt: new Date(Date.now() + 10_000).toISOString() });
+    api.cancelSend = async () => ({ cancelled: true });
+    useStore.getState().openCompose({
+      accountId: 'acct', draftUid: 9, draftFolder: 'Drafts',
+      to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Plan', body: '<p>Typed after the last autosave.</p>',
+    });
+    const root = createRoot(document.getElementById('root'));
+    await React.act(async () => { root.render(React.createElement(Host)); });
+    await React.act(async () => {});
+    unmount = () => React.act(async () => root.unmount());
+  });
+  after(() => unmount());
+
+  test('the reopened message still counts as unsaved', async () => {
+    const send = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'compose.send');
+    await React.act(async () => { send.click(); });
+    await React.act(async () => {});
+    const bar = useStore.getState().notifications.find(n => n.onUndo);
+    await React.act(async () => { await bar.onUndo(); });
+    await React.act(async () => {});
+    saved.length = 0;
+    await hideTab();
+    assert.equal(saved.length, 1, 'saved although nothing was typed since it reopened');
+    assert.equal(saved[0].existingUid, 9);
+    assert.match(saved[0].body, /Typed after the last autosave\./);
+  });
+});
+
+describe('undo send while another message is being written', () => {
+  // Keyed the way MailApp keys it.
+  const Host = () => {
+    const composing = useStore(s => s.composing);
+    const session = useStore(s => s.composeSession);
+    return composing ? React.createElement(ComposeModal, { key: session }) : null;
+  };
+  let unmount;
+  let next = 0;
+  before(async () => {
+    useStore.setState({ plaintextEmail: false, notifications: [], composing: false, composeData: null });
+    api.post = async () => ({ ok: true, pending: true, pendingId: `p-${++next}`, sendAt: new Date(Date.now() + 10_000).toISOString(), remainingMs: 10_000 });
+    api.cancelSend = async () => ({ cancelled: true });
+    const root = createRoot(document.getElementById('root'));
+    await React.act(async () => { root.render(React.createElement(Host)); });
+    unmount = () => React.act(async () => root.unmount());
+  });
+  after(async () => {
+    // Signing out stops following the held sends, as it must for the next user of the tab.
+    await React.act(async () => { useStore.setState({ user: { id: 'someone-else' } }); });
+    assert.equal(useStore.getState().notifications.some(n => n.heldSendId), false, 'no Undo bar is left behind');
+    await unmount();
+  });
+
+  const subjectField = () => document.querySelector('input[placeholder="compose.subject"]');
+  const sendButton = () => [...document.querySelectorAll('button')].find(b => /compose\.(send|sending)$/.test(b.textContent.trim()));
+  async function write(subject) {
+    await React.act(async () => {
+      useStore.getState().openCompose({ accountId: 'acct', to: ['Bob <bob@example.invalid>'], cc: [], subject, body: `<p>${subject} body</p>` });
+    });
+    await React.act(async () => {});
+  }
+  async function send() {
+    await React.act(async () => { sendButton().click(); });
+    await React.act(async () => {});
+  }
+
+  test('the undone message opens as itself once the open one is sent', async () => {
+    await write('Plan A');
+    await send();
+    const undoA = useStore.getState().notifications.find(n => n.onUndo);
+    await write('Plan B');
+    await React.act(async () => { await undoA.onUndo(); });
+    assert.equal(subjectField().value, 'Plan B', 'the message being written is left alone');
+
+    await send();
+    assert.equal(useStore.getState().composeData.subject, 'Plan A');
+    assert.equal(subjectField().value, 'Plan A', 'the screen shows the reopened message, not the one just sent');
+    assert.equal(sendButton().textContent.trim(), 'compose.send', 'and it can be sent again');
+    assert.equal(sendButton().disabled, false);
+  });
+});
+
 describe('sending or discarding while a draft save is still running', () => {
   // Send and Discard delete the draft copy as the composer closes. A save that returns after
   // that has appended a newer copy, and unless they wait for it, that copy stays in Drafts: a
@@ -642,6 +835,7 @@ describe('sending or discarding while a draft save is still running', () => {
     calls = { saved: [], sent: [], deleted: [] };
     useStore.setState({
       plaintextEmail: false,
+      notifications: [],
       accounts: [{ id: 'acct', enabled: true, email_address: 'me@example.invalid', name: 'Me', color: '#fff' }],
     });
     useStore.getState().openCompose({
@@ -681,9 +875,22 @@ describe('sending or discarding while a draft save is still running', () => {
 
   const clickSend = () => click(b => b.textContent.includes('compose.send'));
   const composerOpen = () => document.querySelector('.ProseMirror') != null;
+  // What a server with undo send answers: held, with the undo window still to run. The composer
+  // hands api.cancelSend to the held send when Send is pressed, so set it before that.
+  const held = (pendingId) => ({ ok: true, pending: true, pendingId, sendAt: new Date(Date.now() + 10_000).toISOString(), remainingMs: 9_000 });
+  async function undoHeld(pendingId) {
+    const bar = useStore.getState().notifications.find(n => n.heldSendId === pendingId);
+    assert.ok(bar, 'the held send offers Undo');
+    await React.act(async () => { await bar.onUndo(); });
+    await React.act(async () => {});
+  }
 
   before(() => {
-    Object.assign(original, { saveDraft: api.saveDraft, post: api.post, deleteDraft: api.deleteDraft });
+    Object.assign(original, {
+      saveDraft: api.saveDraft, post: api.post, deleteDraft: api.deleteDraft,
+      cancelSend: api.cancelSend, getSendStatus: api.getSendStatus,
+    });
+    api.getSendStatus = async () => ({ status: 'pending' });
     api.saveDraft = (payload) => { calls.saved.push(payload); pendingSave = deferred(); return pendingSave.promise; };
     api.post = (path) => { calls.sent.push(path); pendingSend = deferred(); return pendingSend.promise; };
     api.deleteDraft = async (...args) => { calls.deleted.push(args); return { ok: true }; };
@@ -799,5 +1006,67 @@ describe('sending or discarding while a draft save is still running', () => {
       await close();
       window.innerWidth = width;
     }
+  });
+  // With undo send the server holds the message and deletes the copy the request named once it
+  // is delivered. A save still running at Send appends a newer copy after the request was built.
+  test('a held Send deletes the copy a save appends, once the message is delivered', async () => {
+    const close = await open({ draftUid: 7, draftFolder: 'Drafts' });
+    try {
+      // Undo will come too late: the server has delivered the message, as a poll would also learn.
+      api.cancelSend = async () => ({ status: 'sent', result: { ok: true, sentFolder: 'Sent' } });
+      const editor = await editAndAutosave();
+      await clickSend();
+      await React.act(async () => { pendingSend.resolve(held('h1')); });
+      assert.equal(composerOpen(), false, 'precondition: the send closed the composer');
+      await waitForDestroy(editor);
+      await React.act(async () => { pendingSave.resolve({ uid: 9, folder: 'Drafts' }); });
+      assert.deepEqual(calls.deleted, [], 'nothing is deleted while the send can still be undone');
+      await undoHeld('h1');
+      assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']], 'the server deletes uid 7, which the request named; uid 9 must not stay in Drafts');
+    } finally { await close(); }
+  });
+
+  test('a held Send with no save running leaves the draft it named to the server', async () => {
+    const close = await open({ draftUid: 7, draftFolder: 'Drafts' });
+    try {
+      api.cancelSend = async () => ({ status: 'sent', result: { ok: true, sentFolder: 'Sent' } });
+      await clickSend();
+      await React.act(async () => { pendingSend.resolve(held('h2')); });
+      await undoHeld('h2');
+      assert.deepEqual(calls.saved, []);
+      assert.deepEqual(calls.deleted, [], 'the server deletes uid 7 itself once the message is delivered');
+    } finally { await close(); }
+  });
+
+  test('Undo reopens the copy a save appended after Send, not the one it replaced', async () => {
+    const close = await open({ draftUid: 7, draftFolder: 'Drafts' });
+    try {
+      api.cancelSend = async () => ({ cancelled: true });
+      const editor = await editAndAutosave();
+      await clickSend();
+      await React.act(async () => { pendingSend.resolve(held('h3')); });
+      await waitForDestroy(editor);
+      await React.act(async () => { pendingSave.resolve({ uid: 9, folder: 'Drafts' }); });
+      await undoHeld('h3');
+      assert.equal(composerOpen(), true, 'the message is back in the composer');
+      assert.equal(useStore.getState().composeData.draftUid, 9, 'its next save replaces uid 9 rather than leaving it as a second copy');
+      assert.deepEqual(calls.deleted, []);
+    } finally {
+      await close();
+      useStore.getState().closeCompose();
+    }
+  });
+
+  test('Discard on a message given back by undo deletes its draft from the account it names', async () => {
+    // A message reopened after undo send names its draft's account, which need not be the
+    // account it is sent from.
+    const close = await open({ draftUid: 7, draftFolder: 'Drafts', draftAccountId: 'acct-old', restored: true });
+    try {
+      await click(b => b.title === 'compose.toolbar.close');
+      await click(b => b.textContent === 'compose.closeDraft.discard');
+      assert.equal(composerOpen(), false, 'precondition: discarding closed the composer');
+      await React.act(async () => {});
+      assert.deepEqual(calls.deleted, [['acct-old', 7, 'Drafts']]);
+    } finally { await close(); }
   });
 });
