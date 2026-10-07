@@ -14,7 +14,7 @@ vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./spamPipeline.js', () => ({ classifyAndTagMessage: vi.fn() }));
 vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }));
 
-import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId } from './imapManager.js';
+import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -4604,5 +4604,28 @@ describe('closeSockets', () => {
     Object.assign(sockets.authenticating, { userId: 'u1', sessionId: 's1' });
     await nextTurn();
     expect(sockets.authenticating.close).toHaveBeenCalledWith(1008, 'Unauthorized');
+  });
+});
+
+describe('attachmentsFromStructure (#457)', () => {
+  it('lists the attachments from BODYSTRUCTURE alone, as fetchMessageBody stores them, without inline images', () => {
+    const msg = { bodyStructure: { type: 'multipart/mixed', childNodes: [
+      { part: '1', type: 'text/plain', parameters: { charset: 'utf-8' } },
+      { part: '2', type: 'image/png', id: '<logo@x>', disposition: 'inline' },
+      { part: '3', type: 'application/vnd.ms-excel.sheet.macroEnabled.12', disposition: 'attachment',
+        dispositionParameters: { filename: 'budget.xlsm' }, size: 1234, encoding: 'base64' },
+    ] } };
+    const out = attachmentsFromStructure(msg);
+    expect(out.map(a => [a.part, a.filename, a.type])).toEqual([
+      ['3', 'budget.xlsm', 'application/vnd.ms-excel.sheet.macroEnabled.12'],
+    ]);
+    const fetchShape = { textParts: [], attachments: [] };
+    walkStructure(msg.bodyStructure, fetchShape);
+    expect(out).toEqual(fetchShape.attachments);
+  });
+
+  it('is empty without a structure', () => {
+    expect(attachmentsFromStructure({})).toEqual([]);
+    expect(attachmentsFromStructure(null)).toEqual([]);
   });
 });

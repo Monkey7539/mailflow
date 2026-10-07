@@ -16,6 +16,7 @@ import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { holdSend, cancelSend, getSendStatus } from '../services/sendHold.js';
 import { deleteSentDraft } from './draft.js';
+import { truncateFilename, safeFilename } from '../utils/contentDisposition.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -138,7 +139,7 @@ const remainingUntil = sendAt => Math.max(0, Date.parse(sendAt) - Date.now());
 const MAX_UNDO_SECONDS = 30;
 
 router.post('/send', async (req, res) => {
-  const { accountId, aliasId, to, cc = [], bcc = [], subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, priority, undoSeconds, draft } = req.body;
+  const { accountId, aliasId, to, cc = [], bcc = [], subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, inReplyTo, references, attachments, editedSignature, forwardedAttachments, forwardedMessages, priority, undoSeconds, draft } = req.body;
   const userId = req.session.userId;
   // With an undo window, delivery waits that long on the server (services/sendHold.js).
   // Everything that can fail on the input still runs now, so those errors surface at once.
@@ -196,6 +197,16 @@ router.post('/send', async (req, res) => {
     for (const [i, fa] of forwardedAttachments.entries()) {
       if (typeof fa.messageId !== 'string' || !UUID_RE.test(fa.messageId)) return res.status(400).json({ error: `forwardedAttachments[${i}].messageId is invalid` });
       if (typeof fa.part !== 'string' || !fa.part.trim()) return res.status(400).json({ error: `forwardedAttachments[${i}].part is required` });
+    }
+  }
+
+  // Whole messages forwarded as attachments ("Forward as attachment", #466), as ids. 20 is the
+  // most a SpamCop submission takes and bounds how many raw sources one send holds in memory.
+  if (forwardedMessages !== undefined) {
+    if (!Array.isArray(forwardedMessages)) return res.status(400).json({ error: 'forwardedMessages must be an array' });
+    if (forwardedMessages.length > 20) return res.status(400).json({ error: 'Too many forwarded messages (max 20)' });
+    for (const [i, id] of forwardedMessages.entries()) {
+      if (typeof id !== 'string' || !UUID_RE.test(id)) return res.status(400).json({ error: `forwardedMessages[${i}] is invalid` });
     }
   }
 
@@ -314,6 +325,47 @@ router.post('/send', async (req, res) => {
     }
   }
 
+  // Each forwarded message is attached as its raw RFC 822 source, every original header intact,
+  // which is what an inline forward loses and abuse desks such as SpamCop need (#466). message/*
+  // goes out 8bit (RFC 2046 rules out base64 for it) and nodemailer would mark it inline, so the
+  // disposition is set explicitly. Its size is known only once fetched, so the 25 MB total is
+  // checked as each one arrives.
+  let resolvedFwdMessages = [];
+  if (forwardedMessages?.length) {
+    try {
+      const ids = [...new Set(forwardedMessages)];
+      const rows = (await query(
+        `SELECT m.id, m.uid, m.folder, m.subject, m.account_id FROM messages m
+         JOIN email_accounts a ON m.account_id = a.id
+         WHERE m.id = ANY($1::uuid[]) AND a.user_id = $2 AND m.is_deleted = false`,
+        [ids, req.session.userId]
+      )).rows;
+      const byId = new Map(rows.map(r => [r.id, r]));
+      if (ids.some(id => !byId.has(id))) throw Object.assign(new Error('Forwarded message not found'), { status: 404 });
+      const accts = (await query('SELECT * FROM email_accounts WHERE id = ANY($1::uuid[])', [[...new Set(rows.map(r => r.account_id))]])).rows;
+      const acctById = new Map(accts.map(a => [a.id, a]));
+      let totalBytes = (attachments || []).reduce((sum, a) => sum + (typeof a.content === 'string' ? Math.ceil(a.content.length * 0.75) : 0), 0)
+        + resolvedFwdAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
+      for (const id of ids) {
+        const msg = byId.get(id);
+        const acct = acctById.get(msg.account_id);
+        if (!acct) throw Object.assign(new Error('Account not found'), { status: 404 });
+        const source = await imapManager.fetchRawMessage(acct, msg.uid, msg.folder);
+        if (!source) throw Object.assign(new Error('Could not fetch the forwarded message'), { status: 502 });
+        totalBytes += source.length;
+        if (totalBytes > 26_214_400) return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+        resolvedFwdMessages.push({
+          filename: safeFilename(`${truncateFilename(sanitizeHeaderValue(msg.subject || '') || 'message', 80)}.eml`),
+          content: source,
+          contentType: 'message/rfc822',
+          contentDisposition: 'attachment',
+        });
+      }
+    } catch (err) {
+      return res.status(err.status || 500).json({ error: err.message || 'Failed to fetch forwarded messages' });
+    }
+  }
+
   let reservationAcquired = false;
   try {
     const smtp = await createAccountSmtpTransport(account);
@@ -363,6 +415,7 @@ router.post('/send', async (req, res) => {
         contentType: typeof a.contentType === 'string' ? a.contentType : 'application/octet-stream',
       })) : []),
       ...resolvedFwdAttachments,
+      ...resolvedFwdMessages,
     ];
     if (allAttachments.length) {
       mailOptions.attachments = allAttachments;
