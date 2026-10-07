@@ -417,6 +417,11 @@
       "automated": "Automated",
       "social": "Social"
     },
+    "categoryAlways": {
+      "done": "Mail from {{value}} now goes to {{category}}",
+      "doneBody": "Saved as an inbox rule; inbox mail already received was updated too.",
+      "failed": "Couldn't save the category for this sender"
+    },
     "changeLayout": "Change layout",
     "layouts": {
       "focused": {
@@ -511,6 +516,7 @@
     "reply": "Reply",
     "replyAll": "Reply all",
     "forward": "Forward",
+    "forwardAsAttachment": "Forward as attachment",
     "moveToFolder": "Move",
     "archive": "Archive",
     "snooze": {
@@ -521,6 +527,9 @@
       "custom": "Custom..."
     },
     "categorize": "Categorize as…",
+    "categoryAlwaysSender": "Always for this sender",
+    "categoryAlwaysDomain": "Always for this domain",
+    "categoryAlwaysFor": "Always for {{value}}",
     "createRule": "Create rule from message",
     "addToBlockList": "Add to block list",
     "markAsSpam": "Mark as Spam",
@@ -830,6 +839,8 @@
       "actionMove": "Move to folder",
       "actionForward": "Forward to",
       "actionForwardPlaceholder": "recipient@example.com",
+      "actionSetCategory": "Set category",
+      "actionSetCategorySelect": "Select a category…",
       "actionMovePlaceholder": "Exact IMAP folder path (e.g. Work or INBOX/Work)",
       "actionMoveSelectFolder": "Select a folder…",
       "actionMoveRequiresAccount": "Requires a specific account",

@@ -12,7 +12,7 @@ vi.mock('../index.js', () => ({
 }));
 
 import express from 'express';
-import mailRoutes, { gatherSnoozeConversation } from './mail.js';
+import mailRoutes, { gatherSnoozeConversation, LIVE_SNOOZE_SQL } from './mail.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 
@@ -92,6 +92,18 @@ describe('gatherSnoozeConversation', () => {
     expect(ids(out)).toEqual(['<a>', '<c>']);
   });
 
+  it('counts a member as snoozed only while it still sits in its Snoozed folder (#269)', async () => {
+    // A message moved out of Snoozed by hand keeps its record until the wake-up sweep; that
+    // leftover must not keep it out of a new snooze. The SQL itself is checked against a
+    // migrated PostgreSQL; this guards that the lookup keeps applying it.
+    mockPool([A, B, C], []);
+    await gatherSnoozeConversation(msgOf(A));
+    const [sql] = query.mock.calls[1];
+    expect(sql).toContain(LIVE_SNOOZE_SQL);
+    expect(LIVE_SNOOZE_SQL).toMatch(/m\.folder = sm\.snoozed_folder/);
+    expect(LIVE_SNOOZE_SQL).toMatch(/m\.is_deleted = false/);
+  });
+
   it('dedupes by Message-ID so a doubled source row is snoozed once', async () => {
     const Adup = row('A2', '<a>'); // same Message-ID, different row id, same folder
     mockPool([A, Adup, B]);
@@ -122,8 +134,15 @@ function fakeQuery(rawSql, params = []) {
   if (sql.includes('FROM messages m JOIN email_accounts a')) {
     return result(params[0] === message.id ? [{ ...message, user_id: 'user-1' }] : []);
   }
-  if (sql.startsWith('SELECT id FROM snoozed_messages')) {
-    return result(snoozes.filter(s => s.account_id === params[0] && s.message_id_header === params[1]));
+  // A record counts only while its message still sits in the folder it was snoozed into (#269).
+  const live = (s) => s.account_id === message.account_id && s.message_id_header === message.message_id
+    && s.snoozed_folder === message.folder && !message.is_deleted;
+  if (sql.startsWith('SELECT sm.id FROM snoozed_messages sm')) {
+    return result(snoozes.filter(s => s.account_id === params[0] && s.message_id_header === params[1] && live(s)));
+  }
+  if (sql.startsWith('DELETE FROM snoozed_messages sm')) {
+    snoozes = snoozes.filter(s => !(s.account_id === params[0] && params[1].includes(s.message_id_header) && !live(s)));
+    return result([]);
   }
   if (sql.startsWith('SELECT * FROM email_accounts')) return result([ACCOUNT]);
   const update = sql.match(/^UPDATE messages SET (.+) WHERE id = \$(\d+)$/);
@@ -139,6 +158,9 @@ function fakeQuery(rawSql, params = []) {
     snoozes.push(Object.fromEntries(insert[1].split(',').map((col, i) => [col.trim(), params[i]])));
     return result([]);
   }
+  // Fail loudly when the route changes how it reads or writes snoozes, rather than answering
+  // with no rows and leaving the tests passing without modelling it.
+  if (sql.includes('snoozed_messages')) throw new Error(`fakeQuery: unhandled snoozed_messages query: ${sql}`);
   return result([]);
 }
 
@@ -215,5 +237,18 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
     expect((await snooze()).status).toBe(400);
     expect(imapManager.moveMessage).not.toHaveBeenCalled();
     expect(snoozes).toEqual([]);
+  });
+
+  it('snoozes again a message moved out of the Snoozed folder by hand, replacing its old record (#269)', async () => {
+    // The earlier snooze stored the server path; the message has since been moved back to INBOX.
+    const leftover = {
+      user_id: 'user-1', account_id: ACCOUNT_ID, message_id_header: '<a@example.com>',
+      original_folder: 'INBOX', snoozed_folder: 'INBOX.Snoozed', snooze_until: '2026-01-02T00:00:00.000Z',
+    };
+    snoozes = [leftover];
+    expect((await snooze()).status).toBe(200);
+    expect(message).toMatchObject({ folder: 'INBOX.Snoozed', uid: 7 });
+    expect(snoozes).toEqual([expect.objectContaining({ original_folder: 'INBOX', snoozed_folder: 'INBOX.Snoozed' })]);
+    expect(snoozes[0]).not.toBe(leftover);
   });
 });

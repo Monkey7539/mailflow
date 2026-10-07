@@ -280,6 +280,11 @@
       "automated": "Automatické",
       "social": "Sociální sítě"
     },
+    "categoryAlways": {
+      "done": "Pošta od {{value}} teď půjde do: {{category}}",
+      "doneBody": "Uloženo jako pravidlo doručené pošty; aktualizována i již přijatá pošta.",
+      "failed": "Kategorii pro tohoto odesílatele se nepodařilo uložit"
+    },
     "changeLayout": "Změnit rozvržení",
     "layouts": {
       "focused": {
@@ -579,6 +584,7 @@
     "reply": "Odpovědět",
     "replyAll": "Odpovědět všem",
     "forward": "Přeposlat",
+    "forwardAsAttachment": "Přeposlat jako přílohu",
     "moveToFolder": "Přesunout",
     "archive": "Archivovat",
     "snooze": {
@@ -589,6 +595,9 @@
       "custom": "Vlastní…"
     },
     "categorize": "Zařadit jako…",
+    "categoryAlwaysSender": "Vždy pro tohoto odesílatele",
+    "categoryAlwaysDomain": "Vždy pro tuto doménu",
+    "categoryAlwaysFor": "Vždy pro {{value}}",
     "createRule": "Vytvořit pravidlo ze zprávy",
     "addToBlockList": "Přidat na seznam blokovaných",
     "markAsSpam": "Označit jako spam",
@@ -1200,6 +1209,8 @@
       "actionMove": "Přesunout do složky",
       "actionForward": "Přeposlat na",
       "actionForwardPlaceholder": "prijemce@example.com",
+      "actionSetCategory": "Nastavit kategorii",
+      "actionSetCategorySelect": "Vyberte kategorii…",
       "actionMovePlaceholder": "Přesná cesta ke složce IMAP (např. Práce nebo INBOX/Práce)",
       "actionMoveSelectFolder": "Vyberte složku…",
       "actionMoveRequiresAccount": "Vyžaduje konkrétní účet",

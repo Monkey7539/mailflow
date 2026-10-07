@@ -330,6 +330,25 @@ describe('automatic Cc and Bcc (#491)', () => {
     } finally { await close(); }
   });
 
+  test('a message forwarded as an attachment is sent by id, its own attachments by part (#466)', async () => {
+    const close = await mountCompose({
+      to: ['submit.x@spam.spamcop.net'], subject: 'Fwd: You won', isForward: true,
+      forwardedAttachments: [
+        { messageId: 'spam-1', asMessage: true, filename: 'You won.eml', type: 'message/rfc822', size: null },
+        { messageId: 'other-1', part: '2', filename: 'invoice.pdf', type: 'application/pdf', size: 2048 },
+      ],
+    }, { accounts: [account('A')] });
+    try {
+      const chipText = [...document.querySelectorAll('span')].map(sp => sp.textContent).join(' | ');
+      assert.ok(chipText.includes('You won.eml'));
+      assert.ok(!/NaN|undefined|nullB/.test(chipText), 'a message attachment shows no made-up size');
+      const sent = await send();
+      assert.ok(sent, 'the message was sent');
+      assert.deepEqual(sent.forwardedMessages, ['spam-1']);
+      assert.deepEqual(sent.forwardedAttachments, [{ messageId: 'other-1', part: '2' }]);
+    } finally { await close(); }
+  });
+
   test('a mailto Bcc is kept alongside the automatic Bcc, and the composer stays clean', async () => {
     const close = await mountCompose(
       { to: ['x@example.invalid'], bcc: ['u@example.invalid'] },

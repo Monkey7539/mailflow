@@ -417,6 +417,11 @@
       "automated": "Automáticos",
       "social": "Social"
     },
+    "categoryAlways": {
+      "done": "E-mails de {{value}} agora vão para {{category}}",
+      "doneBody": "Salvo como regra da caixa de entrada; os e-mails já recebidos também foram atualizados.",
+      "failed": "Não foi possível salvar a categoria deste remetente"
+    },
     "changeLayout": "Alterar layout",
     "layouts": {
       "focused": {
@@ -511,6 +516,7 @@
     "reply": "Responder",
     "replyAll": "Responder a todos",
     "forward": "Encaminhar",
+    "forwardAsAttachment": "Encaminhar como anexo",
     "moveToFolder": "Mover",
     "archive": "Arquivar",
     "snooze": {
@@ -521,6 +527,9 @@
       "custom": "Personalizado..."
     },
     "categorize": "Categorizar como…",
+    "categoryAlwaysSender": "Sempre para este remetente",
+    "categoryAlwaysDomain": "Sempre para este domínio",
+    "categoryAlwaysFor": "Sempre para {{value}}",
     "createRule": "Criar regra a partir da mensagem",
     "addToBlockList": "Adicionar à lista de bloqueio",
     "markAsSpam": "Marcar como spam",
@@ -830,6 +839,8 @@
       "actionMove": "Mover para pasta",
       "actionForward": "Encaminhar para",
       "actionForwardPlaceholder": "destinatario@exemplo.com",
+      "actionSetCategory": "Definir categoria",
+      "actionSetCategorySelect": "Selecione uma categoria…",
       "actionMovePlaceholder": "Caminho IMAP exato da pasta (ex.: Trabalho ou INBOX/Trabalho)",
       "actionMoveSelectFolder": "Selecione uma pasta…",
       "actionMoveRequiresAccount": "Requer uma conta específica",

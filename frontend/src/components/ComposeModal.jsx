@@ -874,8 +874,13 @@ export default function ComposeModal() {
             contentType: a.type || 'application/octet-stream',
           })),
         } : {}),
-        ...(fwdAttachments.length ? {
-          forwardedAttachments: fwdAttachments.map(a => ({ messageId: a.messageId, part: a.part })),
+        // Attachments of forwarded messages go by part; whole messages forwarded as attachments
+        // (#466) go by id, and the server attaches each one's raw source as an .eml.
+        ...(fwdAttachments.some(a => !a.asMessage) ? {
+          forwardedAttachments: fwdAttachments.filter(a => !a.asMessage).map(a => ({ messageId: a.messageId, part: a.part })),
+        } : {}),
+        ...(fwdAttachments.some(a => a.asMessage) ? {
+          forwardedMessages: fwdAttachments.filter(a => a.asMessage).map(a => a.messageId),
         } : {}),
         // The server holds the message this long so it can still be undone, and deletes the
         // draft only once the message is delivered.
@@ -3347,7 +3352,8 @@ function AttachmentChips({ attachments, onRemove, mobile }) {
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           </svg>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{a.name}</span>
-          <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{formatBytes(a.size)}</span>
+          {/* A message forwarded as an attachment has no size until the server fetches it. */}
+          {a.size != null && <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{formatBytes(a.size)}</span>}
           <button
             type="button"
             onClick={() => onRemove(i)}
