@@ -30,8 +30,19 @@ export async function mappedFolderUsable(accountId, path) {
 const TOP_LEVEL_FOLDER_SQL = `(path = name OR upper(path) = ('INBOX' || delimiter || upper(name)))`;
 const TRASH_FOLDER_SQL = `(special_use = '\\Trash'
   OR (lower(name) IN ('trash', 'deleted', 'deleted items', 'deleted messages') AND ${TOP_LEVEL_FOLDER_SQL}))`;
-export const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
+const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
   OR (lower(name) IN ('drafts', 'draft') AND ${TOP_LEVEL_FOLDER_SQL}))`;
+
+// True for a draft, in a query over messages aliased `m`: flagged \Draft, or held in the account's
+// mapped Drafts folder or a folder the Drafts rules above match. The thread badge leaves drafts out
+// and the thread route marks them, so deleting or moving a conversation can spare an unsent reply.
+export const draftMessageSql = (m = 'm') => `(COALESCE(${m}.flags ? '\\Draft', false)
+  OR EXISTS (
+    SELECT 1 FROM folders df
+    WHERE df.account_id = ${m}.account_id AND df.path = ${m}.folder
+      AND (${DRAFTS_FOLDER_SQL}
+           OR df.path = (SELECT ea.folder_mappings->>'drafts' FROM email_accounts ea WHERE ea.id = ${m}.account_id))
+  ))`;
 
 // Resolve the canonical trash folder path for an account (used as move destination).
 // folder_mappings.trash (user-configured) takes priority over special_use and name heuristics,

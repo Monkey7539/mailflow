@@ -167,6 +167,43 @@ describe('moveThread', () => {
   });
 });
 
+// A saved reply in the conversation (marked is_draft by the thread route). Deleting a draft
+// expunges it, so deleting or moving the conversation must leave it alone.
+describe('drafts in the conversation', () => {
+  const DRAFT = { id: 'd1', account_id: 'acct', folder: 'Drafts', subject: 'Re: Hello', from_email: 'me@x.z', date: '2026-01-05T00:00:00Z', is_read: true, is_draft: true };
+  const withDraft = [...THREAD.map(m => ({ ...m, is_draft: false })), DRAFT];
+  const fetchWithDraft = async () => ({ messages: [...withDraft, { ...LATE_REPLY, is_draft: false }] });
+
+  test('delete leaves the draft, in the list and on the server, the late reply included', async () => {
+    useStore.getState().setMessages(withDraft.map(m => ({ ...m })));
+    deleteThread(withDraft, { t, addNotification, fetchThread: fetchWithDraft, anchorId: 'a3' });
+    assert.deepEqual(ids(), ['d1'], 'only the draft stays in the list');
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(requests.at(-1).body.ids.sort(), ['a1', 'a2', 'a3', 'a4']);
+  });
+
+  test('move leaves the draft too', async () => {
+    moveThread(withDraft, 'Archive/2026', { t, addNotification, fetchThread: fetchWithDraft, anchorId: 'a1' });
+    await tick(UNDO_WINDOW + 50);
+    const move = requests.find(r => /bulk-move/.test(r.url));
+    assert.deepEqual(move.body.ids.sort(), ['a1', 'a2', 'a3', 'a4']);
+  });
+
+  test('a conversation acted on from its draft (the Drafts folder) deletes only the draft', async () => {
+    useStore.getState().setMessages(withDraft.map(m => ({ ...m })));
+    deleteThread(withDraft, { t, addNotification, fetchThread: fetchWithDraft, anchorId: 'd1' });
+    assert.deepEqual(ids(), ['a1', 'a2', 'a3'], 'the conversation it answers stays in the list');
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(requests.at(-1).body.ids, ['d1']);
+  });
+
+  test('archive leaves the draft in Drafts as well', async () => {
+    archiveThread(withDraft, { t, addNotification, fetchThread: fetchWithDraft, anchorId: 'a1' });
+    await tick(UNDO_WINDOW + 50);
+    assert.deepEqual(requests.at(-1).body.ids.sort(), ['a1', 'a2', 'a3', 'a4']);
+  });
+});
+
 describe('snoozeThread', () => {
   test('snoozes the newest inbox message, not the sent reply and not the whole thread', async () => {
     // a3 is the newest INBOX message. a2 is the reader's own sent reply, and snoozing it

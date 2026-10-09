@@ -2,14 +2,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import pg from 'pg';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
+vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'owner' }; next(); } }));
+vi.mock('../index.js', () => ({ imapManager: {} }));
+import express from 'express';
 import { query } from './db.js';
 import { listMessages } from './messageService.js';
+import mailRoutes from '../routes/mail.js';
 
 // #576: the threaded Inbox badge counts the whole thread, Sent replies included, so it matches
 // what the thread route loads. Uses only connection-local temporary tables in an explicitly
 // supplied database.
 describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message_count PostgreSQL', () => {
-  let database;
+  let database, server, base;
   const account = '22222222-2222-4222-8222-222222222222';
   let nextId = 1;
   const id = () => `00000000-0000-4000-8000-${String(nextId++).padStart(12, '0')}`;
@@ -30,11 +34,16 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
         reply_to jsonb, snippet text, is_read boolean DEFAULT false, is_starred boolean DEFAULT false,
         has_attachments boolean DEFAULT false, category text, list_unsubscribe text,
         list_unsubscribe_post text, delivery_addresses jsonb, spam_verdict text,
-        spam_user_override text, spam_score_ml real, flags jsonb);
+        spam_user_override text, spam_score_ml real, flags jsonb, unsubscribed_at timestamptz);
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
     query.mockImplementation((sql, values) => database.query(sql, values));
+    const app = express();
+    app.use('/api/mail', mailRoutes);
+    await new Promise(resolve => { server = app.listen(0, resolve); });
+    base = `http://127.0.0.1:${server.address().port}`;
   });
   afterAll(async () => {
+    if (server) await new Promise(resolve => server.close(resolve));
     await database?.end();
   });
   beforeEach(async () => {
@@ -135,6 +144,22 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
     await insert('Sent', '<b@me>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question', ['\\Seen']);
     await insert('Drafts', '<d@me>', '<a@ext>', '2026-10-01T12:00Z', 'Re: Question', ['\\Draft']);
     expect((await inboxRows(account))['<a@ext>'].message_count).toBe(2);
+  });
+
+  // The thread route marks drafts, so deleting or moving the conversation can spare them.
+  it('marks drafts in the thread route, by flag and by folder', async () => {
+    await folder('Brouillons');
+    await database.query(`UPDATE email_accounts SET folder_mappings = '{"drafts":"Brouillons"}'`);
+    await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');
+    await insert('Sent', '<b@me>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question', ['\\Seen']);
+    await insert('Drafts', '<d1@me>', '<a@ext>', '2026-10-01T12:00Z', 'Re: Question', ['\\Draft']);
+    await insert('Brouillons', '<d2@me>', '<a@ext>', '2026-10-01T13:00Z', 'Re: Question');
+    const response = await fetch(`${base}/api/mail/thread?id=${encodeURIComponent('<a@ext>')}`);
+    expect(response.status).toBe(200);
+    const { messages } = await response.json();
+    expect(messages.map(m => [m.folder, m.is_draft])).toEqual([
+      ['INBOX', false], ['Sent', false], ['Drafts', true], ['Brouillons', true],
+    ]);
   });
 
   it('does not count deleted messages', async () => {

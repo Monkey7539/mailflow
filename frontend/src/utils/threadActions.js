@@ -1,7 +1,7 @@
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
 import { normalizeConversation, newestConversationMessage } from './conversation.js';
-import { conversationActionIds, conversationSpamTargets, newestSnoozeTarget } from './conversationActions.js';
+import { conversationActionIds, conversationSpamTargets, newestSnoozeTarget, keepDraftsApart } from './conversationActions.js';
 import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDelete } from './pendingDeletes.js';
 
 // Which messages a thread-wide action should actually operate on.
@@ -116,11 +116,18 @@ const liveThread = (fetchThread) => fetchThread
     })
   : null;
 
-export function archiveThread(messages, { t, addNotification, fetchThread }) {
+// Archive, delete and move each move or expunge every message they are given, so they act on the
+// conversation's drafts or on the rest of it, never both, by the anchor (the selected message); see
+// keepDraftsApart.
+const sparingDrafts = (resolve, anchorId) => resolve
+  ? async (targets) => keepDraftsApart(await resolve(targets), anchorId)
+  : null;
+
+export function archiveThread(messages, { t, addNotification, fetchThread, anchorId }) {
   runThreadAction({
-    messages,
+    messages: keepDraftsApart(messages, anchorId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: sparingDrafts(liveThread(fetchThread), anchorId),
     commit: async (targets) => {
       const result = await api.bulkArchive(conversationActionIds(targets));
       // Not an error: the account simply has no archive folder mapped, and the user
@@ -138,11 +145,11 @@ export function archiveThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function deleteThread(messages, { t, addNotification, fetchThread }) {
+export function deleteThread(messages, { t, addNotification, fetchThread, anchorId }) {
   runThreadAction({
-    messages,
+    messages: keepDraftsApart(messages, anchorId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: sparingDrafts(liveThread(fetchThread), anchorId),
     // The delete guards stop a sync already in flight from resurrecting the rows
     // between the optimistic removal and the commit.
     onRemove: targets => targets.forEach(message => setPendingDelete(message.id)),
@@ -160,11 +167,11 @@ export function deleteThread(messages, { t, addNotification, fetchThread }) {
   });
 }
 
-export function moveThread(messages, folder, { t, addNotification, fetchThread }) {
+export function moveThread(messages, folder, { t, addNotification, fetchThread, anchorId }) {
   runThreadAction({
-    messages,
+    messages: keepDraftsApart(messages, anchorId),
     addNotification,
-    resolve: liveThread(fetchThread),
+    resolve: sparingDrafts(liveThread(fetchThread), anchorId),
     commit: async (targets) => {
       await api.bulkMove(conversationActionIds(targets), folder);
       // Recorded per account, since a thread can span several.

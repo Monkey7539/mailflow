@@ -108,6 +108,8 @@ export default function ConversationPane({ threadId, folder, unified = false, se
       // The authoritative list, re-read when the action actually commits, so a reply
       // that arrived while this conversation was open is not left behind.
       fetchThread: () => api.getThread(threadId, folder, unified),
+      // Archive, delete and move keep drafts and the rest apart, by the selected message (keepDraftsApart).
+      anchorId: selectedMessageId,
     });
     setSelectedMessage(null);
   };
