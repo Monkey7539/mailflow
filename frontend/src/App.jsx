@@ -59,8 +59,7 @@ export default function App() {
     api.me()
       .then(async (data) => {
         setUser(data.user);
-        // Show the lock screen if the session is locked (#235). Skip loading prefs while
-        // locked (the API is 423'd until unlock).
+        // Skip loading prefs while locked: the API is 423'd until unlock (#235).
         if (data.user?.locked) {
           setLocked(true);
           return;

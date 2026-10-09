@@ -10,6 +10,7 @@ import {
   newestConversationMessage,
 } from '../utils/conversation.js';
 import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread } from '../utils/threadActions.js';
+import { advanceSelectionAfterRemoval } from '../utils/listSelection.js';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
@@ -101,22 +102,44 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
   });
 
   // The row the conversation was opened from, and the folder and account its actions take it
-  // from, as ReadingPane chose them. Without a scope the pane acts as the unified inbox would.
-  const actionScope = scope || { row: newestConversationMessage(messages), accountId: null, folder };
+  // from, as ReadingPane chose them: a message opened from a notification, a link or the GTD
+  // sidebar is not a row of the list and can live elsewhere, so its own folder and account
+  // stand in for the view's. Without a scope the view decides, as the list's archive does: the
+  // unified inbox is every account's INBOX, an account view is the selected message's account
+  // in its folder.
+  const actionScope = scope
+    ? { row: scope.row, folder: scope.accountId ? scope.folder : 'INBOX', accountId: scope.accountId }
+    : {
+      row: newestConversationMessage(messages),
+      folder: unified ? 'INBOX' : folder,
+      accountId: unified ? null : (messages.find(message => message.id === selectedMessageId)?.account_id ?? null),
+    };
 
-  // Acting on the conversation empties the reading pane: every message it was showing
-  // has just been removed from the list behind it.
+  // The move picker keeps the row it was opened on (openPicker); every other action takes the
+  // row the conversation was opened from.
   const runAction = (action, row = actionScope.row) => {
+    // Every action here takes the conversation's row out of the list. Open what takes its place
+    // (the afterRemove setting) while the row is still there to look up; with no row on screen,
+    // fall back to clearing the pane.
+    const { messages: listed, searchResults, searchQuery } = useStore.getState();
+    const listRow = (searchQuery.trim() ? searchResults : listed).find(m => (m.thread_id || m.id) === threadId);
+    if (listRow) advanceSelectionAfterRemoval(listRow.id, true);
+    else setSelectedMessage(null);
     action(messages, {
       t,
       addNotification,
       accounts,
-      scope: { ...actionScope, row },
       // The authoritative list, re-read when the action actually commits, so a reply
       // that arrived while this conversation was open is not left behind.
       fetchThread: () => api.getThread(threadId, folder, unified),
+      // Archive, delete and move keep drafts and the rest apart, by the selected message (keepDraftsApart).
+      anchorId: selectedMessageId,
+      // Archive and delete take only the copies in the folder being viewed, as the list's archive
+      // does; move only the row's account's, whose folders the picker lists.
+      folder: actionScope.folder,
+      accountId: actionScope.accountId,
+      row,
     });
-    setSelectedMessage(null);
   };
 
   // A flag change on one card: the pane's copy of the thread and the list's copy both change.

@@ -50,7 +50,9 @@ registerHooks({
   },
 });
 
-const dom = new JSDOM('<div id="root"></div>', { url: 'https://mail.example.invalid', pretendToBeVisual: true });
+// The page sits at /login, where Sign out sends the browser. jsdom cannot load another page and
+// reports any navigation to one, but a navigation to the page it is on does nothing.
+const dom = new JSDOM('<div id="root"></div>', { url: 'https://mail.example.invalid/login', pretendToBeVisual: true });
 Object.assign(globalThis, {
   window: dom.window, document: dom.window.document,
   localStorage: dom.window.localStorage, CustomEvent: dom.window.CustomEvent,

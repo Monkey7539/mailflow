@@ -2,6 +2,7 @@ import { useStore } from '../store/index.js';
 import { resolveConversationMode } from '../utils/conversationMode.js';
 import { resolveConversationSelection, shouldUseConversationPane } from '../utils/conversation.js';
 import ConversationPane from './ConversationPane.jsx';
+import ReplyDraftIndicator from './ReplyDraftIndicator.jsx';
 import MessagePane from './MessagePane.jsx';
 
 // Chooses what the reading area shows.
@@ -23,6 +24,8 @@ export default function ReadingPane() {
   const searchQuery = useStore(s => s.searchQuery);
   const threadMessages = useStore(s => s.threadMessages);
 
+  const replyDraft = useStore(state => state.replyDrafts[selectedMessageId]);
+
   const mode = resolveConversationMode({ conversationMode });
   if (!selectedMessageId) return <MessagePane />;
 
@@ -35,21 +38,20 @@ export default function ReadingPane() {
     threadMessages: threadMessages || {},
   });
 
-  // A message with no thread of its own is just a message, and a search deliberately shows
-  // the one matched message rather than its conversation.
-  if (!shouldUseConversationPane({ mode, searchQuery, message: selected })) return <MessagePane />;
-
   // The conversation's actions take what the list shows of it, not every folder and account
   // the thread spans: its copies in the folder and account being viewed. A message opened from
   // a notification, a link or the GTD sidebar is not a row of the list and can live elsewhere,
   // where the view would pick the wrong copies, such as the Sent reply while Sent is open, so
   // its own folder and account stand in.
-  const listed = (messages || []).some(message => message.id === selected.id);
+  const listed = (messages || []).some(message => message.id === selectedMessageId);
   const scope = listed
     ? { row: selected, accountId: selectedAccountId, folder: selectedFolder }
-    : { row: selected, accountId: selected.account_id, folder: selected.folder };
+    : { row: selected, accountId: selected?.account_id, folder: selected?.folder };
 
-  return (
+  // A message with no thread of its own is just a message, and a search deliberately shows
+  // the one matched message rather than its conversation.
+  const pane = !shouldUseConversationPane({ mode, searchQuery, message: selected }) ? <MessagePane /> : (
+
     <ConversationPane
       threadId={selected.thread_id}
       folder={selectedFolder}
@@ -61,4 +63,8 @@ export default function ReadingPane() {
       selectedMessageId={selectedMessageId}
     />
   );
+  return <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, height: '100%', minHeight: 0 }}>
+    {selectedFolder?.toUpperCase() === 'INBOX' && (replyDraft?.exists || replyDraft?.error) && <div style={{ flexShrink: 0, padding: '4px 12px' }}><ReplyDraftIndicator message={selected} /></div>}
+    <div style={{ display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>{pane}</div>
+  </div>;
 }

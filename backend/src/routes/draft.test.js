@@ -8,7 +8,11 @@ const imapManager = vi.hoisted(() => ({
   appendToFolder: vi.fn(),
   upsertDraftMessageRecord: vi.fn(),
   permanentDeleteMessage: vi.fn(),
+  broadcast: vi.fn(),
 }));
+// What the user's other tabs are told: the Inbox re-checks its reply-draft markers on it.
+const draftsChanged = () => imapManager.broadcast.mock.calls.filter(([event]) => event.type === 'drafts_changed')
+  .map(([event, userId]) => [event.accountId, userId]);
 vi.mock('../index.js', () => ({ imapManager }));
 
 import express from 'express';
@@ -77,6 +81,74 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(meta.messageId).toMatch(/^<[0-9a-f]+@mailflow\.sh>$/);
   });
 
+  it("tells the user's other tabs that a Drafts folder changed", async () => {
+    imapManager.broadcast.mockReset();
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: [], subject: 'Re: x', body: 'b', bodyIsHtml: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
+  });
+
+  it('still returns the saved draft when that notice fails', async () => {
+    imapManager.broadcast.mockReset().mockImplementation(() => { throw new Error('socket gone'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await fetch(`${base}/api/mail/draft`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ accountId: ACCOUNT_ID, to: [], subject: 'Re: x', body: 'b', bodyIsHtml: false }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ uid: 5, folder: 'Drafts' });
+    } finally {
+      imapManager.broadcast.mockReset();
+      warn.mockRestore();
+    }
+  });
+
+  it("writes the draft's text part with its lines and characters", async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: [], subject: 's', bodyIsHtml: true,
+        body: '<p>Fish &amp; chips &lt;5&gt;</p><p></p><p>caf&eacute;</p>', editedSignature: '<b>Me</b>&nbsp;| A &amp; B' }),
+    });
+    expect(res.status).toBe(200);
+    const [, , , meta] = imapManager.upsertDraftMessageRecord.mock.calls.at(-1);
+    expect(meta.bodyText).toBe('Fish & chips <5>\n\ncafé\n\n-- \nMe | A & B');
+  });
+
+  it('returns the newly appended RFC identity when requested', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['recipient@example.test'], body: 'Reply', includeIdentity: true }),
+    });
+    const result = await res.json();
+    expect(result.messageId).toBe(imapManager.upsertDraftMessageRecord.mock.calls[0][3].messageId);
+  });
+
+  it('keeps reply headers in MIME and the local draft row, including References-only drafts', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['recipient@example.test'],
+        subject: 'Reply', body: 'Reply text', references: '<root@example.test> <parent@example.test>' }),
+    });
+    expect(res.status).toBe(200);
+    const raw = imapManager.appendToFolder.mock.calls[0][2].toString();
+    expect(raw).toMatch(/^References: <root@example.test> <parent@example.test>$/m);
+    expect(imapManager.upsertDraftMessageRecord.mock.calls[0][3].references)
+      .toBe('<root@example.test> <parent@example.test>');
+  });
+
+  it('rejects reply-header injection before appending a draft', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, body: 'Reply', inReplyTo: '<parent@example.test>\r\nBcc: attacker@example.test' }),
+    });
+    expect(res.status).toBe(400);
+    expect(imapManager.appendToFolder).not.toHaveBeenCalled();
+  });
+
   it('records the Bcc on the local row, the same recipients the server copy carries', async () => {
     // The composer reopens a draft from this row. Without the Bcc here a reopened draft started
     // with none, and its next save replaced the only copy that still had it.
@@ -129,7 +201,11 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect(meta.bodyHtml.match(/data-mailflow-signature/g)).toHaveLength(1);
   });
 
-  it('writes no signature block when the draft has no signature', async () => {
+  it('preserves an explicitly disabled signature with an empty marker', async () => {
+    query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID }] });
+    query.mockResolvedValueOnce({ rows: [{ ...ACCOUNT_ROW, signature: '<b>Account signature</b>' }] });
+    query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });
     const res = await fetch(`${base}/api/mail/draft`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -137,6 +213,19 @@ describe('POST /api/mail/draft — local row persistence', () => {
         accountId: ACCOUNT_ID, to: ['mike@scanlan.ai'], cc: [], subject: 's',
         body: 'hello mike', bodyIsHtml: false, editedSignature: '',
       }),
+    });
+    expect(res.status).toBe(200);
+    const [, , , meta] = imapManager.upsertDraftMessageRecord.mock.calls[0];
+    expect(meta.bodyHtml).toContain('<div data-mailflow-signature="1" style="margin-top:16px;color:#555;font-size:13px"></div>');
+    expect(meta.bodyHtml).not.toContain('Account signature');
+    expect(meta.bodyText).not.toContain('Account signature');
+  });
+
+  it('does not mark a missing signature when no override was provided', async () => {
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['mike@scanlan.ai'], subject: 's', body: 'hello' }),
     });
     expect(res.status).toBe(200);
     const [, , , meta] = imapManager.upsertDraftMessageRecord.mock.calls[0];
@@ -331,10 +420,12 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
     query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
+    imapManager.broadcast.mockReset();
     const res = await del('folder=Drafts');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts');
+    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
   });
 
   it('deletes from any canonical Drafts path (e.g. a second drafts-named folder)', async () => {
@@ -352,10 +443,12 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveDraftsFolder
     query.mockResolvedValueOnce({ rows: [{ path: 'Drafts' }] });   // resolveAllDraftsPaths
     query.mockResolvedValueOnce({ rows: [] });                     // not the server's \Drafts folder
+    imapManager.broadcast.mockReset();
     const res = await del('folder=INBOX');
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Folder is not a Drafts folder' });
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+    expect(draftsChanged()).toEqual([]);
   });
 
   it('refuses a repeated folder param (array) without touching IMAP', async () => {
@@ -403,9 +496,11 @@ describe('deleteSentDraft — the draft of a message that has been delivered', (
   const deletedRows = () => query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM messages')).map(([, params]) => params);
 
   it('deletes it, checking that the server copy is that draft', async () => {
+    imapManager.broadcast.mockReset();
     expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts' })).toBe(true);
     expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(ACCOUNT_ROW, 4, 'Drafts', { expectMessageId: MESSAGE_ID });
     expect(deletedRows()).toEqual([[ACCOUNT_ID, 4, 'Drafts']]);
+    expect(draftsChanged()).toEqual([[ACCOUNT_ID, 'user-1']]);
   });
 
   it('touches nothing outside a Drafts folder', async () => {
@@ -427,8 +522,10 @@ describe('deleteSentDraft — the draft of a message that has been delivered', (
 
   it('keeps the local row when the server copy turned out to be another message', async () => {
     imapManager.permanentDeleteMessage.mockResolvedValue(false);
+    imapManager.broadcast.mockReset();
     expect(await deleteSentDraft('user-1', ACCOUNT_ROW, { uid: 4, folder: 'Drafts' })).toBe(false);
     expect(deletedRows()).toEqual([]);
+    expect(draftsChanged()).toEqual([]);
   });
 
   it('never throws: a draft left behind must not turn a delivered message into an error', async () => {

@@ -3,7 +3,8 @@ import { extractImapError } from './imapError.js';
 import { recordUnfetchable, suppressedUids, clearUnfetchable, hasRealGap } from './unfetchableUids.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
-import { parseMessage, snippetFromBody, detectBulkFromParsedHeaders, ALIAS_FORWARDER_HEADERS, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata, renderCalendarInvite } from './messageParser.js';
+import { parseMessage, parseMailboxList, snippetFromBody, detectBulkFromParsedHeaders, ALIAS_FORWARDER_HEADERS, parseHeadersInput, headersToRawString, decodeMimeWords, enrichParsedMetadata, renderCalendarInvite } from './messageParser.js';
+import { headerIds, searchReplyDraftUids, draftFolderPaths } from './replyDraftLookup.js';
 import { classifyMessage, loadSocialDomains, getGlobalCategorizationEnabled } from './categorizer.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
@@ -22,6 +23,8 @@ import { applyInboxRules, applyBlockList } from './inboxRules.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { generateVCard } from '../utils/vcard.js';
 import { mimeToExtension } from '../utils/inlineImages.js';
+import { truncateFilename } from '../utils/contentDisposition.js';
+import { BLOCK, WARN } from './attachmentExtensions.js';
 import { randomUUID } from 'crypto';
 
 
@@ -532,14 +535,9 @@ const FLAG_PUSH_PER_CYCLE = 30;      // cap setFlag attempts per account per cyc
 // U+202A-U+202E: LRE, RLE, PDF, LRO, RLO
 // U+2066-U+2069: LRI, RLI, FSI, PDI
 // U+200F: RTL mark  U+061C: Arabic letter mark
-const BIDI_OVERRIDE_RE = new RegExp(
-  [...Array.from({ length: 5 }, (_, i) => String.fromCodePoint(0x202A + i)),
-   ...Array.from({ length: 4 }, (_, i) => String.fromCodePoint(0x2066 + i)),
-   String.fromCodePoint(0x200F),
-   String.fromCodePoint(0x061C),
-  ].join(''),
-  'g'
-);
+// A character class: joined without brackets, the pattern only matched all eleven characters in a
+// row, so no real filename was ever cleaned and the attachment list showed the spoofed name.
+const BIDI_OVERRIDE_RE = /[\u202A-\u202E\u2066-\u2069\u200F\u061C]/g;
 
 // The attachment list from the BODYSTRUCTURE sync fetches for every new message, without any body
 // part. It is the walk fetchMessageBody runs, so opening the message later stores the same list.
@@ -801,49 +799,84 @@ function findPart(node, partNum) {
   return null;
 }
 
-function walkNode(node, results, parentType) {
+// A forwarded message attached as a file ("Forward as attachment" in Gmail, Outlook or MailFlow) is
+// a message/rfc822 part, and imapflow gives it the embedded message's structure as children. Walking
+// into those children filed the forwarded message's parts as the outer message's own: the .eml never
+// appeared, its files looked attached directly, and its text could replace the real body. Only a
+// part marked as a file (an attachment disposition or a filename) counts: a bounce report embeds the
+// original without either, and showing its text inline is the useful rendering there.
+function isAttachedMessage(node, type) {
+  if (type !== 'message/rfc822' || !node.childNodes?.length) return false;
+  const disposition = (node.disposition || '').toLowerCase();
+  return disposition === 'attachment'
+    || Boolean(node.dispositionParameters?.filename || node.parameters?.name);
+}
+
+// Inner files are only listed by name and type, on the .eml itself, so the attachment list shows one
+// file while the antispam attachment rules still see a program hidden inside the forward (#457). The
+// list is capped to keep the stored row small; risky files go first, so padding a forward with
+// harmless files cannot push a program past the cap.
+const MAX_CONTAINED_ATTACHMENTS = 50;
+
+function isRiskyAttachmentName(filename) {
+  const name = String(filename || '');
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+  return BLOCK.has(ext) || WARN.has(ext);
+}
+
+function pushAttachedMessage(node, results) {
+  const rawFilename = node.dispositionParameters?.filename || node.parameters?.name
+    || `${truncateFilename(node.envelope?.subject || 'message', 80)}.eml`;
+  // eslint-disable-next-line no-control-regex -- a folded subject can carry CR/LF and other controls
+  const filename = rawFilename.replace(BIDI_OVERRIDE_RE, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim() || 'message.eml';
+  const inner = { textParts: [], attachments: [], inlineImages: [], calendarParts: [] };
+  for (const child of node.childNodes) walkStructure(child, inner);
+  const all = inner.attachments.flatMap(att => [{ filename: att.filename, type: att.type }, ...(att.contains || [])]);
+  const contains = [
+    ...all.filter(entry => isRiskyAttachmentName(entry.filename)),
+    ...all.filter(entry => !isRiskyAttachmentName(entry.filename)),
+  ].slice(0, MAX_CONTAINED_ATTACHMENTS);
+  results.attachments.push({
+    part: node.part || '1',
+    filename,
+    type: 'message/rfc822',
+    encoding: node.encoding || '7bit',
+    size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
+    disposition: (node.disposition || '').toLowerCase(),
+    ...(contains.length ? { contains } : {}),
+  });
+}
+
+function walkNode(node, results) {
   if (!node) return;
   const type = (node.type || '').toLowerCase();
+  if (isAttachedMessage(node, type)) {
+    pushAttachedMessage(node, results);
+    return;
+  }
+  if (node.childNodes && node.childNodes.length > 0) {
+    for (const child of node.childNodes) walkNode(child, results);
+    return;
+  }
   const disposition = (node.disposition || '').toLowerCase();
   const rawFilename = node.dispositionParameters?.filename || node.parameters?.name || null;
   const filename = rawFilename ? rawFilename.replace(BIDI_OVERRIDE_RE, '').trim() || 'attachment' : null;
-  // imapflow gives a message/rfc822 part the enclosed email's structure as
-  // childNodes. Walking into an attached email would make its HTML the body in
-  // place of a plain-text note, and a bounce's returned message the body in
-  // place of the failure reason (RFC 6522 puts that message after the report).
-  // An unnamed one outside a report that is inline or undisposed, such as a
-  // list's DMARC wrap, is the post itself and is still read as the body.
-  const attachedEmail = type === 'message/rfc822'
-    && (disposition === 'attachment' || filename || parentType === 'multipart/report');
-  if (node.childNodes && node.childNodes.length > 0 && !attachedEmail) {
-    for (const child of node.childNodes) walkNode(child, results, type);
-    return;
-  }
   // A part explicitly marked Content-Disposition: attachment is an attachment
   // no matter its MIME type. Checking the text/* types first used to absorb
   // attached .html/.txt files into the message body: the paperclip showed
   // (detectAttachments keys on disposition) but the file never appeared in
   // the attachment list — and an attached HTML file could even replace the
   // real message body.
-  if (disposition === 'attachment' || attachedEmail) {
+  if (disposition === 'attachment') {
     results.attachments.push({
       part: node.part || '1',
-      filename: filename || (attachedEmail ? 'message.eml' : 'attachment'),
+      filename: filename || 'attachment',
       type: node.type || 'application/octet-stream',
       encoding: node.encoding || 'base64',
       size: node.dispositionParameters?.size ? parseInt(node.dispositionParameters.size) : node.size || 0,
       disposition,
     });
-    if (attachedEmail) {
-      // The files inside an attached email stay listed, each with its own
-      // download and risk badge, because MailFlow cannot open an .eml; its text
-      // and inline images are that email's body, not this one's. imapflow numbers
-      // a single-part email's body like its wrapper, and that part number fetches
-      // the whole .eml, so it is not listed again.
-      const enclosed = { textParts: [], attachments: [] };
-      for (const child of node.childNodes || []) walkStructure(child, enclosed);
-      results.attachments.push(...enclosed.attachments.filter(a => a.part !== (node.part || '1')));
-    }
   } else if (type === 'text/html' || type === 'application/xhtml+xml' || type === 'text/plain') {
     results.textParts.push({
       part: node.part || '1',
@@ -2023,6 +2056,24 @@ async function moveUids(client, range, toFolder) {
   return copied;
 }
 
+// Tells the user's tabs that a Drafts folder changed, so the Inbox re-checks its reply-draft
+// markers. `folder` counts as Drafts by the same rule the marker lookup uses (routes/draft.js):
+// the mapped Drafts folder or one flagged \Drafts. Best-effort: a failure here must not fail the
+// sync that called it, and only delays a marker until the next refresh.
+export async function noteDraftsChanged(mgr, account, folder) {
+  try {
+    const folders = (await query(
+      'SELECT account_id, path, special_use, no_select FROM folders WHERE account_id = $1 AND path = $2',
+      [account.id, folder]
+    )).rows;
+    if (draftFolderPaths(account.id, account.folder_mappings, folders).includes(folder)) {
+      mgr.broadcast({ type: 'drafts_changed', accountId: account.id }, account.user_id);
+    }
+  } catch (err) {
+    console.warn(`Drafts change notice failed for ${logAccount(account)}/${folder}:`, err.message);
+  }
+}
+
 export class ImapManager {
   constructor(wss) {
     this.wss = wss;
@@ -2048,6 +2099,8 @@ export class ImapManager {
     // Serializes antispam auto-moves per account (keyed by account id) — see
     // AUTO_MOVE_MAX_CONCURRENT_PER_ACCOUNT. Classification stays concurrent.
     this._autoMoveSem = createKeyedSemaphore(AUTO_MOVE_MAX_CONCURRENT_PER_ACCOUNT);
+    this._replyDraftSem = createKeyedSemaphore(1);
+    this._replyDraftQueries = new Map();
     this._connectCooldown = new Map(); // accountId -> { until: ms, failures: number } after connection refusals
     this._flagOpChains = new Map(); // accountId -> tail promise; serializes setFlag per account (#474 round 4 review)
     // Refusals seen on SECONDARY connections (the folder-status counter, background body
@@ -4555,6 +4608,10 @@ export class ImapManager {
            WHERE account_id = $1 AND path = $2`,
           [account.id, folder]
         );
+        // A draft saved in another client arrives already read (\Seen), so it never enters
+        // `newMessages` and no new_messages goes out for it. The Inbox's reply-draft markers are
+        // worked out from synced rows (routes/draft.js), so say when a Drafts folder gained rows.
+        if (insertedCount > 0 && folder !== 'INBOX') await noteDraftsChanged(this, account, folder);
         await stampLastSync(account.id);
         return { insertedCount, broadcastedNewMessages };
       } finally {
@@ -5513,6 +5570,9 @@ export class ImapManager {
     cc = [],
     bcc = [],
     inReplyTo = null,
+    references = null,
+    threadId = null,
+    hasAttachments = false,
     snippet = '',
     bodyHtml = null,
     bodyText = null,
@@ -5525,8 +5585,8 @@ export class ImapManager {
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id, bcc_addresses
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb)
+        flags, body_html, body_text, thread_id, bcc_addresses, thread_references
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,$19,$13::jsonb,$14,$15,$16,$17::jsonb,$18)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -5541,6 +5601,9 @@ export class ImapManager {
           WHEN EXCLUDED.cc_addresses::text IS NOT NULL AND EXCLUDED.cc_addresses::text <> '[]'
           THEN EXCLUDED.cc_addresses ELSE messages.cc_addresses END,
         in_reply_to = COALESCE(EXCLUDED.in_reply_to, messages.in_reply_to),
+        thread_references = EXCLUDED.thread_references,
+        thread_id = EXCLUDED.thread_id,
+        has_attachments = EXCLUDED.has_attachments,
         date = EXCLUDED.date,
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         flags = EXCLUDED.flags,
@@ -5557,9 +5620,144 @@ export class ImapManager {
       JSON.stringify(['\\Draft', '\\Seen']),
       bodyHtml != null ? sanitizeStr(bodyHtml) : null,
       bodyText != null ? sanitizeStr(bodyText) : null,
-      msgId || null,
+      threadId || headerIds(references)[0] || inReplyTo || msgId || null,
       JSON.stringify(Array.isArray(bcc) ? bcc : []),
+      references,
+      Boolean(hasAttachments),
     ]);
+  }
+
+  async findReplyDrafts(account, paths, messageIds) {
+    if (!paths.length || !messageIds.length) return [];
+    const key = `${account.id}:${JSON.stringify(paths)}:${JSON.stringify(messageIds)}`;
+    if (this._replyDraftQueries.has(key)) return this._replyDraftQueries.get(key);
+    if (this._replyDraftQueries.size >= 100) throw new Error('Reply draft lookup is busy; try again');
+    const task = (async () => {
+      await this._replyDraftSem.acquire(account.id, { timeoutMs: 30000 });
+      const host = (account.imap_host || '').toLowerCase();
+      let hostHeld = false;
+      try {
+        const blocked = this._secondaryConnectBlocked(account.id);
+        if (blocked) {
+          throw Object.assign(new Error('Mail server is limiting connections for this account'), {
+            providerRefusing: true, retryAfterMs: Math.max(0, blocked.until - Date.now()),
+          });
+        }
+        await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
+        hostHeld = true;
+        try {
+          const result = await withFreshLogin(account, client =>
+            this._findReplyDraftsWithClient(account, paths, messageIds, client));
+          this._clearSecondaryCooldown(account.id);
+          return result;
+        } catch (err) {
+          const detail = extractImapError(err);
+          if (isConnectionRefusal(detail) || isAuthFailure(detail)) this._noteSecondaryRefusal(account);
+          throw err;
+        }
+      } finally {
+        if (hostHeld) this._bgConnSem.release(host);
+        this._replyDraftSem.release(account.id);
+      }
+    })().finally(() => this._replyDraftQueries.delete(key));
+    this._replyDraftQueries.set(key, task);
+    return task;
+  }
+
+  async confirmReplyDraft(account, draft) {
+    // After fetching the body, recheck only its physical UID and current RFC
+    // headers. Reuse the pool instead of repeating every Drafts search/login.
+    return withFreshClient(account, client =>
+      this._ingestDraftUidWithClient(account, draft.folder, draft.uid, client));
+  }
+
+  async _findReplyDraftsWithClient(account, paths, messageIds, client) {
+    const found = await searchReplyDraftUids(client, paths, messageIds);
+    const rows = [];
+    for (const folder of paths) {
+      const uids = found.filter(item => item.folder === folder).map(item => item.uid);
+      if (!uids.length) continue;
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for (let i = 0; i < uids.length; i += 50) {
+          for await (const msg of client.fetch(uids.slice(i, i + 50).join(','), {
+            uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true,
+          }, { uid: true })) {
+            if (!uids.includes(Number(msg.uid))) continue;
+            const row = await this._ingestDraftUidWithClient(account, folder, msg.uid, client, msg);
+            if (row) rows.push(row);
+          }
+        }
+      } finally {
+        lock.release();
+      }
+    }
+    return rows;
+  }
+
+  async _ingestDraftUidWithClient(account, folder, uid, client, fetched = null) {
+    let msg = fetched;
+    if (!msg) {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for await (const item of client.fetch(String(uid), {
+          uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, headers: true,
+        }, { uid: true })) if (Number(item.uid) === Number(uid)) msg = item;
+      } finally {
+        lock.release();
+      }
+    }
+    if (!msg) return null;
+    if (!msg.bodyStructure || !msg.headers?.length) throw new Error('Incomplete reply draft headers or structure');
+    const parsed = await parseMessage(msg);
+    if (parsed.flags?.includes('\\Deleted')) return null;
+    const bcc = parseMailboxList(parsed.parsedHeaders?.bcc || '');
+    const structure = { textParts: [], attachments: [], inlineImages: [], calendarParts: [] };
+    walkStructure(msg.bodyStructure, structure);
+    const threadId = await computeThreadId(account.id, parsed.messageId, parsed.inReplyTo,
+      parsed.references, parsed.subject, { fromEmail: parsed.fromEmail, to: parsed.to,
+        cc: parsed.cc, own: account.email_address });
+    const uidValidity = String(client.mailbox?.uidValidity || '');
+    const validIdentity = Boolean(parsed.messageId) && headerIds(parsed.messageId)[0] === parsed.messageId;
+    const sameIdentity = `messages.message_id = EXCLUDED.message_id AND $19
+      AND $18 <> '' AND EXISTS (SELECT 1 FROM folders f
+        WHERE f.account_id = EXCLUDED.account_id AND f.path = EXCLUDED.folder
+          AND f.uid_validity::text = $18)`;
+    // All fields come from this live FETCH. Reusing a UID after UIDVALIDITY changes must
+    // never pair the new headers with an old body's cache or an old recipient list.
+    const { rows } = await query(`
+      INSERT INTO messages (account_id, uid, folder, message_id, subject, from_name, from_email,
+        to_addresses, cc_addresses, bcc_addresses, in_reply_to, thread_references, thread_id,
+        date, flags, has_attachments, attachments, is_read)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,true)
+      ON CONFLICT (account_id, uid, folder) DO UPDATE SET
+        message_id = EXCLUDED.message_id, subject = EXCLUDED.subject,
+        from_name = EXCLUDED.from_name, from_email = EXCLUDED.from_email,
+        to_addresses = EXCLUDED.to_addresses, cc_addresses = EXCLUDED.cc_addresses,
+        bcc_addresses = EXCLUDED.bcc_addresses, in_reply_to = EXCLUDED.in_reply_to,
+        thread_references = EXCLUDED.thread_references,
+        thread_id = CASE WHEN ${sameIdentity} THEN
+          CASE WHEN messages.thread_id = messages.message_id
+            AND EXCLUDED.thread_id IS NOT NULL AND EXCLUDED.thread_id <> EXCLUDED.message_id
+            THEN EXCLUDED.thread_id ELSE COALESCE(messages.thread_id, EXCLUDED.thread_id) END
+          ELSE EXCLUDED.thread_id END,
+        date = EXCLUDED.date, flags = EXCLUDED.flags, has_attachments = EXCLUDED.has_attachments,
+        attachments = EXCLUDED.attachments,
+        body_html = CASE WHEN ${sameIdentity} THEN messages.body_html ELSE NULL END,
+        body_text = CASE WHEN ${sameIdentity} THEN messages.body_text ELSE NULL END, is_deleted = false
+      RETURNING id, thread_id`, [account.id, uid, folder, parsed.messageId, parsed.subject || '(no subject)',
+      parsed.fromName || '', parsed.fromEmail || '', JSON.stringify(parsed.to || []),
+      JSON.stringify(parsed.cc || []), JSON.stringify(bcc), parsed.inReplyTo || null,
+      parsed.references || null, threadId || null, safeDate(parsed.date),
+      JSON.stringify(parsed.flags || []), parsed.hasAttachments, JSON.stringify(structure.attachments),
+      uidValidity, validIdentity]);
+    if (!rows.length) throw new Error('Draft ingestion did not persist a row');
+    return { id: rows[0].id, account_id: account.id, uid, folder, message_id: parsed.messageId,
+      subject: parsed.subject || '', from_email: parsed.fromEmail, from_name: parsed.fromName,
+      to_addresses: parsed.to || [], cc_addresses: parsed.cc || [], bcc_addresses: bcc,
+      in_reply_to: parsed.inReplyTo, thread_references: parsed.references, thread_id: rows[0].thread_id,
+      date: parsed.date, has_attachments: parsed.hasAttachments, attachments: structure.attachments,
+      attachments_complete: true, uid_validity: uidValidity };
   }
 
   // Whether the account's folders are label memberships (Gmail): removing a message from one
@@ -7043,11 +7241,15 @@ export class ImapManager {
   // has no userId either, and would match a missing one. The close waits a turn: an upgrade
   // whose session lookup was answered in the same read from Redis as the write that ended
   // the session authenticates a microtask after that write's callback, and would be missed.
-  closeSockets(userId, { sessionId = null, reason = 'Unauthorized' } = {}) {
+  closeSockets(userId, { sessionId = null, exceptSessionId = null, reason = 'Unauthorized' } = {}) {
     if (!userId) return;
     setImmediate(() => {
       this.wss.clients.forEach(ws => {
-        if (ws.userId === userId && (!sessionId || ws.sessionId === sessionId)) ws.close(1008, reason);
+        if (ws.userId !== userId) return;
+        if (sessionId && ws.sessionId !== sessionId) return;
+        // An admin resetting their own password keeps the session they did it from.
+        if (exceptSessionId && ws.sessionId === exceptSessionId) return;
+        ws.close(1008, reason);
       });
     });
   }

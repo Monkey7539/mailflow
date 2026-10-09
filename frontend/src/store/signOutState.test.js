@@ -38,10 +38,13 @@ test('the next user is not shown the compose that was left open', () => {
     accountId: 'acct-a', isReply: true,
     to: ['hr@example.invalid'], subject: 'Re: Disciplinary hearing', quotedBody: 'Confidential',
   });
+  // The mounted composer registers how to save itself before another compose replaces it.
+  s().setPrepareComposeSwitch(async () => true);
   sessionExpires();
   s().setUser({ id: 'bob' });
   assert.equal(s().composing, false);
   assert.equal(s().composeData, null);
+  assert.equal(s().prepareComposeSwitch, null);
 });
 
 test('nor the mailbox that was on screen', () => {
@@ -51,6 +54,7 @@ test('nor the mailbox that was on screen', () => {
     messages: [{ id: 'm1', account_id: 'acct-a', subject: 'Salary review' }], selectedMessageId: 'm1',
     searchQuery: 'salary', searchResults: [{ id: 'm1', account_id: 'acct-a', subject: 'Salary review' }],
     threadMessages: { t1: [{ id: 'm1', subject: 'Salary review' }] }, expandedThreadId: 't1',
+    replyDrafts: { m1: { exists: true, accountId: 'acct-a', source: 'live' } },
     messageWindows: [{ id: 1, messageId: 'm1' }],
     notifications: [{ id: 1, title: 'Snoozed', body: 'Salary review' }],
     backfillProgress: { 'acct-a': { synced: 10, total: 20 } },
@@ -81,6 +85,7 @@ test('nor the settings held only in memory', () => {
     blockRemoteImages: false, imageWhitelist: { addresses: ['sender@example.invalid'], domains: [] },
     hiddenFolders: { 'acct-a': ['HR'] }, shortcuts: { archive: 'z' }, autoLockMinutes: 5,
     categorizationEnabled: true, gtdPetSlug: 'cat',
+    autoOpenReplyDrafts: true, afterRemove: 'list',
   };
   useStore.setState(settings);
   sessionExpires();
