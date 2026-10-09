@@ -10,6 +10,7 @@ import {
   newestConversationMessage,
 } from '../utils/conversation.js';
 import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread } from '../utils/threadActions.js';
+import { advanceSelectionAfterRemoval } from '../utils/listSelection.js';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
@@ -98,9 +99,14 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     return next;
   });
 
-  // Acting on the conversation empties the reading pane: every message it was showing
-  // has just been removed from the list behind it.
   const runAction = (action) => {
+    // Every action here takes the conversation's row out of the list. Open what takes its place
+    // (the afterRemove setting) while the row is still there to look up; with no row on screen,
+    // fall back to clearing the pane.
+    const { messages: listed, searchResults, searchQuery } = useStore.getState();
+    const row = (searchQuery.trim() ? searchResults : listed).find(m => (m.thread_id || m.id) === threadId);
+    if (row) advanceSelectionAfterRemoval(row.id, true);
+    else setSelectedMessage(null);
     action(messages, {
       t,
       addNotification,
@@ -115,7 +121,6 @@ export default function ConversationPane({ threadId, folder, unified = false, se
       folder: unified ? 'INBOX' : folder,
       accountId: unified ? null : (messages.find(message => message.id === selectedMessageId)?.account_id ?? null),
     });
-    setSelectedMessage(null);
   };
 
   // A flag change on one card: the pane's copy of the thread and the list's copy both change.

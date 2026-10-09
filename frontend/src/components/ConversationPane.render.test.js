@@ -336,6 +336,20 @@ describe('conversation actions', () => {
     assert.ok(archive, 'the archive was sent after the undo window');
     assert.deepEqual(JSON.parse(archive.body).ids.sort(), ['m1', 'm3']);
   });
+
+  // #572: removing the conversation opens the next row in the list, not an empty pane.
+  test('delete opens the next conversation in the list', async () => {
+    const { useStore } = await import('../store/index.js');
+    useStore.setState({ afterRemove: 'next', searchQuery: '' });
+    useStore.getState().setMessages([
+      { id: 'm3', thread_id: '<1@x>', account_id: 'acct', folder: 'INBOX', is_read: true },
+      { id: 'n1', thread_id: '<9@x>', account_id: 'acct', folder: 'INBOX', is_read: true },
+    ]);
+    useStore.getState().setSelectedMessage('m1');
+    const deleteButton = [...document.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.delete');
+    await click(deleteButton);
+    assert.equal(useStore.getState().selectedMessageId, 'n1');
+  });
 });
 
 describe('conversation pane on a phone', () => {
