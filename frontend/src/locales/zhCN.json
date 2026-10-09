@@ -114,6 +114,7 @@
     "sendTooltip": "发送（Ctrl+Enter）",
     "sending": "发送中…",
     "discard": "丢弃",
+    "discardFailed": "无法删除草稿，请重试。",
     "saveDraft": "保存草稿",
     "savingDraft": "保存中…",
     "draftSaved": "草稿已保存",

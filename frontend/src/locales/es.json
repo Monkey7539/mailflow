@@ -114,6 +114,7 @@
     "sendTooltip": "Enviar (Ctrl+Intro)",
     "sending": "Enviando…",
     "discard": "Descartar",
+    "discardFailed": "No se pudo eliminar el borrador. Inténtalo de nuevo.",
     "saveDraft": "Guardar borrador",
     "savingDraft": "Guardando…",
     "draftSaved": "Borrador guardado",

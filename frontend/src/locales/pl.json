@@ -114,6 +114,7 @@
     "sendTooltip": "Wyślij (Ctrl+Enter)",
     "sending": "Wysyłanie…",
     "discard": "Odrzuć",
+    "discardFailed": "Nie udało się usunąć wersji roboczej. Spróbuj ponownie.",
     "saveDraft": "Zapisz wersję roboczą",
     "savingDraft": "Zapisywanie…",
     "draftSaved": "Wersja robocza zapisana",

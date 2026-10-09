@@ -114,6 +114,7 @@
     "sendTooltip": "Send (Ctrl+Enter)",
     "sending": "Sending…",
     "discard": "Discard",
+    "discardFailed": "The draft couldn't be deleted. Try again.",
     "saveDraft": "Save draft",
     "savingDraft": "Saving…",
     "draftSaved": "Draft saved",

@@ -453,6 +453,7 @@
     "sendTooltip": "Odeslat (Ctrl+Enter)",
     "sending": "Odesílání…",
     "discard": "Zahodit",
+    "discardFailed": "Koncept se nepodařilo smazat. Zkuste to znovu.",
     "saveDraft": "Uložit koncept",
     "savingDraft": "Ukládání…",
     "draftSaved": "Koncept uložen",

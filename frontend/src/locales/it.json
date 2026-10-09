@@ -114,6 +114,7 @@
     "sendTooltip": "Invia (Ctrl+Invio)",
     "sending": "Invio…",
     "discard": "Scarta",
+    "discardFailed": "Impossibile eliminare la bozza. Riprova.",
     "saveDraft": "Salva bozza",
     "savingDraft": "Salvataggio…",
     "draftSaved": "Bozza salvata",

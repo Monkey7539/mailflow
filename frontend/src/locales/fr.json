@@ -114,6 +114,7 @@
     "sendTooltip": "Envoyer (Ctrl+Entrée)",
     "sending": "Envoi…",
     "discard": "Supprimer",
+    "discardFailed": "Impossible de supprimer le brouillon. Réessayez.",
     "saveDraft": "Enregistrer le brouillon",
     "savingDraft": "Enregistrement…",
     "draftSaved": "Brouillon enregistré",

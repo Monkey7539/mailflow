@@ -114,6 +114,7 @@
     "sendTooltip": "Senden (Ctrl+Eingabe)",
     "sending": "Wird gesendet…",
     "discard": "Verwerfen",
+    "discardFailed": "Der Entwurf konnte nicht gelöscht werden. Versuchen Sie es erneut.",
     "saveDraft": "Entwurf speichern",
     "savingDraft": "Wird gespeichert…",
     "draftSaved": "Entwurf gespeichert",

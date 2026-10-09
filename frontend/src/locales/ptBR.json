@@ -114,6 +114,7 @@
     "sendTooltip": "Enviar (Ctrl+Enter)",
     "sending": "Enviando…",
     "discard": "Descartar",
+    "discardFailed": "Não foi possível excluir o rascunho. Tente novamente.",
     "saveDraft": "Salvar rascunho",
     "savingDraft": "Salvando…",
     "draftSaved": "Rascunho salvo",
