@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import InboxReplyDraftObserver from './InboxReplyDraftObserver.js';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
@@ -8,6 +9,7 @@ import { LAYOUTS } from '../layouts.js';
 import { updateFaviconBadge } from '../themes.js';
 import { installResumeRefresh } from '../utils/resumeRefresh.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
+import { dispatchHoveredGtdShortcut } from '../utils/gtdHoveredRow.js';
 import { runMailboxShortcut, canRunMailboxShortcut, browserShortcutFallback } from '../utils/visibleMailboxes.js';
 import { canRunSelectedAction, canRunGlobalAction } from '../utils/shortcutApplicability.js';
 import { selectedPickerMessage } from '../utils/labelPicker.js';
@@ -579,6 +581,10 @@ export default function MailApp() {
       return true;
     };
 
+    const dispatchAction = action => {
+      if (!dispatchHoveredGtdShortcut(action, useStore.getState())) shortcutBus.emit(action);
+    };
+
     const handler = (e) => {
       // Never intercept when the compose modal or admin panel is open, or an input is focused
       if (composingRef.current || showAdminRef.current || paletteOpenRef.current) return;
@@ -587,7 +593,7 @@ export default function MailApp() {
       // The registry resolves the exact modifier set, including shifted punctuation.
       if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
         const action = resolveShortcutAction(e, shortcuts);
-        if (action && canRun(action)) { e.preventDefault(); shortcutBus.emit(action); }
+        if (action && canRun(action)) { e.preventDefault(); dispatchAction(action); }
         return;
       }
 
@@ -612,7 +618,7 @@ export default function MailApp() {
         ? keyMap[resolved] || browserShortcutFallback(resolved) : resolveShortcutAction(e, shortcuts);
       if (action && canRun(action)) {
         e.preventDefault();
-        shortcutBus.emit(action);
+        dispatchAction(action);
         return;
       }
 
@@ -910,6 +916,7 @@ export default function MailApp() {
         </>
       )}
 
+      <InboxReplyDraftObserver />
       <Suspense fallback={lazyFallback}>{composing && <ComposeModal key={composeSession} />}</Suspense>
       <Suspense fallback={lazyFallback}>{showAdmin && <AdminPanel />}</Suspense>
       {/* Detached message windows (#219) — desktop only. */}
