@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { normalizeConversation, newestConversationMessage } from './conversation.js';
 import { conversationActionIds, conversationSpamTargets, newestSnoozeTarget, keepDraftsApart } from './conversationActions.js';
 import { setPendingDelete, setCompletedDelete, clearDeleteGuard, clearPendingDelete } from './pendingDeletes.js';
+import { archiveTargetsForFolder } from './threadedArchive.js';
 
 // Which messages a thread-wide action should actually operate on.
 //
@@ -123,11 +124,22 @@ const sparingDrafts = (resolve, anchorId) => resolve
   ? async (targets) => keepDraftsApart(await resolve(targets), anchorId)
   : null;
 
-export function archiveThread(messages, { t, addNotification, fetchThread, anchorId }) {
+// Archive takes the conversation out of the folder it is shown in, as the list's archive does
+// (archiveTargetsForFolder): your replies stay in Sent rather than moving to Archive with it. With
+// no folder given, every message goes, as before.
+const inArchiveScope = (list, { anchorId, folder, accountId }) => {
+  if (!folder) return list;
+  const anchor = list.find(message => message?.id === anchorId) || newestConversationMessage(list);
+  return anchor ? archiveTargetsForFolder(anchor, list, folder, true, accountId) : list;
+};
+
+export function archiveThread(messages, { t, addNotification, fetchThread, anchorId, folder, accountId }) {
+  const scope = { anchorId, folder, accountId };
+  const resolveSpared = sparingDrafts(liveThread(fetchThread), anchorId);
   runThreadAction({
-    messages: keepDraftsApart(messages, anchorId),
+    messages: inArchiveScope(keepDraftsApart(messages, anchorId), scope),
     addNotification,
-    resolve: sparingDrafts(liveThread(fetchThread), anchorId),
+    resolve: resolveSpared ? async (targets) => inArchiveScope(await resolveSpared(targets), scope) : null,
     commit: async (targets) => {
       const result = await api.bulkArchive(conversationActionIds(targets));
       // Not an error: the account simply has no archive folder mapped, and the user

@@ -324,6 +324,18 @@ describe('conversation actions', () => {
     assert.match(printWin.writes.join(''), /body of m1/);
     assert.doesNotMatch(printWin.writes.join(''), /body of m3/);
   });
+
+  // Archive takes the conversation out of the folder it is shown from, as the list's archive does:
+  // the reply in Sent stays put.
+  test('archive moves the Inbox copies and leaves the Sent reply', async () => {
+    const archiveButton = [...document.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.archive');
+    assert.ok(archiveButton, 'the pane offers Archive');
+    await click(archiveButton);
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4700)); });
+    const archive = requests.find(r => r.url.includes('/mail/messages/bulk-archive'));
+    assert.ok(archive, 'the archive was sent after the undo window');
+    assert.deepEqual(JSON.parse(archive.body).ids.sort(), ['m1', 'm3']);
+  });
 });
 
 describe('conversation pane on a phone', () => {

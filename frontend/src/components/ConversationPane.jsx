@@ -110,6 +110,10 @@ export default function ConversationPane({ threadId, folder, unified = false, se
       fetchThread: () => api.getThread(threadId, folder, unified),
       // Archive, delete and move keep drafts and the rest apart, by the selected message (keepDraftsApart).
       anchorId: selectedMessageId,
+      // Archive moves only the copies in the folder being viewed, as the list's archive does: the
+      // unified inbox is every account's INBOX, an account view is that account's folder.
+      folder: unified ? 'INBOX' : folder,
+      accountId: unified ? null : (messages.find(message => message.id === selectedMessageId)?.account_id ?? null),
     });
     setSelectedMessage(null);
   };
