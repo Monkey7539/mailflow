@@ -1505,6 +1505,20 @@ describe('walkStructure attachment classification', () => {
     return results;
   };
 
+  it('strips bidi overrides from attachment names, so "invoice<RLO>fdp.exe" cannot pose as a PDF', () => {
+    const results = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+        { part: '2', type: 'application/octet-stream', encoding: 'base64', disposition: 'attachment',
+          dispositionParameters: { filename: 'invoice\u202Efdp.exe' } },
+        { part: '3', type: 'application/octet-stream', encoding: 'base64',
+          parameters: { name: 'a\u2066b\u2069c\u200Fd\u061Ce\u202Af.bin' } },
+      ],
+    });
+    expect(results.attachments.map(a => a.filename)).toEqual(['invoicefdp.exe', 'abcdef.bin']);
+  });
+
   it('treats an attached HTML file as an attachment, not body text', () => {
     const results = walk({
       type: 'multipart/mixed',
