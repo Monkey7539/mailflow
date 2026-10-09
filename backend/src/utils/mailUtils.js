@@ -30,7 +30,7 @@ export async function mappedFolderUsable(accountId, path) {
 const TOP_LEVEL_FOLDER_SQL = `(path = name OR upper(path) = ('INBOX' || delimiter || upper(name)))`;
 const TRASH_FOLDER_SQL = `(special_use = '\\Trash'
   OR (lower(name) IN ('trash', 'deleted', 'deleted items', 'deleted messages') AND ${TOP_LEVEL_FOLDER_SQL}))`;
-const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
+export const DRAFTS_FOLDER_SQL = `(special_use = '\\Drafts'
   OR (lower(name) IN ('drafts', 'draft') AND ${TOP_LEVEL_FOLDER_SQL}))`;
 
 // Resolve the canonical trash folder path for an account (used as move destination).

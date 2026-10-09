@@ -19,9 +19,10 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
     await database.connect();
     await database.query(`
       CREATE TEMP TABLE email_accounts (id uuid, user_id text, enabled boolean,
-        include_in_unified_inbox boolean, name text, email_address text, color text);
-      CREATE TEMP TABLE folders (account_id uuid, path text, total_count integer DEFAULT 0,
-        unread_count integer DEFAULT 0);
+        include_in_unified_inbox boolean, name text, email_address text, color text,
+        folder_mappings jsonb);
+      CREATE TEMP TABLE folders (account_id uuid, path text, name text, delimiter text,
+        special_use text, total_count integer DEFAULT 0, unread_count integer DEFAULT 0);
       CREATE TEMP TABLE messages (id uuid PRIMARY KEY, account_id uuid, folder text,
         uid bigint, message_id text, in_reply_to text, thread_references text,
         thread_id text, thread_key text, date timestamptz, is_deleted boolean DEFAULT false,
@@ -29,7 +30,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
         reply_to jsonb, snippet text, is_read boolean DEFAULT false, is_starred boolean DEFAULT false,
         has_attachments boolean DEFAULT false, category text, list_unsubscribe text,
         list_unsubscribe_post text, delivery_addresses jsonb, spam_verdict text,
-        spam_user_override text, spam_score_ml real);
+        spam_user_override text, spam_score_ml real, flags jsonb);
       CREATE TEMP TABLE contacts (id uuid, user_id text, primary_email text, photo_data text)`);
     query.mockImplementation((sql, values) => database.query(sql, values));
   });
@@ -39,15 +40,19 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
   beforeEach(async () => {
     await database.query('TRUNCATE messages, folders, email_accounts, contacts');
     await database.query(
-      "INSERT INTO email_accounts VALUES ($1,'owner',true,true,'Work','me@example.com','#123456')",
+      "INSERT INTO email_accounts VALUES ($1,'owner',true,true,'Work','me@example.com','#123456',NULL)",
       [account],
     );
   });
 
-  const insert = (folder, messageId, threadKey, date, subject) => database.query(
-    `INSERT INTO messages(id,account_id,folder,message_id,thread_id,thread_key,date,subject)
-     VALUES ($1,$2,$3,$4,$5,$5,$6,$7)`,
-    [id(), account, folder, messageId, threadKey, date, subject],
+  const insert = (folder, messageId, threadKey, date, subject, flags = null) => database.query(
+    `INSERT INTO messages(id,account_id,folder,message_id,thread_id,thread_key,date,subject,flags)
+     VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8)`,
+    [id(), account, folder, messageId, threadKey, date, subject, flags && JSON.stringify(flags)],
+  );
+  const folder = (path, { name = path, specialUse = null, delimiter = '/' } = {}) => database.query(
+    'INSERT INTO folders(account_id,path,name,delimiter,special_use) VALUES ($1,$2,$3,$4,$5)',
+    [account, path, name, delimiter, specialUse],
   );
 
   const inboxRows = async (accountId) => {
@@ -94,6 +99,43 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('threaded Inbox message
       expect(rows['<out@me>']).toBeUndefined();
     });
   }
+
+  // A count of 2 makes the row a conversation, and deleting a conversation expunges its drafts:
+  // a saved reply must not turn a lone message into one.
+  it('does not count a saved reply draft, by its \\Draft flag', async () => {
+    await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');
+    await insert('Drafts', '<d@me>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question', ['\\Draft', '\\Seen']);
+    expect((await inboxRows(account))['<a@ext>'].message_count).toBe(1);
+    expect((await inboxRows(undefined))['<a@ext>'].message_count).toBe(1);
+  });
+
+  it('does not count an unflagged draft in the special-use, stock-named or mapped Drafts folder', async () => {
+    await folder('[Gmail]/Entwürfe', { name: 'Entwürfe', specialUse: '\\Drafts' });
+    await folder('Drafts');
+    await folder('Brouillons');
+    await database.query(`UPDATE email_accounts SET folder_mappings = '{"drafts":"Brouillons"}'`);
+    await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');
+    await insert('[Gmail]/Entwürfe', '<d1@me>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question');
+    await insert('Drafts', '<d2@me>', '<a@ext>', '2026-10-01T11:01Z', 'Re: Question');
+    await insert('Brouillons', '<d3@me>', '<a@ext>', '2026-10-01T11:02Z', 'Re: Question');
+    expect((await inboxRows(account))['<a@ext>'].message_count).toBe(1);
+  });
+
+  it('still counts a message in a user folder that merely has "drafts" in its name', async () => {
+    await folder('Clients/Drafts', { name: 'Drafts' });
+    await folder('Blog drafts');
+    await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');
+    await insert('Clients/Drafts', '<b@ext>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question');
+    await insert('Blog drafts', '<c@ext>', '<a@ext>', '2026-10-01T12:00Z', 'Re: Question');
+    expect((await inboxRows(account))['<a@ext>'].message_count).toBe(3);
+  });
+
+  it('counts the Sent reply but not the draft beside it', async () => {
+    await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');
+    await insert('Sent', '<b@me>', '<a@ext>', '2026-10-01T11:00Z', 'Re: Question', ['\\Seen']);
+    await insert('Drafts', '<d@me>', '<a@ext>', '2026-10-01T12:00Z', 'Re: Question', ['\\Draft']);
+    expect((await inboxRows(account))['<a@ext>'].message_count).toBe(2);
+  });
 
   it('does not count deleted messages', async () => {
     await insert('INBOX', '<a@ext>', '<a@ext>', '2026-10-01T10:00Z', 'Question');

@@ -1,5 +1,6 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
+import { DRAFTS_FOLDER_SQL } from '../utils/mailUtils.js';
 
 export async function listMessages({ userId, accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
   const accountsResult = await query(
@@ -133,9 +134,22 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
         -- all folders. An INBOX-only count left your own replies (in Sent) out, so a received
         -- message plus your reply counted 1, and the row could neither expand nor open the
         -- conversation view until a second reply arrived (#576).
+        --
+        -- Except drafts. A count of 2 makes the row a conversation, and deleting or moving a
+        -- conversation takes every message in it; a deleted draft is expunged for good. A saved
+        -- reply must not turn its message into a conversation and be swept away with it. A draft
+        -- is known by its IMAP Draft flag or by its folder: the account's mapped Drafts folder, or
+        -- the special-use and stock-name rules the rest of the app uses (mailUtils.js).
         WHERE m.account_id = ANY($${p})
           AND m.is_deleted = false
           AND m.message_id IS NOT NULL
+          AND NOT COALESCE(m.flags ? '\\Draft', false)
+          AND NOT EXISTS (
+            SELECT 1 FROM folders f
+            WHERE f.account_id = m.account_id AND f.path = m.folder
+              AND (${DRAFTS_FOLDER_SQL}
+                   OR f.path = (SELECT a.folder_mappings->>'drafts' FROM email_accounts a WHERE a.id = m.account_id))
+          )
           AND m.thread_key IN (SELECT thread_id FROM paged_threads)
         GROUP BY m.thread_key
       ),
