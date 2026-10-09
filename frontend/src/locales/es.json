@@ -94,6 +94,7 @@
     "hidePassword": "Ocultar contraseña"
   },
   "compose": {
+    "unsupportedDraftFrom": "Elige un remitente configurado antes de guardar o enviar este borrador.",
     "newMessage": "Nuevo mensaje",
     "reply": "Responder",
     "replyAll": "Responder a todos",
@@ -313,6 +314,13 @@
     }
   },
   "messageList": {
+    "replyDraftChanged": "El borrador de respuesta ha cambiado. Intenta abrirlo de nuevo.",
+    "replyDraftKeepCurrent": "Guarda el mensaje actual y resuelve sus adjuntos antes de abrir este borrador.",
+    "replyDraftUnavailable": "Este borrador de respuesta ya no está disponible.",
+    "replyDraftCancelled": "Se canceló la apertura del borrador de respuesta porque cambió la selección o el editor. Intenta abrirlo de nuevo.",
+    "replyDraftRetry": "Volver a buscar el borrador de respuesta",
+    "openReplyDraft": "Abrir borrador de respuesta",
+    "replyDraft": "Borrador de respuesta",
     "search": "Buscar…",
     "unread": "No leídos",
     "showAll": "Mostrar todos",
@@ -998,6 +1006,7 @@
       "customCssSaved": "Guardado"
     },
     "messageList": {
+      "autoOpenReplyDrafts": "Abrir automáticamente las respuestas guardadas al seleccionar mensajes de la bandeja de entrada",
       "title": "Lista de mensajes",
       "senderFavicons": "Favicons de remitentes",
       "senderFaviconsDesc": "Mostrar iconos de sitios web para los remitentes sin foto de contacto. Solo se envía a Twenty Icons el dominio del remitente, nunca su dirección de correo completa.",
@@ -1172,6 +1181,11 @@
       "activityBlocked": "Bloqueado",
       "savingProtection": "Guardando…",
       "eventSsoLogin": "Inicio de sesión SSO",
+      "eventAdminPasswordSet": "Contraseña establecida",
+      "eventAdminUserUpdate": "Cuenta editada",
+      "eventAdminTotpDisable": "2FA desactivado",
+      "eventAdminUserDelete": "Cuenta eliminada",
+      "byActor": "por {{actor}}",
       "activityTitle": "Actividad de inicio de sesión",
       "loginProtectionTitle": "Protección de inicio de sesión",
       "qrCodeAlt": "QR code",
@@ -1259,7 +1273,25 @@
       "deleteConfirmLabel": "Eliminar usuario",
       "disable2faConfirmTitle": "¿Desactivar 2FA para «{{username}}»?",
       "disable2faConfirmBody": "Esto eliminará el requisito de su aplicación de autenticación. Pueden volver a activarla ellos mismos.",
-      "disable2faConfirmLabel": "Desactivar 2FA"
+      "disable2faConfirmLabel": "Desactivar 2FA",
+      "lastSeen": "Último acceso {{when}}",
+      "neverSeen": "Nunca ha iniciado sesión",
+      "edit": "Editar",
+      "editTitle": "Editar {{username}}",
+      "username": "Nombre de usuario",
+      "usernameHint": "Se usa para iniciar sesión en MailFlow.",
+      "recoveryEmail": "Correo de recuperación",
+      "recoveryEmailHint": "Recibe el enlace de \"¿Olvidaste tu contraseña?\". Déjalo vacío para quitarlo.",
+      "newPassword": "Nueva contraseña",
+      "newPasswordHint": "Déjala vacía para mantener la actual. Al guardar una nueva, se cierra la sesión del usuario en todos los dispositivos.",
+      "newPasswordHintSelf": "Déjala vacía para mantener la actual. Se cierra la sesión en tus otros dispositivos; en este sigue abierta.",
+      "confirmPassword": "Confirmar nueva contraseña",
+      "passwordTooShort": "La contraseña debe tener al menos 8 caracteres.",
+      "passwordMismatch": "Las contraseñas no coinciden.",
+      "usernameTaken": "Ese nombre de usuario ya está en uso.",
+      "invalidEmail": "Esa dirección de correo no es válida.",
+      "saveFailed": "No se pudo guardar: {{message}}",
+      "passwordNotSet": "Los demás cambios se guardaron, pero la contraseña no se estableció: {{message}}"
     },
     "ai": {
       "title": "Asistente IA",
