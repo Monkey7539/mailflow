@@ -102,6 +102,17 @@ test('updating the signed-in user keeps their compose and mailbox', () => {
   assert.equal(s().accounts.length, 1);
 });
 
+test('a cold load keeps the reading preferences the store seeded from localStorage', () => {
+  // The store reads these two from localStorage when it is created, so they apply before
+  // loadPreferences answers. App.jsx then calls setUser with the signed-in user, going from no
+  // user to one; there is no previous user's state to clear.
+  s().setUser(null);
+  useStore.setState({ autoOpenReplyDrafts: true, afterRemove: 'previous' });
+  s().setUser({ id: 'alice' });
+  assert.equal(s().autoOpenReplyDrafts, true);
+  assert.equal(s().afterRemove, 'previous');
+});
+
 test('Sign out clears the per-user keys and falls back to the login page', async () => {
   const perUserKeys = [
     'mailflow_notification_sound', 'mailflow_custom_sound', 'mailflow_custom_sound_name',
@@ -109,6 +120,7 @@ test('Sign out clears the per-user keys and falls back to the login page', async
     'mailflow_threaded_view', 'mailflow_plaintext_email',
     'mailflow_hover_quick_actions', 'mailflow_swipe_actions',
     'mailflow_expanded_accounts', 'mailflow_collapsed_folders',
+    'mailflow_auto_open_reply_drafts', 'mailflow_after_remove',
     'mailflow_locked_message', 'mailflow_locked',
   ];
   for (const k of perUserKeys) localStorage.setItem(k, '1');
