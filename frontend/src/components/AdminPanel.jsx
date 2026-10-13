@@ -36,6 +36,7 @@ import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import AdminUserEditor from './AdminUserEditor.jsx';
 import { formatRelativeTime, daysSince } from '../utils/relativeTime.js';
+import { formatDateTime, formatDay, formatTime } from '../utils/formatDate.js';
 import { htmlLang } from '../utils/browserLanguage.js';
 import SpamSettings from './SpamSettings.jsx';
 import BackupSettings from './BackupSettings.jsx';
@@ -1185,7 +1186,7 @@ function AccountsTab() {
             {[
               ['IMAP', `${account.imap_host}:${account.imap_port}`],
               ['SMTP', `${account.smtp_host}:${account.smtp_port}`],
-              [t('admin.accounts.lastSync'), account.last_sync ? new Date(account.last_sync).toLocaleTimeString() : t('common.never')],
+              [t('admin.accounts.lastSync'), account.last_sync ? formatTime(account.last_sync) : t('common.never')],
             ].map(([label, val]) => (
               <div key={label} style={{ fontSize: 11 }}>
                 <span style={{ color: 'var(--text-tertiary)' }}>{label} </span>
@@ -1226,7 +1227,7 @@ function AccountsTab() {
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
 function ThemesTab() {
   const { t } = useTranslation();
-  const { theme, setTheme } = useStore();
+  const { theme, setTheme, darkEmailBodies, setDarkEmailBodies } = useStore();
   const [customCss, setCustomCss] = useState('');
   const [cssSaving, setCssSaving] = useState(false);
   const [cssSaved, setCssSaved] = useState(false);
@@ -1267,6 +1268,21 @@ function ThemesTab() {
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 20 }}>
         {t('admin.appearance.description')}
       </div>
+
+      {/* Dark email bodies (#228): what is shown dark, and why the rest is not, is in utils/darkScheme.js. */}
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 20, cursor: 'pointer' }}>
+        <input
+          id="dark-email-bodies"
+          type="checkbox"
+          checked={darkEmailBodies}
+          onChange={event => setDarkEmailBodies(event.target.checked)}
+          style={{ marginTop: 2 }}
+        />
+        <span>
+          <span style={{ display: 'block', fontSize: 13, color: 'var(--text-primary)' }}>{t('admin.appearance.darkEmailBodies')}</span>
+          <span style={{ display: 'block', fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.appearance.darkEmailBodiesDesc')}</span>
+        </span>
+      </label>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
         {Object.entries(THEMES).map(([key, themeObj]) => (
@@ -2474,7 +2490,7 @@ function CardDavCard() {
                 <div style={{ marginTop: 4 }}>
                   {t('admin.integrations.carddav.summary', { contacts: status.contactCount ?? 0, books: status.bookCount ?? 0 })}
                   {' · '}
-                  {t('admin.integrations.carddav.lastSync', { when: status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : t('common.never') })}
+                  {t('admin.integrations.carddav.lastSync', { when: status.lastSyncAt ? formatDateTime(status.lastSyncAt) : t('common.never') })}
                 </div>
                 {status.lastError && (
                   <div style={{ marginTop: 4, color: 'var(--red, #f87171)' }}>{t('admin.integrations.carddav.syncFailed', { error: status.lastError })}</div>
@@ -4484,7 +4500,7 @@ function AISection() {
                       {cancelling ? t('admin.ai.cancelling') : t('common.cancel')}
                     </button>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.ai.deviceExpires', { time: new Date(pendingDevice.expiresAt).toLocaleTimeString() })}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.ai.deviceExpires', { time: formatTime(pendingDevice.expiresAt) })}</div>
                 </div>
               )}
             </div>
@@ -5290,11 +5306,11 @@ function UsersAndInvitesPanel() {
                 )}
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                {t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString() })}
+                {t('admin.users.joined', { date: formatDay(u.created_at) })}
               </div>
               {/* Last request, not last login: sessions roll, so a daily user rarely logs in. */}
               <div
-                title={u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleString() : undefined}
+                title={u.lastSeenAt ? formatDateTime(u.lastSeenAt) : undefined}
                 style={{
                   fontSize: 11, marginTop: 1,
                   color: u.lastSeenAt && daysSince(u.lastSeenAt) > 90 ? 'var(--amber)' : 'var(--text-tertiary)',
@@ -5495,7 +5511,7 @@ function UsersAndInvitesPanel() {
                       {inv.email}
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
-                      {t('admin.users.inviteExpires', { date: new Date(inv.expires_at).toLocaleDateString() })}
+                      {t('admin.users.inviteExpires', { date: formatDay(inv.expires_at) })}
                     </div>
                   </div>
                   <button
@@ -5545,8 +5561,8 @@ function UsersAndInvitesPanel() {
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                     {inv.used_at
-                      ? t('admin.users.inviteUsedBy', { username: inv.used_by_username || 'unknown', date: new Date(inv.used_at).toLocaleDateString() })
-                      : t('admin.users.inviteExpired', { date: new Date(inv.expires_at).toLocaleDateString() })}
+                      ? t('admin.users.inviteUsedBy', { username: inv.used_by_username || 'unknown', date: formatDay(inv.used_at) })
+                      : t('admin.users.inviteExpired', { date: formatDay(inv.expires_at) })}
                   </div>
                 </div>
                 <IconBtn onClick={() => handleRevokeInvite(inv.id)} title={t('admin.users.inviteDelete')} danger>
@@ -7087,21 +7103,44 @@ function MailboxCleanupTab() {
 
   useEffect(() => { if (accountId) load(accountId); }, [accountId, load]);
 
-  const cleanupSender = async (s) => {
+  // Senders ticked for a batch run; keyed by fromEmail. Only ever read through
+  // `selectedSenders`, so senders that vanish after a refresh drop out on their own.
+  const [selected, setSelected] = useState(() => new Set());
+  const senders = data?.tier1Senders || [];
+  const selectedSenders = senders.filter(s => selected.has(s.fromEmail));
+  const allSelected = senders.length > 0 && selectedSenders.length === senders.length;
+  // The row-button busy marker for a batch run; not a valid fromEmail, so no row matches it.
+  const BATCH = '*';
+  useEffect(() => { setSelected(new Set()); }, [accountId]);
+
+  const toggleSender = (email) => setSelected(prev => {
+    const next = new Set(prev);
+    if (!next.delete(email)) next.add(email);
+    return next;
+  });
+
+  // One confirm and one progress bar for the whole list; each sender is still resolved server-side
+  // (own account, INBOX, exact sender) and moved in <=500-id batches, in sequence.
+  const cleanupSenders = async (list) => {
     const isArchive = action === 'archive';
-    const label = s.fromName ? `${s.fromName} <${s.fromEmail}>` : s.fromEmail;
+    const labelOf = (s) => (s.fromName ? `${s.fromName} <${s.fromEmail}>` : s.fromEmail);
+    const shown = list.slice(0, 3).map(labelOf).join(', ');
+    const label = list.length > 3 ? `${shown} +${list.length - 3}` : shown;
+    const grandTotal = list.reduce((n, s) => n + s.count, 0);
     const confirmKey = isArchive ? 'admin.cleanup.confirmArchive' : 'admin.cleanup.confirm';
-    if (!window.confirm(t(confirmKey, { count: s.count, sender: label }))) return;
-    setBusySender(s.fromEmail); setError(''); setProgress({ done: 0, total: s.count });
+    if (!window.confirm(t(confirmKey, { count: grandTotal, sender: label }))) return;
+    setBusySender(list.length === 1 ? list[0].fromEmail : BATCH); setError(''); setProgress({ done: 0, total: grandTotal });
     try {
-      const { ids } = await api.cleanupPreview(accountId, s.fromEmail);
       const runBatch = isArchive ? api.bulkArchive : api.bulkDelete;
       let done = 0;
-      for (let i = 0; i < ids.length; i += 500) {
-        const batch = ids.slice(i, i + 500);
-        await runBatch(batch);
-        done += batch.length;
-        setProgress({ done, total: ids.length });
+      for (const s of list) {
+        const { ids } = await api.cleanupPreview(accountId, s.fromEmail);
+        for (let i = 0; i < ids.length; i += 500) {
+          const batch = ids.slice(i, i + 500);
+          await runBatch(batch);
+          done += batch.length;
+          setProgress({ done, total: grandTotal });
+        }
       }
     } catch (e) { setError(e.message); }
     finally {
@@ -7123,7 +7162,7 @@ function MailboxCleanupTab() {
 
       {accounts.length > 1 && (
         <Field label={t('admin.cleanup.account')}>
-          <select value={accountId} onChange={e => setAccountId(e.target.value)} style={{ ...inputStyle, appearance: 'none' }}>
+          <select value={accountId} disabled={!!busySender} onChange={e => setAccountId(e.target.value)} style={{ ...inputStyle, appearance: 'none' }}>
             {accounts.map(a => <option key={a.id} value={a.id}>{a.email_address}</option>)}
           </select>
         </Field>
@@ -7178,8 +7217,44 @@ function MailboxCleanupTab() {
             <div style={muted}>{t('admin.cleanup.noneFound')}</div>
           ) : (
             <div style={{ marginBottom: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 4px', borderBottom: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  id="cleanup-select-all"
+                  checked={allSelected}
+                  disabled={!!busySender}
+                  onChange={() => setSelected(allSelected ? new Set() : new Set(senders.map(s => s.fromEmail)))}
+                />
+                <label htmlFor="cleanup-select-all" style={{ ...muted, flex: 1, cursor: 'pointer' }}>
+                  {t(allSelected ? 'messageList.deselectAll' : 'messageList.selectAll')}
+                </label>
+                <button
+                  type="button"
+                  disabled={!!busySender || selectedSenders.length === 0}
+                  onClick={() => cleanupSenders(selectedSenders)}
+                  style={{
+                    flexShrink: 0, padding: '6px 12px', borderRadius: 7, fontSize: 12, fontWeight: 500,
+                    border: '1px solid var(--border)',
+                    cursor: (busySender || selectedSenders.length === 0) ? 'not-allowed' : 'pointer',
+                    background: action === 'archive' ? 'var(--accent)' : 'var(--amber, #d97706)',
+                    color: action === 'archive' ? 'var(--accent-text, white)' : 'white',
+                    opacity: selectedSenders.length === 0 || (busySender && busySender !== BATCH) ? 0.5 : 1,
+                  }}
+                >
+                  {busySender === BATCH && progress
+                    ? `${progress.done.toLocaleString()}/${progress.total.toLocaleString()}`
+                    : `${t(action === 'archive' ? 'admin.cleanup.archive' : 'admin.cleanup.moveToTrash')} (${selectedSenders.length})`}
+                </button>
+              </div>
               {data.tier1Senders.map(s => (
                 <div key={s.fromEmail} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--border-subtle)' }}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(s.fromEmail)}
+                    disabled={!!busySender}
+                    onChange={() => toggleSender(s.fromEmail)}
+                    aria-label={s.fromName || s.fromEmail}
+                  />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.fromName || s.fromEmail}</div>
                     {s.fromName && <div style={{ ...muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.fromEmail}</div>}
@@ -7188,7 +7263,7 @@ function MailboxCleanupTab() {
                   <button
                     type="button"
                     disabled={!!busySender}
-                    onClick={() => cleanupSender(s)}
+                    onClick={() => cleanupSenders([s])}
                     style={{
                       flexShrink: 0, padding: '6px 12px', borderRadius: 7, fontSize: 12, fontWeight: 500,
                       border: '1px solid var(--border)', cursor: busySender ? 'not-allowed' : 'pointer',
@@ -8582,7 +8657,7 @@ function SecurityTab() {
                   {authEvents.map(ev => (
                     <tr key={ev.id} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                        {new Date(ev.created_at).toLocaleString()}
+                        {formatDateTime(ev.created_at)}
                       </td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
                         {eventLabel(ev.event_type)}
@@ -8749,6 +8824,7 @@ function makeSearchIndex(t) {
     { label: t('admin.rules.subTabBlockList'), keywords: ['block', 'blocked', 'sender', 'blacklist', 'spam', 'domain'], tab: 'rules', subtab: 'block-list', breadcrumb: `${tabLabel('rules')} › ${t('admin.rules.subTabBlockList')}` },
     // Appearance > Theme
     { label: tabLabel('theme'), keywords: ['theme', 'dark', 'light', 'color', 'colour', 'dark mode', 'light mode'], tab: 'appearance', subtab: 'theme', breadcrumb: `${tabLabel('appearance')} › ${tabLabel('theme')}` },
+    { label: t('admin.appearance.darkEmailBodies'), keywords: ['dark email', 'email body', 'dark mode', 'dark message', 'white background'], tab: 'appearance', subtab: 'theme', breadcrumb: `${tabLabel('appearance')} › ${tabLabel('theme')}` },
     // Appearance > Layout
     { label: t('admin.appearance.layout'), keywords: ['layout', 'pane', 'split', 'preview', 'reading pane', 'side by side', 'stacked'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.scrollingMode'), keywords: ['scroll', 'infinite', 'paginated', 'pagination', 'pages'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },

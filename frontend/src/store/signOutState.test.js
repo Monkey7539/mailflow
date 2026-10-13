@@ -85,7 +85,7 @@ test('nor the settings held only in memory', () => {
     blockRemoteImages: false, imageWhitelist: { addresses: ['sender@example.invalid'], domains: [] },
     hiddenFolders: { 'acct-a': ['HR'] }, shortcuts: { archive: 'z' }, autoLockMinutes: 5,
     categorizationEnabled: true, gtdPetSlug: 'cat',
-    autoOpenReplyDrafts: true, afterRemove: 'list',
+    autoOpenReplyDrafts: true, afterRemove: 'list', darkEmailBodies: true,
   };
   useStore.setState(settings);
   sessionExpires();
@@ -120,7 +120,7 @@ test('Sign out clears the per-user keys and falls back to the login page', async
     'mailflow_threaded_view', 'mailflow_plaintext_email',
     'mailflow_hover_quick_actions', 'mailflow_swipe_actions',
     'mailflow_expanded_accounts', 'mailflow_collapsed_folders',
-    'mailflow_auto_open_reply_drafts', 'mailflow_after_remove',
+    'mailflow_auto_open_reply_drafts', 'mailflow_after_remove', 'mailflow_dark_email_bodies',
     'mailflow_locked_message', 'mailflow_locked',
   ];
   for (const k of perUserKeys) localStorage.setItem(k, '1');

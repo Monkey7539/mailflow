@@ -227,6 +227,25 @@ describe('conversation pane', () => {
     assert.equal(body.getAttribute('translate'), 'yes');
   });
 
+  // #228: plain text follows a dark theme, and each card can switch back to its original colors.
+  test('a plain-text card in a dark theme can be switched to its original colors and back', async (t) => {
+    const { useStore } = await import('../store/index.js');
+    textOnly = true;
+    useStore.setState({ theme: 'dark' });
+    t.after(() => { textOnly = false; });
+    await React.act(async () => {
+      root.render(React.createElement(ConversationPane, { key: 'text-dark', threadId: '<1@x>', folder: 'INBOX', selectedMessageId: 'm1' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const body = () => [...document.querySelectorAll('div')].find(el => el.textContent === 'plain body of m1');
+    const button = label => [...document.querySelectorAll('button')].find(b => b.textContent === label);
+    assert.equal(body().style.background, '', 'themed, as before');
+    await React.act(async () => { button('message.showOriginal').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(body().style.background, 'white');
+    await React.act(async () => { button('message.showDark').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(body().style.background, '');
+  });
+
   test('an HTML message stays translatable under the translate="no" UI', async () => {
     // Chrome's translator carries the page's translate="no" into the same-origin frame an HTML
     // body renders in, so the email has to opt back in inside its own document.

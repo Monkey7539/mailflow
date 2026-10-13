@@ -10,6 +10,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { createPluginMailFacade } from '../plugins/mailEngineFacade.js';
 import { refreshMicrosoftToken, refreshGoogleToken } from '../routes/oauth.js';
 import { sanitizeEmail } from './emailSanitizer.js';
+import { settleCids } from '../utils/cidRefs.js';
 import { logger } from './logger.js';
 import { recordBroadcast, recordWarning, recordSyncSignal } from './diagnosticsRing.js';
 import { decrypt } from './encryption.js';
@@ -768,14 +769,17 @@ export function walkStructure(node, results) {
   }
 }
 
+// A cid: reference in HTML or CSS, with or without angle brackets: src="cid:abc123" and
+// src="cid:<abc123>". The Content-ID ends where the URL does: at whitespace, a quote, ')', an
+// angle bracket or the '&' of &quot;. So cid:logo-dark is not a reference to logo.
+const CID_REFERENCE_RE = /cid:<?([^\s"'<>)&]+)>?/gi;
+
 // An inline image is shown only where the HTML references its Content-ID, so one
 // the HTML never references, or any when there is no HTML body (a photo sent
-// inline with a plain-text message), is listed as an attachment instead. A
-// reference ends where its URL does: at whitespace, a quote, ')', an angle
-// bracket or the '&' of &quot;. So cid:logo-dark is not a reference to logo.
+// inline with a plain-text message), is listed as an attachment instead.
 function listUnreferencedInlineImages(results, html) {
   const referenced = new Set();
-  for (const [, cid] of (html || '').matchAll(/cid:<?([^\s"'<>)&]+)>?/gi)) referenced.add(cid.toLowerCase());
+  for (const [, cid] of (html || '').matchAll(CID_REFERENCE_RE)) referenced.add(cid.toLowerCase());
   for (const img of results.inlineImages || []) {
     if (referenced.has(img.cid.toLowerCase())) continue;
     results.attachments.push({
@@ -903,7 +907,8 @@ function walkNode(node, results) {
       charset: node.parameters?.charset || 'utf-8',
     });
   } else if (type.startsWith('image/') && node.id && disposition !== 'attachment') {
-    // Inline image referenced via cid: in the HTML body
+    // Inline image referenced via cid: in the HTML body. One the HTML never
+    // references is listed as an attachment once the body is known.
     results.inlineImages = results.inlineImages || [];
     results.inlineImages.push({
       part: node.part || '1',
@@ -2695,13 +2700,13 @@ export class ImapManager {
 
     let client;
     try {
-      // Refresh OAuth token if needed before connecting. Both setup steps stay inside the try so
-      // a failed policy lookup, or a host the policy rejects, is recorded as the account's error
-      // and releases connectingAccounts; otherwise every later attempt is skipped as a duplicate
-      // until the process restarts.
+      // Inside the try: a token refresh that fails, or a host the address check refuses, must
+      // release the in-progress lock and be recorded like any other failed connect. Before it
+      // was, it left the account "connecting" until a restart: the health check skipped it,
+      // Sync now said "Already connecting", and the user saw no error.
+      // Refresh OAuth token if needed before connecting
       account = await ensureFreshToken(account);
       const { resolved, policy } = await resolveAccountHost(account);
-
       // Connect via the shared helper: it attaches the #360 handshake-error listener, races the
       // connect against a 30s timeout (client.connect() has none — a slow/unresponsive server like
       // purelymail on a cold start would otherwise hang forever, wedging retries while
@@ -5890,7 +5895,7 @@ export class ImapManager {
         );
         if (existing.rows.length) continue;
 
-        const { html, text, attachments } = await this.fetchMessageBody(
+        const { html, text, attachments, cidsComplete } = await this.fetchMessageBody(
           account, msg.uid, msg.folder || 'INBOX'
         );
         const safeHtml = html ? sanitizeEmail(html) : null;
@@ -5901,7 +5906,8 @@ export class ImapManager {
              SET body_html = $1, body_text = $2, attachments = $3,
                  snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
              WHERE id = $4`,
-            [sanitizeStr(safeHtml), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
+            // Settled when its cid: references can never resolve (utils/cidRefs.js, #595).
+            [sanitizeStr(settleCids(safeHtml, cidsComplete)), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
           );
         }
       } catch (err) {
@@ -5953,7 +5959,7 @@ export class ImapManager {
         );
         if (existing.rows.length) continue;
 
-        const { html, text, attachments } = await this.fetchMessageBody(account, msg.uid, msg.folder);
+        const { html, text, attachments, cidsComplete } = await this.fetchMessageBody(account, msg.uid, msg.folder);
         const safeHtml = html ? sanitizeEmail(html) : null;
         if (safeHtml || text) {
           const snip = snippetFromBody(text, safeHtml || html);
@@ -5962,7 +5968,8 @@ export class ImapManager {
              SET body_html = $1, body_text = $2, attachments = $3,
                  snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
              WHERE id = $4`,
-            [sanitizeStr(safeHtml), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
+            // Settled when its cid: references can never resolve (utils/cidRefs.js, #595).
+            [sanitizeStr(settleCids(safeHtml, cidsComplete)), sanitizeStr(text), JSON.stringify(attachments || []), msg.id, sanitizeStr(snip)]
           );
         }
       } catch (err) {
@@ -6046,6 +6053,10 @@ export class ImapManager {
       let html = null;
       let text = null;
       let attachments;
+      // False when a cid: reference is left in the HTML because its image's bytes did not arrive,
+      // so a later view should fetch again; a reference no part answers, or one over the repeat
+      // budget, stays whatever happens and leaves this true (utils/cidRefs.js, #595).
+      let cidsComplete = true;
       // Always address by UID string with uid:true option — direct UID FETCH avoids
       // the two-step SEARCH+FETCH path that object-range syntax triggers, which can
       // silently return nothing on stale connections or when a server-side search
@@ -6199,12 +6210,13 @@ export class ImapManager {
         // images render inside the sandboxed srcdoc iframe
         if (html && inlineImages.length > 0) {
           const dataUris = new Map();
+          const missingImages = new Set();
           for (const img of inlineImages) {
             if (!img.cid) continue;
             const key = img.cid.toLowerCase();
             if (dataUris.has(key)) continue;
             const buf = prefetched.get(img.part);
-            if (!buf || looksLikeTextPayload(buf)) continue;
+            if (!buf || looksLikeTextPayload(buf)) { missingImages.add(key); continue; }
             const enc = (img.encoding || '').toLowerCase();
             const b64 = enc === 'base64'
               ? buf.toString('ascii').replace(/\s/g, '')
@@ -6215,13 +6227,10 @@ export class ImapManager {
             const embedded = new Set();
             let repeatBudget = INLINE_IMAGE_REPEAT_BUDGET;
             let overBudget = 0;
-            // cid: refs appear with and without angle brackets — match both.
-            // e.g.  src="cid:abc123"  and  src="cid:<abc123>"
-            // The Content-ID ends where the URL does in HTML or CSS: at whitespace, a quote,
-            // ')', an angle bracket or the '&' of &quot;. Content-IDs, types and base64 text
-            // all come from the sender, so none of them become regex or replacement-string
-            // syntax, and a single pass never rescans an image it has inserted.
-            html = html.replace(/cid:<?([^\s"'<>)&]+)>?/gi, (ref, cid) => {
+            // Content-IDs, types and base64 text all come from the sender, so none of them
+            // become regex or replacement-string syntax, and a single pass never rescans an
+            // image it has inserted.
+            html = html.replace(CID_REFERENCE_RE, (ref, cid) => {
               const key = cid.toLowerCase();
               const dataUri = dataUris.get(key);
               if (!dataUri) return ref;
@@ -6236,6 +6245,11 @@ export class ImapManager {
               console.warn(`fetchMessageBody: uid=${uid} folder=${folder} account=${logAccount(account)}: left ${overBudget} repeated inline image reference(s) as cid:, past the ${INLINE_IMAGE_REPEAT_BUDGET / (1024 * 1024)} MB repeat budget`);
             }
           }
+          if (missingImages.size > 0) {
+            for (const [, cid] of html.matchAll(CID_REFERENCE_RE)) {
+              if (missingImages.has(cid.toLowerCase())) { cidsComplete = false; break; }
+            }
+          }
         }
       } finally {
         lock.release();
@@ -6243,7 +6257,7 @@ export class ImapManager {
 
       // Some malformed emails include NUL bytes that PostgreSQL rejects in text
       // columns. Strip them once here so all callers are safe.
-      return { html: sanitizeStr(html), text: sanitizeStr(text), attachments };
+      return { html: sanitizeStr(html), text: sanitizeStr(text), attachments, cidsComplete };
     });
 
     // Providers flagged preferFreshBodyFetch (e.g. PurelyMail) skip the shared pool on the
