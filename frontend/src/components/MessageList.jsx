@@ -2510,7 +2510,10 @@ export default function MessageList() {
     if (isDraftsFolder) {
       try {
         const [bodyData, bcc] = await Promise.all([
-          api.getMessageBody(message.id),
+          // Images unblocked, through MailFlow's proxy: a draft opened with them blocked was
+          // saved back with the placeholders, losing the quoted email's images for good. The
+          // composer saves and sends the proxy URLs as the draft's own references.
+          api.getMessageBody(message.id, true),
           api.getMessageBcc(message.id).then(r => r.bcc, err => {
             console.error('Failed to read draft Bcc:', err.message);
             return null;

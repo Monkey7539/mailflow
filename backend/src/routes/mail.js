@@ -8,9 +8,10 @@ import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { extractImapError } from '../services/imapError.js';
 import { isConnectionRefusal } from '../services/imapManager.js';
-import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs, splitDarkScheme, proxyRemoteImages, remoteImageRefs } from '../services/emailSanitizer.js';
+import { stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs, splitDarkScheme, proxyRemoteImages, remoteImageRefs } from '../services/emailSanitizer.js';
 import { imageProxyPath, fetchProxiedImage, createUserLimiter } from '../services/imageProxy.js';
-import { needsCidRefetch, settleCids, withoutCidMarker } from '../utils/cidRefs.js';
+import { needsCidRefetch, withoutCidMarker } from '../utils/cidRefs.js';
+import { sanitizeDbText, storeFetchedBody } from '../services/messageBodyStore.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
 import { draftMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -44,13 +45,6 @@ function isValidFolderName(name) {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function areValidUUIDs(ids) {
   return ids.every(id => typeof id === 'string' && UUID_RE.test(id));
-}
-
-// Strip NUL bytes from strings before DB writes. PostgreSQL UTF-8 text columns
-// reject 0x00, and malformed MIME bodies can contain embedded NUL characters.
-function sanitizeDbText(value) {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\0/g, '');
 }
 
 // Process IMAP operations in bounded batches so a 500-message bulk action
@@ -500,23 +494,7 @@ router.get('/messages/:id/body', async (req, res) => {
       BODY_FETCH_TIMEOUT_MS
     );
 
-    const sanitized = html ? sanitizeDbText(sanitizeEmail(html)) : null;
-    // Stored settled when its cid: references can never resolve (utils/cidRefs.js, #595).
-    const safeHtml = sanitized && settleCids(sanitized, cidsComplete);
-    const safeText = sanitizeDbText(text);
-    const snip = sanitizeDbText(snippetFromBody(safeText, sanitized || html));
-
-    // Only cache when we actually got body content — don't overwrite a prior
-    // successful cache with null if a transient IMAP fetch returns nothing.
-    if (safeHtml || text || (attachments && attachments.length > 0)) {
-      await query(
-        `UPDATE messages
-         SET body_html = $1, body_text = $2, attachments = $3,
-             snippet = CASE WHEN $5 != '' THEN $5 ELSE snippet END
-         WHERE id = $4`,
-        [safeHtml, safeText, JSON.stringify(attachments || []), id, snip]
-      );
-    }
+    const { sanitized, safeText } = await storeFetchedBody(id, { html, text, attachments, cidsComplete });
 
     // Apply remote-image blocking at response time — safeHtml (unblocked) is what
     // was written to the DB cache above, preserving the canonical body; the response is it
