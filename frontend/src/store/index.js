@@ -151,7 +151,7 @@ export const useStore = create((set, get) => ({
         enabledPlugins: [], autoLockMinutes: 0, blockRemoteImages: true,
         imageWhitelist: { addresses: [], domains: [] }, shortcuts: {}, aiActions: null,
         hiddenFolders: {}, categorizationEnabled: false, gtdPetSlug: null,
-        autoOpenReplyDrafts: false, afterRemove: 'next',
+        autoOpenReplyDrafts: false, afterRemove: 'next', darkEmailBodies: false,
       } : {}),
     }));
   },
@@ -764,6 +764,15 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ afterRemove: val });
   },
 
+  // Show email bodies dark in a dark theme where that is safe (#228, utils/darkScheme.js). Off by
+  // default: a message can always be switched to dark, or back, on its own.
+  darkEmailBodies: localStorage.getItem('mailflow_dark_email_bodies') === 'true',
+  setDarkEmailBodies: (value) => {
+    localStorage.setItem('mailflow_dark_email_bodies', String(Boolean(value)));
+    set({ darkEmailBodies: Boolean(value) });
+    schedulePrefSave({ darkEmailBodies: Boolean(value) });
+  },
+
   markReadBehavior: localStorage.getItem('mailflow_mark_read_behavior') || 'immediate',
   setMarkReadBehavior: (val) => {
     localStorage.setItem('mailflow_mark_read_behavior', val);
@@ -1317,6 +1326,10 @@ export const useStore = create((set, get) => ({
       if (prefs.replyDefault === 'reply' || prefs.replyDefault === 'replyAll') {
         localStorage.setItem('mailflow_reply_default', prefs.replyDefault);
         set({ replyDefault: prefs.replyDefault });
+      }
+      if (typeof prefs.darkEmailBodies === 'boolean') {
+        localStorage.setItem('mailflow_dark_email_bodies', String(prefs.darkEmailBodies));
+        set({ darkEmailBodies: prefs.darkEmailBodies });
       }
       if (['next', 'previous', 'list'].includes(prefs.afterRemove)) {
         localStorage.setItem('mailflow_after_remove', prefs.afterRemove);
