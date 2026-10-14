@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
+import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -13,6 +14,7 @@ import { clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDel
 import { pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
 import { applyMarkRead, scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
+import { unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { isDarkTheme, canShowDark, showDark } from '../utils/darkScheme.js';
 import { markMessageUnread } from '../utils/messageHotkeys.js';
 import { BUILTIN_SUMMARIZE } from '../aiActions.js';
@@ -1183,13 +1185,20 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           closeWindowIfWindowed();
           if (!snoozedMsg.is_read) decrementUnread(snoozedMsg.account_id);
           addNotification({ title: t('message.snoozed.title'), body: snoozedMsg.subject || t('common.noSubject') });
-          api.snoozeMessage(snoozedMsg.id, data).catch(err => {
+          api.snoozeMessage(snoozedMsg.id, data).then(refreshCounts).catch(err => {
             console.error('Snooze failed:', err.message);
             useStore.getState().restoreMessages([snoozedMsg]);
             if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
             addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
           });
         }
+        break;
+      case 'unsnooze':
+        // Gone from the Snoozed view, so the next one there opens, as after any removal.
+        unsnooze(message, { t, before: (m) => { advanceSelectionAfterRemoval(m.id); closeWindowIfWindowed(); } });
+        break;
+      case 'changeSnooze':
+        if (data) changeSnooze(message, data, { t });
         break;
       case 'createRuleFromMessage': {
         const store = useStore.getState();
@@ -2159,12 +2168,24 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 fontSize: 11, marginTop: 4,
                 display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end',
               }}>
-                <div style={{
-                  width: 6, height: 6, borderRadius: '50%',
-                  background: message.account_color || 'var(--accent)',
-                }} />
+                <AccountMark accountId={message.account_id} color={message.account_color || 'var(--accent)'} size={6} />
                 <span style={{ color: 'var(--text-tertiary)' }}>{message.account_name}</span>
               </div>
+              {/* With images allowed, open-tracking images are still never loaded (the backend's
+                  image proxy): how many, with the email's other facts. */}
+              {!body?.hasBlockedRemoteImages && body?.trackersBlocked > 0 && (
+                <div title={t('message.trackersBlockedHint')} style={{
+                  fontSize: 11, marginTop: 4, marginLeft: 'auto', maxWidth: 170,
+                  display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end',
+                  color: 'var(--text-tertiary)',
+                }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }} aria-hidden="true">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  </svg>
+                  <span>{t('message.trackersBlocked', { count: body.trackersBlocked })}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2475,20 +2496,6 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                   >{label}</button>
                 ))}
               </div>
-            </div>
-          )}
-          {/* With images allowed, open-tracking images are still never loaded (the backend's
-              image proxy); say how many, quietly. */}
-          {!body.hasBlockedRemoteImages && body.trackersBlocked > 0 && (
-            <div title={t('message.trackersBlockedHint')} style={{
-              marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6,
-              fontSize: 11, color: 'var(--text-tertiary)',
-            }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }} aria-hidden="true">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              </svg>
-              <span>{t('message.trackersBlocked', { count: body.trackersBlocked })}</span>
             </div>
           )}
           <div className="msg-card" style={{

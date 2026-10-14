@@ -319,6 +319,16 @@
       "passwordLabel": "Senha do PDF",
       "passwordSubmit": "Abrir",
       "passwordIncorrect": "Senha incorreta. Tente novamente."
+    },
+    "unsnoozed": {
+      "title": "Adiamento cancelado",
+      "failTitle": "Não foi possível cancelar o adiamento",
+      "failBody": "Continua adiado. Tente novamente."
+    },
+    "snoozeChanged": {
+      "title": "Adiado até {{when}}",
+      "failTitle": "Não foi possível alterar o horário",
+      "failBody": "O horário anterior foi mantido. Tente novamente."
     }
   },
   "messageList": {
@@ -460,7 +470,10 @@
         "label": "Divisão vertical",
         "description": "Lista de mensagens acima do painel de leitura"
       }
-    }
+    },
+    "snoozedUntil": "Adiado até {{when}}",
+    "snoozedEmpty": "Nada adiado",
+    "snoozedEmptyDesc": "E-mails adiados esperam aqui até voltarem."
   },
   "lockScreen": {
     "subtitle": "Digite seu PIN para desbloquear",
@@ -518,7 +531,8 @@
     "emptying": "Esvaziando \"{{name}}\"…",
     "emptied": "Pasta esvaziada",
     "backToAccounts": "Voltar às contas",
-    "updateAvailable": "Atualização disponível: v{{version}}"
+    "updateAvailable": "Atualização disponível: v{{version}}",
+    "snoozed": "Adiados"
   },
   "contextMenu": {
     "find": "Localizar",
@@ -540,7 +554,9 @@
       "threeHours": "Em 3 horas",
       "tomorrowMorning": "Amanhã de manhã",
       "nextWeek": "Próxima semana",
-      "custom": "Personalizado..."
+      "custom": "Personalizado...",
+      "change": "Alterar horário",
+      "unsnooze": "Cancelar adiamento"
     },
     "categorize": "Categorizar como…",
     "categoryAlwaysSender": "Sempre para este remetente",
@@ -783,6 +799,11 @@
     },
     "title": "Configurações",
     "close": "Fechar",
+    "behavior": {
+      "reading": "Leitura",
+      "writing": "Escrita",
+      "sync": "Sincronização"
+    },
     "tabs": {
       "cleanup": "Limpeza",
       "accounts": "Contas",
@@ -802,10 +823,11 @@
       "aiActions": "Ações de IA",
       "antispam": "Antispam",
       "categories": "Categorias",
-      "groupAccountMail": "Conta e e-mail",
-      "groupDisplay": "Exibição",
-      "groupSecurityIntegrations": "Segurança e integrações",
+      "groupMail": "E-mail",
+      "groupPreferences": "Preferências",
+      "groupAiExtensions": "IA e extensões",
       "groupAdmin": "Administração",
+      "behavior": "Comportamento",
       "plugins": "Plugins",
       "backup": "Backup"
     },
@@ -856,6 +878,8 @@
       "actionForward": "Encaminhar para",
       "actionForwardPlaceholder": "destinatario@exemplo.com",
       "actionSetCategory": "Definir categoria",
+      "actionNotify": "Notificar-me",
+      "actionNotifyHint": "Avisar mesmo quando a regra move o e-mail ou o marca como lido.",
       "actionSetCategorySelect": "Selecione uma categoria…",
       "actionMovePlaceholder": "Caminho IMAP exato da pasta (ex.: Trabalho ou INBOX/Trabalho)",
       "actionMoveSelectFolder": "Selecione uma pasta…",
@@ -893,6 +917,10 @@
       "editTitle": "Editar conta",
       "addTitle": "Adicionar conta",
       "color": "Cor da conta",
+      "icon": "Ícone",
+      "iconNone": "Nenhum (ponto colorido)",
+      "iconCustom": "Ou digite um emoji",
+      "iconHint": "Exibido no lugar do ponto colorido.",
       "displayName": "Nome de exibição",
       "displayNamePh": "ex.: Gmail do trabalho",
       "senderName": "Nome do remetente",

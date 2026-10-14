@@ -99,6 +99,13 @@ const cards = () => document.querySelectorAll('[aria-expanded]');
 const openCards = () => document.querySelectorAll('[aria-expanded="true"]');
 
 describe('conversation pane', () => {
+  // These cards show HTML emails as sent. Dark email bodies (#228), on by default, are covered
+  // by the plain-text card below and by MessagePane's tests.
+  before(async () => {
+    const { useStore } = await import('../store/index.js');
+    useStore.setState({ darkEmailBodies: false });
+  });
+
   test('renders one card per message with only the newest open', async () => {
     await React.act(async () => {
       root.render(React.createElement(ConversationPane, { threadId: '<1@x>', folder: 'INBOX' }));
