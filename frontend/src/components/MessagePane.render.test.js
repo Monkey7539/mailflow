@@ -947,3 +947,91 @@ describe('blocked trackers', () => {
     assert.ok(text().includes('message.remoteImagesBlocked'), 'the blocked-images notice is shown instead');
   });
 });
+
+// The server answers a star only once the mail server has the flag, which takes seconds on Gmail.
+describe('the star button', () => {
+  const MSG_S = { ...MSG_A, id: 's1', uid: 21, subject: 'Star me', is_starred: false };
+  let originalFetch;
+  let answer;
+  before(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/star')) {
+        const ok = await new Promise(resolve => { answer = resolve; });
+        return ok
+          ? { ok: true, status: 200, json: async () => ({ ok: true }) }
+          : { ok: false, status: 500, json: async () => ({ error: 'IMAP store failed' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ html: '', text: 'Hi', attachments: [] }), text: async () => '' };
+    };
+    useStore.getState().setMessages?.([MSG_S]);
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  const starred = () => useStore.getState().messages.find(m => m.id === 's1').is_starred;
+  const clickStar = async () => {
+    const btn = [...document.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.star');
+    assert.ok(btn, 'the reading pane has a star button');
+    await React.act(async () => { btn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  };
+  const serverSays = async (ok) => {
+    await React.act(async () => { answer(ok); await new Promise(r => setTimeout(r, 20)); });
+  };
+
+  test('fills at once and stays when the server agrees', async () => {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('s1');
+      root.render(React.createElement(MessagePane));
+    });
+    await clickStar();
+    assert.equal(starred(), true, 'starred before the server answered');
+    await serverSays(true);
+    assert.equal(starred(), true);
+  });
+
+  test('is put back, with a notice, when the server refuses', async () => {
+    const before = useStore.getState().notifications?.length ?? 0;
+    await clickStar();
+    assert.equal(starred(), false, 'unstarred before the server answered');
+    await serverSays(false);
+    assert.equal(starred(), true, 'starred again once the server refused');
+    assert.equal(useStore.getState().notifications?.length ?? 0, before + 1, 'and the failure is shown');
+  });
+});
+
+// On a desktop the next and previous messages are loaded once the open one has shown, so j/k
+// show a message at once (on a phone the swipe pager does this).
+describe('loading the neighbors ahead', () => {
+  const ROW = (id) => ({ ...MSG_A, id, uid: id.length, subject: `Row ${id}` });
+  let originalFetch;
+  let asked;
+  before(() => {
+    originalFetch = globalThis.fetch;
+    asked = [];
+    globalThis.fetch = async (url) => {
+      const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
+      if (id) asked.push(id);
+      return { ok: true, status: 200, json: async () => (id ? { html: `<p>${id}</p>`, attachments: [] } : {}), text: async () => '' };
+    };
+    useStore.getState().setMessages?.([ROW('n1'), ROW('n2'), ROW('n3')]);
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  test('fetches the next and previous bodies after a short pause', async () => {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('n2');
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 60)); });
+    assert.deepEqual(asked, ['n2'], 'only the open one at first');
+    await React.act(async () => { await new Promise(r => setTimeout(r, 500)); });
+    assert.deepEqual([...asked].sort(), ['n1', 'n2', 'n3']);
+  });
+
+  test('opening a neighbor then needs no request', async () => {
+    const before = asked.length;
+    await React.act(async () => { useStore.getState().setSelectedMessage('n3'); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 60)); });
+    assert.equal(asked.slice(before).filter(id => id === 'n3').length, 0);
+  });
+});

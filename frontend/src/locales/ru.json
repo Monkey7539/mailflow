@@ -319,6 +319,16 @@
       "passwordLabel": "Пароль PDF",
       "passwordSubmit": "Открыть",
       "passwordIncorrect": "Неверный пароль. Попробуйте ещё раз."
+    },
+    "unsnoozed": {
+      "title": "Возвращено",
+      "failTitle": "Не удалось вернуть письмо",
+      "failBody": "Письмо остаётся отложенным. Попробуйте ещё раз."
+    },
+    "snoozeChanged": {
+      "title": "Отложено до {{when}}",
+      "failTitle": "Не удалось изменить время возврата",
+      "failBody": "Остаётся прежнее время. Попробуйте ещё раз."
     }
   },
   "messageList": {
@@ -460,7 +470,10 @@
         "label": "Вертикальное разделение",
         "description": "Список писем над областью чтения"
       }
-    }
+    },
+    "snoozedUntil": "Отложено до {{when}}",
+    "snoozedEmpty": "Нет отложенных писем",
+    "snoozedEmptyDesc": "Отложенные письма ждут здесь, пока не вернутся."
   },
   "lockScreen": {
     "subtitle": "Введите PIN-код для разблокировки",
@@ -518,7 +531,8 @@
     "emptying": "Очистка «{{name}}»…",
     "emptied": "Папка очищена",
     "backToAccounts": "Назад к аккаунтам",
-    "updateAvailable": "Доступно обновление: v{{version}}"
+    "updateAvailable": "Доступно обновление: v{{version}}",
+    "snoozed": "Отложенные"
   },
   "contextMenu": {
     "find": "Найти",
@@ -540,7 +554,9 @@
       "threeHours": "Через 3 часа",
       "tomorrowMorning": "Завтра утром",
       "nextWeek": "На следующей неделе",
-      "custom": "Другое..."
+      "custom": "Другое...",
+      "change": "Изменить время возврата",
+      "unsnooze": "Вернуть сейчас"
     },
     "categorize": "Категоризировать как…",
     "categoryAlwaysSender": "Всегда для этого отправителя",
@@ -783,6 +799,11 @@
     },
     "title": "Настройки",
     "close": "Закрыть",
+    "behavior": {
+      "reading": "Чтение",
+      "writing": "Написание",
+      "sync": "Синхронизация"
+    },
     "tabs": {
       "cleanup": "Очистка",
       "accounts": "Аккаунты",
@@ -802,10 +823,11 @@
       "aiActions": "ИИ-действия",
       "antispam": "Антиспам",
       "categories": "Категории",
-      "groupAccountMail": "Аккаунт и почта",
-      "groupDisplay": "Отображение",
-      "groupSecurityIntegrations": "Безопасность и интеграции",
+      "groupMail": "Почта",
+      "groupPreferences": "Предпочтения",
+      "groupAiExtensions": "ИИ и расширения",
       "groupAdmin": "Администрирование",
+      "behavior": "Поведение",
       "plugins": "Плагины",
       "backup": "Резервная копия"
     },
@@ -849,6 +871,8 @@
       "actionForward": "Переслать на",
       "actionForwardPlaceholder": "poluchatel@example.com",
       "actionSetCategory": "Назначить категорию",
+      "actionNotify": "Уведомлять меня",
+      "actionNotifyHint": "Уведомлять, даже если правило перемещает письмо или отмечает его прочитанным.",
       "actionSetCategorySelect": "Выберите категорию…",
       "actionMovePlaceholder": "Название папки",
       "stopProcessing": "Остановить обработку следующих правил при совпадении",
@@ -893,6 +917,10 @@
       "editTitle": "Редактировать аккаунт",
       "addTitle": "Добавить аккаунт",
       "color": "Цвет аккаунта",
+      "icon": "Значок",
+      "iconNone": "Нет (цветная точка)",
+      "iconCustom": "Или введите эмодзи",
+      "iconHint": "Показывается вместо цветной точки.",
       "displayName": "Отображаемое имя",
       "displayNamePh": "например, Рабочий Gmail",
       "email": "Адрес электронной почты",

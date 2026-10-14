@@ -16,6 +16,7 @@ import SwipePager from './SwipePager.jsx';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
+import { prefetchBody } from '../utils/bodyCache.js';
 
 function ThreadBtn({ onClick, title, children }) {
   return (
@@ -269,7 +270,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         navKey={threadId}
         onNavigate={(dir) => openAdjacentRow(dir, threadId)}
         // Warms the server's copy of a neighbor's body ahead of the swipe.
-        onPrefetch={(row) => { api.getMessageBody(row.id).catch(() => {}); }}
+        onPrefetch={(row) => prefetchBody(row.id)}
       >
       <div
         // Remounts the stack when the thread's membership changes, so expansion state from a
