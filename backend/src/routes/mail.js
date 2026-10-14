@@ -366,8 +366,22 @@ router.get('/unread-counts', async (req, res) => {
       if (stale) complete = false;
     }
   }
+  // How many messages are snoozed (#269): the sidebar shows its Snoozed view only while some are.
+  // Secondary to the counts, so a failure here reports none rather than failing them.
+  let snoozed = 0;
+  try {
+    const r = await query(
+      `SELECT COUNT(*)::int AS n FROM snoozed_messages sm
+       JOIN email_accounts a ON a.id = sm.account_id AND a.user_id = $1 AND a.enabled
+       WHERE sm.user_id = $1 AND ${LIVE_SNOOZE_SQL}`,
+      [req.session.userId]
+    );
+    snoozed = r?.rows?.[0]?.n ?? 0;
+  } catch (err) {
+    console.warn('Snoozed count failed:', err.message);
+  }
   res.set('Cache-Control', 'no-store');
-  res.json({ total, byAccount, snapshots, complete });
+  res.json({ total, byAccount, snapshots, complete, snoozed });
 });
 
 // Hard cap on a live IMAP body fetch. Connection acquisition is already bounded at 30s
@@ -2126,20 +2140,52 @@ export async function gatherSnoozeConversation(msg) {
   return [self, ...rest];
 }
 
+// When a snooze ends: a valid date in the future, within 30 days.
+export function parseSnoozeUntil(until) {
+  if (!until) return { error: 'until is required' };
+  const date = new Date(until);
+  if (isNaN(date.getTime())) return { error: 'until must be a valid ISO date' };
+  if (date <= new Date()) return { error: 'until must be in the future' };
+  const maxDate = new Date();
+  maxDate.setDate(maxDate.getDate() + 30);
+  if (date > maxDate) return { error: 'until must be within 30 days' };
+  return { date };
+}
+
+// The live snooze records of a snoozed message and those snoozed with it (#269): its thread's
+// messages waiting in the same Snoozed folder until the same time. Snoozing takes the whole reply
+// chain at once, so changing or ending the snooze does too; a later, separate snooze of another
+// message in the thread keeps its own time. As imapManager.snoozedRows returns them.
+function snoozedTogether(msg, userId) {
+  return imapManager.snoozedRows(
+    `sm.user_id = $1 AND sm.account_id = $2 AND sm.snoozed_folder = $3
+     AND sm.snooze_until = (
+       SELECT own.snooze_until FROM snoozed_messages own
+       WHERE own.user_id = $1 AND own.account_id = $2 AND own.message_id_header = $4 AND own.snoozed_folder = $3
+       ORDER BY own.snooze_until LIMIT 1)
+     AND (m.message_id = $4 OR ($5::text IS NOT NULL AND m.thread_id = $5))`,
+    [userId, msg.account_id, msg.folder, msg.message_id, msg.thread_id || null]
+  );
+}
+
+// The reader's own message, with its account's user.
+async function ownedMessage(id, userId) {
+  const r = await query(
+    `SELECT m.*, a.user_id FROM messages m
+     JOIN email_accounts a ON a.id = m.account_id
+     WHERE m.id = $1 AND a.user_id = $2`,
+    [id, userId]
+  );
+  return r.rows[0] || null;
+}
+
 // Snooze a message: move it to a Snoozed IMAP folder and record when to restore it
 router.post('/messages/:id/snooze', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const { until } = req.body;
-  if (!until) return res.status(400).json({ error: 'until is required' });
-
-  const untilDate = new Date(until);
-  if (isNaN(untilDate.getTime())) return res.status(400).json({ error: 'until must be a valid ISO date' });
-  if (untilDate <= new Date()) return res.status(400).json({ error: 'until must be in the future' });
-  const maxDate = new Date();
-  maxDate.setDate(maxDate.getDate() + 30);
-  if (untilDate > maxDate) return res.status(400).json({ error: 'until must be within 30 days' });
+  const { date: untilDate, error: untilError } = parseSnoozeUntil(req.body?.until);
+  if (untilError) return res.status(400).json({ error: untilError });
 
   // Ownership check
   const msgResult = await query(
@@ -2228,6 +2274,41 @@ router.post('/messages/:id/snooze', async (req, res) => {
   notifyMailMutation(convo, req.session.userId);
 
   res.json({ ok: true });
+});
+
+// The Snoozed view (#269): change when a snoozed conversation comes back, as snoozing it did for
+// the whole reply chain.
+router.patch('/messages/:id/snooze', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const { date: untilDate, error: untilError } = parseSnoozeUntil(req.body?.until);
+  if (untilError) return res.status(400).json({ error: untilError });
+  const msg = await ownedMessage(id, req.session.userId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
+  if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  await query('UPDATE snoozed_messages SET snooze_until = $1 WHERE id = ANY($2)',
+    [untilDate.toISOString(), rows.map(r => r.snooze_id)]);
+  imapManager.broadcast({ type: 'folder_updated', folder: msg.folder, accountId: msg.account_id }, req.session.userId);
+  res.json({ ok: true, until: untilDate.toISOString() });
+});
+
+// The Snoozed view (#269): bring a snoozed conversation back now, to where it was snoozed from, as
+// its wake-up would, but keeping its read state: the reader asked for it.
+router.post('/messages/:id/unsnooze', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+  const msg = await ownedMessage(id, req.session.userId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const rows = msg.message_id ? await snoozedTogether(msg, req.session.userId) : [];
+  if (!rows.length) return res.status(404).json({ error: 'Message is not snoozed' });
+  let restored = 0;
+  for (const row of rows) {
+    if (await imapManager.wakeSnoozed(row, { markUnread: false })) restored += 1;
+  }
+  if (!restored) return res.status(500).json({ error: 'Failed to bring the message back' });
+  notifyMailMutation(rows.map(r => ({ account_id: r.account_id, message_id: r.message_id_header, folder: r.snoozed_folder })), req.session.userId);
+  res.json({ ok: true, restored });
 });
 
 // Delete (move to trash; drafts are permanently deleted)

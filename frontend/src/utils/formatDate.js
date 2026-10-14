@@ -1,5 +1,5 @@
 import i18next from 'i18next';
-import { isToday, isYesterday, isThisYear } from 'date-fns';
+import { isToday, isTomorrow, isYesterday, isThisYear } from 'date-fns';
 import { htmlLang } from './browserLanguage.js';
 
 // Dates are written in MailFlow's language, not the browser's (#593): with Russian chosen in
@@ -53,3 +53,18 @@ export function formatMessageDateTime(dateStr, { withYear = true } = {}, locale)
 export const formatDateTime = (value, locale) => parse(value)?.toLocaleString(locale ?? appLocale()) ?? '';
 export const formatDay = (value, locale) => parse(value)?.toLocaleDateString(locale ?? appLocale()) ?? '';
 export const formatTime = (value, locale) => parse(value)?.toLocaleTimeString(locale ?? appLocale()) ?? '';
+
+// When snoozed mail comes back (#269), compact for a list row: the time today, "Tomorrow" and the
+// time, the weekday within the week, the date beyond that.
+export function formatSnoozeUntil(value, locale, now = new Date()) {
+  const d = parse(value);
+  if (!d) return '';
+  const time = written(d, { hour: 'numeric', minute: '2-digit' }, locale);
+  if (isToday(d)) return time;
+  if (isTomorrow(d)) {
+    const word = new Intl.RelativeTimeFormat(locale ?? appLocale(), { numeric: 'auto' }).format(1, 'day');
+    return `${word.charAt(0).toLocaleUpperCase(locale ?? appLocale())}${word.slice(1)} ${time}`;
+  }
+  if (d - now < 6 * 86_400_000) return written(d, { weekday: 'short', hour: 'numeric', minute: '2-digit' }, locale);
+  return written(d, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, locale);
+}

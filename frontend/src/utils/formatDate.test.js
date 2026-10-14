@@ -2,7 +2,7 @@
 import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import i18next from 'i18next';
-import { appLocale, formatDate, formatMessageDateTime, formatDateTime, formatDay } from './formatDate.js';
+import { appLocale, formatDate, formatMessageDateTime, formatDateTime, formatDay, formatSnoozeUntil } from './formatDate.js';
 
 const at = (daysAgo, h = 15, m = 5) => { const d = new Date(); d.setDate(d.getDate() - daysAgo); d.setHours(h, m, 0, 0); return d; };
 const aYearAgo = () => { const d = new Date(); d.setFullYear(d.getFullYear() - 1, 9, 12); d.setHours(15, 5, 0, 0); return d; };
@@ -57,5 +57,23 @@ describe('the other date surfaces', () => {
     assert.equal(formatDay(d), d.toLocaleDateString('de'));
     assert.equal(formatDateTime(d), d.toLocaleString('de'));
     assert.equal(formatDay('nope'), '');
+  });
+});
+
+describe('formatSnoozeUntil, when snoozed mail comes back (#269)', () => {
+  const ahead = (days, h = 9, m = 0) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(h, m, 0, 0); return d; };
+  test('the time today, Tomorrow and the time, the weekday within the week, the date beyond', () => {
+    const later = new Date(); later.setMinutes(later.getMinutes() + 5);
+    assert.match(formatSnoozeUntil(later, 'en'), /^\d{1,2}:\d{2}\s?[AP]M$/);
+    assert.equal(formatSnoozeUntil(ahead(1), 'en'), 'Tomorrow 9:00 AM');
+    assert.match(formatSnoozeUntil(ahead(3), 'en'), /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) 9:00\s?AM$/);
+    assert.match(formatSnoozeUntil(ahead(20), 'en'), /^[A-Z][a-z]{2} \d{1,2}, 9:00\s?AM$/);
+  });
+  test('in the app language', () => {
+    assert.match(formatSnoozeUntil(ahead(1), 'de'), /^Morgen 0?9:00$/);
+  });
+  test('nothing for a missing or broken value', () => {
+    assert.equal(formatSnoozeUntil(null, 'en'), '');
+    assert.equal(formatSnoozeUntil('nope', 'en'), '');
   });
 });
