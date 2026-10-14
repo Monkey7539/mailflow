@@ -1,0 +1,75 @@
+name: PostgreSQL snooze check (temporary)
+
+# Scratch check for fix/snooze-folder-paths: there is no PostgreSQL on the machine the fix was
+# written on, so the Snoozed view's new SQL is run here against a real database.
+on:
+  push:
+    branches: ["ci/postgres-snooze-check"]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailflow
+          POSTGRES_PASSWORD: mailflow
+          POSTGRES_DB: mailflow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mailflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      MAILFLOW_TEST_DATABASE_URL: postgres://mailflow:mailflow@localhost:5432/mailflow_test
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Every PostgreSQL test, with the fix
+        working-directory: backend
+        run: npx vitest run postgres --reporter=verbose
+
+      - name: With upstream's messageService.js the Snoozed view test fails
+        working-directory: backend
+        run: |
+          git show c478f2cd06a587872903b74b1213d207dc90e683:backend/src/services/messageService.js > src/services/messageService.js
+          if npx vitest run src/services/messageService.snoozedView.postgres.test.js --reporter=verbose; then
+            echo "::error::the test passed with upstream's messageService.js"
+            exit 1
+          fi
+          git checkout -- src/services/messageService.js
+
+      - name: Without the own-record check the Snoozed view test fails
+        working-directory: backend
+        run: |
+          node ../.github/ci-scratch/drop-own-record-check.mjs
+          if npx vitest run src/services/messageService.snoozedView.postgres.test.js --reporter=verbose; then
+            echo "::error::the test passed without the own-record check"
+            exit 1
+          fi
+          git checkout -- src/services/messageService.js
+
+      - name: The whole backend suite with the database
+        working-directory: backend
+        run: npx vitest run
