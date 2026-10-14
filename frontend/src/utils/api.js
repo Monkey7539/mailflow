@@ -102,11 +102,14 @@ export async function streamAiChat(messages, { signal, onDelta } = {}) {
   }
 }
 
-function getMessageBody(id, remoteImages = false) {
-  const key = `${id}:${remoteImages ? 'remote' : 'blocked'}`;
+// `original`: inline images as sent, not fitted for reading (backend services/inlineImageFit.js),
+// for a forward.
+function getMessageBody(id, remoteImages = false, { original = false } = {}) {
+  const key = `${id}:${remoteImages ? 'remote' : 'blocked'}${original ? ':original' : ''}`;
   const existing = messageBodyRequests.get(key);
   if (existing) return existing;
-  const promise = request('GET', `/mail/messages/${id}/body${remoteImages ? '?remoteImages=1' : ''}`)
+  const params = [remoteImages && 'remoteImages=1', original && 'original=1'].filter(Boolean).join('&');
+  const promise = request('GET', `/mail/messages/${id}/body${params ? `?${params}` : ''}`)
     .finally(() => messageBodyRequests.delete(key));
   messageBodyRequests.set(key, promise);
   return promise;
@@ -354,6 +357,9 @@ export const api = {
   getMessageHeaders: (id) => request('GET', `/mail/messages/${id}/headers`),
   getMessageBcc: (id) => request('GET', `/mail/messages/${id}/bcc`),
   snoozeMessage: (id, until) => request('POST', `/mail/messages/${id}/snooze`, { until }),
+  // The Snoozed view (#269): change when a snoozed message comes back, or bring it back now.
+  changeSnooze: (id, until) => request('PATCH', `/mail/messages/${id}/snooze`, { until }),
+  unsnoozeMessage: (id) => request('POST', `/mail/messages/${id}/unsnooze`),
 
   // Sanitized diagnostics report (server-owned sections; scoped to the user).
   diagnosticsReport: (salt) => request('POST', '/diagnostics/report', { salt }),

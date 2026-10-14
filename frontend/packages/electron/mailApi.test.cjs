@@ -29,6 +29,7 @@ test('a notification Delete passes the API CSRF gate', async (t) => {
 
   assert.equal(received.length, 1);
   assert.equal(received[0].method, 'DELETE');
+  assert.equal(received[0].headers['x-requested-with'], 'MailFlow');
   assert.equal(received[0].url, '/api/mail/messages/m1');
   assert.equal(received[0].headers.cookie, 'connect.sid=s%3Aabc');
 });
@@ -40,6 +41,7 @@ test('a notification Star passes the API CSRF gate', async (t) => {
 
   assert.equal(received.length, 1);
   assert.equal(received[0].method, 'PATCH');
+  assert.equal(received[0].headers['x-requested-with'], 'MailFlow');
   assert.equal(received[0].url, '/api/mail/messages/m1/star');
   assert.equal(received[0].headers['content-type'], 'application/json');
   assert.deepEqual(JSON.parse(received[0].body), { starred: true });

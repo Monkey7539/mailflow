@@ -122,34 +122,48 @@ describe('gatherSnoozeConversation', () => {
 
 const ACCOUNT_ID = 'a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1';
 const MSG_ID = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
+const REPLY_ID = 'c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3';
 const ACCOUNT = { id: ACCOUNT_ID, user_id: 'user-1' };
 
-// `message` is the acted-on messages row and `snoozes` the snoozed_messages table. The fake
-// applies the route's writes to them, so the tests pin the stored state rather than SQL text.
-let message, snoozes;
+// `messages` is the messages table, the acted-on row (`message`) first, and `snoozes` the
+// snoozed_messages table. The fake applies the route's writes to them, so the tests pin the
+// stored state rather than SQL text. It answers the thread lookup, the two live-record lookups and
+// the leftover-record DELETE only word for word, with their LIVE_SNOOZE_SQL test, which it models.
+// Any other snoozed_messages statement goes into `unmodelled`, which fails the test, so a change in
+// how the route reads or writes snoozes cannot pass on an answer of no rows.
+let message, messages, snoozes, unmodelled;
+const LIVE = LIVE_SNOOZE_SQL.replace(/\s+/g, ' ').trim();
 
 function fakeQuery(rawSql, params = []) {
   const sql = rawSql.replace(/\s+/g, ' ').trim();
   const result = (rows) => Promise.resolve({ rows, rowCount: rows.length });
+  const byId = (id) => messages.find(m => m.id === id);
   if (sql.includes('FROM messages m JOIN email_accounts a')) {
-    return result(params[0] === message.id ? [{ ...message, user_id: 'user-1' }] : []);
+    return result(byId(params[0]) ? [{ ...byId(params[0]), user_id: 'user-1' }] : []);
+  }
+  if (sql === 'SELECT id, uid, account_id, folder, message_id, in_reply_to, thread_references, is_read FROM messages WHERE account_id = $1 AND thread_id = $2 AND message_id IS NOT NULL') {
+    return result(messages.filter(m => m.account_id === params[0] && m.thread_id === params[1] && m.message_id).map(m => ({ ...m })));
   }
   // A record counts only while its message still sits in the folder it was snoozed into (#269).
-  const live = (s) => s.account_id === message.account_id && s.message_id_header === message.message_id
-    && s.snoozed_folder === message.folder && !message.is_deleted;
-  if (sql.startsWith('SELECT sm.id FROM snoozed_messages sm')) {
+  const live = (s) => messages.some(m => m.account_id === s.account_id && m.message_id === s.message_id_header
+    && m.folder === s.snoozed_folder && !m.is_deleted);
+  if (sql === `SELECT sm.id FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.message_id_header = $2 AND ${LIVE}`) {
     return result(snoozes.filter(s => s.account_id === params[0] && s.message_id_header === params[1] && live(s)));
   }
-  if (sql.startsWith('DELETE FROM snoozed_messages sm')) {
+  if (sql === `SELECT sm.message_id_header FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND ${LIVE}`) {
+    return result(snoozes.filter(s => s.account_id === params[0] && params[1].includes(s.message_id_header) && live(s)));
+  }
+  if (sql === `DELETE FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND NOT ${LIVE}`) {
     snoozes = snoozes.filter(s => !(s.account_id === params[0] && params[1].includes(s.message_id_header) && !live(s)));
     return result([]);
   }
   if (sql.startsWith('SELECT * FROM email_accounts')) return result([ACCOUNT]);
   const update = sql.match(/^UPDATE messages SET (.+) WHERE id = \$(\d+)$/);
-  if (update && params[Number(update[2]) - 1] === message.id) {
+  const updated = update && byId(params[Number(update[2]) - 1]);
+  if (updated) {
     for (const assignment of update[1].split(',')) {
       const [col, value] = assignment.split('=').map(s => s.trim());
-      message[col] = params[Number(value.slice(1)) - 1];
+      updated[col] = params[Number(value.slice(1)) - 1];
     }
     return result([]);
   }
@@ -158,9 +172,7 @@ function fakeQuery(rawSql, params = []) {
     snoozes.push(Object.fromEntries(insert[1].split(',').map((col, i) => [col.trim(), params[i]])));
     return result([]);
   }
-  // Fail loudly when the route changes how it reads or writes snoozes, rather than answering
-  // with no rows and leaving the tests passing without modelling it.
-  if (sql.includes('snoozed_messages')) throw new Error(`fakeQuery: unhandled snoozed_messages query: ${sql}`);
+  if (sql.includes('snoozed_messages')) unmodelled.push(sql);
   return result([]);
 }
 
@@ -187,15 +199,21 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
     query.mockImplementation(fakeQuery);
     for (const fn of Object.values(imapManager)) fn.mockReset();
     message = { id: MSG_ID, account_id: ACCOUNT_ID, uid: 42, folder: 'INBOX', is_read: false, message_id: '<a@example.com>', thread_id: null };
+    messages = [message];
     snoozes = [];
+    unmodelled = [];
     imapManager.ensureFolder.mockResolvedValue({ path: 'INBOX.Snoozed', created: false });
     imapManager.moveMessage.mockResolvedValue(7);
   });
 
-  const snooze = () => fetch(`${base}/api/mail/messages/${MSG_ID}/snooze`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ until: new Date(Date.now() + 86_400_000).toISOString() }),
-  });
+  const snooze = async () => {
+    const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/snooze`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ until: new Date(Date.now() + 86_400_000).toISOString() }),
+    });
+    expect(unmodelled).toEqual([]);
+    return res;
+  };
 
   it.each([
     ['with an INBOX. prefix', 'INBOX.Snoozed'],
@@ -210,6 +228,26 @@ describe('POST /api/mail/messages/:id/snooze — Snoozed folder path', () => {
     expect(countedPaths()).toEqual(['INBOX', path]);
     expect(imapManager.moveMessage).toHaveBeenCalledWith(ACCOUNT, 42, 'INBOX', path);
     expect(imapManager.ensureFolder).toHaveBeenCalledWith(ACCOUNT, 'Snoozed', { resolvePath: true });
+  });
+
+  it('files the rest of the reply chain under that path too', async () => {
+    message.thread_id = 'thread-1';
+    messages.push({
+      id: REPLY_ID, account_id: ACCOUNT_ID, uid: 43, folder: 'INBOX', is_read: true, thread_id: 'thread-1',
+      message_id: '<b@example.com>', in_reply_to: '<a@example.com>', thread_references: '<a@example.com>',
+    });
+    imapManager.moveMessage.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
+    expect((await snooze()).status).toBe(200);
+    expect(imapManager.moveMessage.mock.calls).toEqual([
+      [ACCOUNT, 42, 'INBOX', 'INBOX.Snoozed'],
+      [ACCOUNT, 43, 'INBOX', 'INBOX.Snoozed'],
+    ]);
+    expect(messages).toMatchObject([{ folder: 'INBOX.Snoozed', uid: 7 }, { folder: 'INBOX.Snoozed', uid: 8 }]);
+    expect(snoozes).toEqual([
+      expect.objectContaining({ message_id_header: '<a@example.com>', original_folder: 'INBOX', snoozed_folder: 'INBOX.Snoozed' }),
+      expect.objectContaining({ message_id_header: '<b@example.com>', original_folder: 'INBOX', snoozed_folder: 'INBOX.Snoozed' }),
+    ]);
+    expect(countedPaths()).toEqual(['INBOX', 'INBOX.Snoozed', 'INBOX', 'INBOX.Snoozed']);
   });
 
   it('without UIDPLUS, stores, guards and later releases the stale uid under that path too', async () => {

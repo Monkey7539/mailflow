@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -19,7 +20,8 @@ import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
 } from '../utils/gtd.js';
-import { formatDate } from '../utils/formatDate.js';
+import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDate.js';
+import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
 import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
@@ -126,7 +128,7 @@ export default function MessageList() {
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
     setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
-    threadedView, expandedThreadId, setExpandedThreadId,
+    threadedView: threadedSetting, expandedThreadId, setExpandedThreadId,
     threadMessages, setThreadMessages, clearThreadMessages, loadingThread, setLoadingThread,
     hoverQuickActions, hoverActionSet, showMobileAvatars, showMessagePreviews,
     swipeActions,
@@ -149,6 +151,12 @@ export default function MessageList() {
   // Auto-spam explain modal target (opened from the badge on a row).
   const [spamExplainMessageId, setSpamExplainMessageId] = useState(null);
   const isUnified = selectedAccountId === null;
+  // The Snoozed view (#269): an account's Snoozed folder, or with no account every account's.
+  const isSnoozedView = selectedFolder === SNOOZED_FOLDER;
+  const isAllInboxes = isUnified && !isSnoozedView;
+  // The Snoozed view lists single messages, each with when it comes back, and the server never
+  // groups it; drawn as conversation rows it showed unread mail as read and repeated row keys.
+  const threadedView = threadedSetting && !isSnoozedView;
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
   const unifiedInboxAccountKey = accounts
     .filter(isAccountInUnifiedInbox)
@@ -408,10 +416,7 @@ export default function MessageList() {
       setCurrentPage(1);
       try {
         const params = { limit: pageSize, offset: 0 };
-        if (selectedAccountId) {
-          params.accountId = selectedAccountId;
-          params.folder = selectedFolder;
-        }
+        scopeListParams(params, selectedAccountId, selectedFolder);
         if (unreadOnly) params.unreadOnly = 'true';
         if (threadedView) params.threaded = 'true';
         if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
@@ -467,10 +472,7 @@ export default function MessageList() {
       // Read current offset directly from store to avoid stale closure
       const currentOffset = useStore.getState().messagesOffset;
       const params = { limit: pageSize, offset: currentOffset };
-      if (selectedAccountId) {
-        params.accountId = selectedAccountId;
-        params.folder = selectedFolder;
-      }
+      scopeListParams(params, selectedAccountId, selectedFolder);
       if (unreadOnly) params.unreadOnly = 'true';
       if (useStore.getState().threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
@@ -502,7 +504,7 @@ export default function MessageList() {
           // Backend caps limit at 500 — don't request more or the list silently shrinks
           params = { limit: Math.min(currentOffset || ps, 500), offset: 0 };
         }
-        if (selectedAccountId) { params.accountId = selectedAccountId; params.folder = selectedFolder; }
+        scopeListParams(params, selectedAccountId, selectedFolder);
         if (unreadOnly) params.unreadOnly = 'true';
         if (state.threadedView) params.threaded = 'true';
         if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
@@ -672,7 +674,7 @@ export default function MessageList() {
     setCurrentPage(pageNum);
     try {
       const params = { limit: pageSize, offset: (pageNum - 1) * pageSize };
-      if (selectedAccountId) { params.accountId = selectedAccountId; params.folder = selectedFolder; }
+      scopeListParams(params, selectedAccountId, selectedFolder);
       if (unreadOnly) params.unreadOnly = 'true';
       if (threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
@@ -2385,12 +2387,29 @@ export default function MessageList() {
           if (next.size === 0) setSelectionModeActive(false);
         }
         addNotification({ title: t('message.snoozed.title'), body: snoozedMsg.subject || t('common.noSubject') });
-        api.snoozeMessage(snoozedMsg.id, untilIso).catch(err => {
+        api.snoozeMessage(snoozedMsg.id, untilIso).then(refreshCounts).catch(err => {
           console.error('Snooze failed:', err.message);
           useStore.getState().restoreMessages([snoozedMsg]);
           if (!snoozedMsg.is_read) incrementUnread(snoozedMsg.account_id);
           addNotification({ title: t('message.snoozed.failTitle'), body: t('message.snoozed.failBody') });
         });
+        break;
+      }
+      case 'unsnooze': {
+        unsnooze(message, {
+          t,
+          before: (m) => {
+            if (!selectedIds.has(m.id)) return;
+            const next = new Set(selectedIds);
+            next.delete(m.id);
+            setSelectedIds(next);
+            if (next.size === 0) setSelectionModeActive(false);
+          },
+        });
+        break;
+      }
+      case 'changeSnooze': {
+        if (data) changeSnooze(message, data, { t });
         break;
       }
       case 'createRuleFromMessage': {
@@ -2659,15 +2678,17 @@ export default function MessageList() {
 
   const label = searchQuery.trim()
     ? `Search: "${searchQuery}"`
-    : isUnified ? t('sidebar.allInboxes') : selectedFolder;
+    : isSnoozedView ? t('sidebar.snoozed') : isUnified ? t('sidebar.allInboxes') : selectedFolder;
 
   const selectedFolderCounts = folders[selectedAccountId]?.find(f => f.path === selectedFolder);
-  const headerUnread = isUnified ? unreadCounts.total
+  const headerUnread = isSnoozedView && isUnified ? 0
+    : isUnified ? unreadCounts.total
     : selectedFolder === 'INBOX' ? unreadCounts.byAccount[selectedAccountId] ?? 0
       : selectedFolderCounts?.unread_count ?? 0;
   // Paging totals count cached results (threads/categories can be subsets). The
   // unfiltered mailbox header instead shows independently observed server membership.
-  const headerSamples = isUnified
+  const headerSamples = isSnoozedView && isUnified ? []
+    : isUnified
     ? accounts.filter(isAccountInUnifiedInbox).map(a => unreadCounts.snapshots?.[a.id])
     : selectedFolder === 'INBOX' ? [unreadCounts.snapshots?.[selectedAccountId]]
       : [{ totalCount: selectedFolderCounts?.total_count, known: selectedFolderCounts?.counts_known, stale: selectedFolderCounts?.counts_stale }];
@@ -2704,7 +2725,7 @@ export default function MessageList() {
         <div style={{
           display: 'flex', alignItems: 'center', gap: 4,
           paddingTop: 'calc(var(--sat) + 10px)',
-          paddingBottom: 10, paddingLeft: 12, paddingRight: 12,
+          paddingBottom: 'calc(10px - var(--sat-trim))', paddingLeft: 12, paddingRight: 12,
           borderBottom: '1px solid var(--border-subtle)',
           boxShadow: listScrolled ? '0 1px 10px rgba(0,0,0,0.2)' : 'none',
           transition: 'box-shadow 0.2s ease',
@@ -2734,7 +2755,12 @@ export default function MessageList() {
               textOverflow: 'ellipsis', whiteSpace: 'nowrap',
               minWidth: 0, display: 'flex', alignItems: 'center',
             }}>
-              {isUnified && !searchQuery.trim() ? (
+              {isSnoozedView && !searchQuery.trim() ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" role="img" aria-label={t('sidebar.snoozed')}>
+                  <title>{t('sidebar.snoozed')}</title>
+                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                </svg>
+              ) : isAllInboxes && !searchQuery.trim() ? (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
                   <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
@@ -2866,7 +2892,12 @@ export default function MessageList() {
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             display: 'flex', alignItems: 'center',
           }}>
-            {isUnified && !searchQuery ? (
+            {isSnoozedView && !searchQuery ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" role="img" aria-label={t('sidebar.snoozed')}>
+                  <title>{t('sidebar.snoozed')}</title>
+                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                </svg>
+              ) : isAllInboxes && !searchQuery ? (
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
                 <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
@@ -2880,8 +2911,9 @@ export default function MessageList() {
           </h2>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
             {!searchQuery && (
-              <span title={filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                {filteredCount ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
+              <span title={isSnoozedView && isUnified ? 'Snoozed messages in every account' : filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                {/* The Snoozed view across accounts (#269) counts what the list returned: every account's Snoozed folder. */}
+                {filteredCount || (isSnoozedView && isUnified) ? messagesTotal : !headerCountKnown ? '—' : `${headerCountStale ? '~' : ''}${headerServerTotal}`}
               </span>
             )}
             {/* Sync button */}
@@ -4330,6 +4362,33 @@ function UndoBar({ notification, onDismiss, showTopBorder }) {
   );
 }
 
+// Which list to ask the server for: an account's folder, or with no account All Inboxes, or the
+// Snoozed view across every account (#269).
+function scopeListParams(params, accountId, folder) {
+  if (accountId) {
+    params.accountId = accountId;
+    params.folder = folder;
+  } else if (folder === SNOOZED_FOLDER) {
+    params.folder = SNOOZED_FOLDER;
+  }
+  return params;
+}
+
+// A row's time: when it arrived, or for snoozed mail when it comes back (#269).
+function RowTime({ message }) {
+  const { t } = useTranslation();
+  if (!message.snooze_until) return formatDate(message.date);
+  return (
+    <span title={t('messageList.snoozedUntil', { when: formatDateTime(message.snooze_until) })}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      {formatSnoozeUntil(message.snooze_until)}
+    </span>
+  );
+}
+
 function EmptyState({ folderSyncing, searchQuery, searching, searchError, unreadOnly, selectedFolder, accounts, onClearSearch, onRetrySearch, onShowAll, onCompose }) {
   const { t } = useTranslation();
 
@@ -4433,6 +4492,17 @@ function EmptyState({ folderSyncing, searchQuery, searching, searchError, unread
     );
   }
 
+  if (selectedFolder === SNOOZED_FOLDER) {
+    return (
+      <div style={{ padding: '60px 40px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" style={{ display: 'block', margin: '0 auto 12px' }}>
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>{t('messageList.snoozedEmpty')}</div>
+        <div style={{ fontSize: 13 }}>{t('messageList.snoozedEmptyDesc')}</div>
+      </div>
+    );
+  }
   const isInbox = !selectedFolder || selectedFolder === 'INBOX';
   return (
     <div style={{ padding: '60px 24px', textAlign: 'center' }}>
@@ -4628,7 +4698,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
               {showAccount && (
-                <div style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: message.account_color || '#6366f1' }} />
+                <AccountMark accountId={message.account_id} color={message.account_color || '#6366f1'} size={6} />
               )}
               <span style={{
                 fontSize: 13, fontWeight: unreadCount > 0 ? 600 : 400,
@@ -4677,7 +4747,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
                   </svg>
                 </button>
               )}
-              <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatDate(message.date)}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}><RowTime message={message} /></span>
               {isMobile && !selectionMode && onContextMenu && (
                 <RowMenuButton label={t('message.more')} onOpen={e => onContextMenu(e, message)} />
               )}
@@ -4976,10 +5046,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
             {showAccount && (
-              <div style={{
-                width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                background: message.account_color || '#6366f1',
-              }} />
+              <AccountMark accountId={message.account_id} color={message.account_color || '#6366f1'} size={6} />
             )}
             <span style={{
               fontSize: 13, fontWeight: message.is_read ? 400 : 600,
@@ -5007,7 +5074,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
               </button>
             )}
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-              {formatDate(message.date)}
+              <RowTime message={message} />
             </span>
             {isMobile && !selectionMode && onContextMenu && (
               <RowMenuButton label={t('message.more')} onOpen={e => onContextMenu(e, message)} />

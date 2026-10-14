@@ -20,7 +20,7 @@ import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { getAccountAddresses } from './mailAccess.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
-import { applyInboxRules, applyBlockList } from './inboxRules.js';
+import { applyInboxRules, applyBlockList, newMailAlerts } from './inboxRules.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { generateVCard } from '../utils/vcard.js';
 import { mimeToExtension } from '../utils/inlineImages.js';
@@ -1304,18 +1304,22 @@ const connectionPools = new Map(); // accountId -> { clients: [], waiting: [] }
 export const POOL_SIZE = 4;
 
 // How long an operation waits for a pooled connection before giving up. Longer than
-// POOL_STALL_TIMEOUT_MS, so a stalled connection has been closed before a queued caller
-// gives up. Closing it does not hand the slot to the queue (only a released connection
-// does), but the next caller to arrive can grow a fresh one.
+// POOL_STALL_TIMEOUT_MS, so a connection that had already stalled when a caller queued
+// has been closed before that caller gives up. Closing it does not hand the slot to the
+// queue (only a released connection does), but the next caller to arrive can grow a
+// fresh one.
 export const ACQUIRE_TIMEOUT_MS = 35000;
 
-// How long a leased pooled connection may owe the server a reply, with nothing arriving,
-// before it is closed. imapflow has no per-command timeout. The `commandTimeout` this file
+// How long a leased pooled connection may wait on a reply, with nothing arriving, before
+// it is closed. imapflow has no per-command timeout. The `commandTimeout` this file
 // used to pass is not an imapflow option in any release and was silently ignored, so a
 // stalled command held its slot until the 5-minute socketTimeout. With a pool of one
 // (Yahoo), every pooled operation on the account failed as busy for that whole time.
-// It measures silence, not duration: a long FETCH or APPEND that keeps moving bytes is
-// never cut off, and whole-folder writes are already chunked (_chunkedFolderOp).
+// It measures silence, not duration: a long FETCH that keeps receiving data is never cut
+// off, and whole-folder writes are already chunked (_chunkedFolderOp). It cannot tell a
+// hung server from a slow one, though: a server that sends nothing for this long while it
+// works on one command (a 500-UID MOVE, a SEARCH of a large folder) is cut off too. An
+// upload is different, see appendToFolder.
 export const POOL_STALL_TIMEOUT_MS = 30000;
 
 // Retained as a plugin compatibility helper. Ordinary ingestion never relocates a
@@ -1565,9 +1569,10 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     logger: false,
     tls: tlsOpts,
     // No per-command timeout here: imapflow has none (a `commandTimeout` key is silently
-    // ignored). Its only bound on an unanswered command is socketTimeout, 5 minutes of
-    // silence, so a caller that cannot wait that long needs a deadline of its own, like
-    // the sync wall-clock races, folderStatus's STATUS race and POOL_STALL_TIMEOUT_MS.
+    // ignored). Its TCP keepalive can catch a peer that has vanished, but a server that
+    // reads a command and never answers is bounded only by socketTimeout, 5 minutes of
+    // silence. A caller that cannot wait that long needs a deadline of its own, like the
+    // sync wall-clock races, folderStatus's STATUS race and POOL_STALL_TIMEOUT_MS.
   };
   // Targeted ENABLE opt-out for servers whose IMAP4rev2 is broken (#472: Strato answers
   // UID SEARCH ALL with an empty ESEARCH once IMAP4rev2 is enabled). Profile-driven so
@@ -1770,9 +1775,10 @@ export async function acquirePooledClient(account) {
     const entry = { resolve, reject, timer: null };
     entry.timer = setTimeout(() => {
       pool.waiters = pool.waiters.filter(w => w !== entry);
-      // Give up on the operation rather than on the limit. A stalled connection has been
-      // closed by POOL_STALL_TIMEOUT_MS before this fires; past it, the honest answer is
-      // that the account is saturated.
+      // Give up on the operation rather than on the limit. Usually the account is
+      // saturated. A connection closed under the queue (by POOL_STALL_TIMEOUT_MS, say)
+      // frees a slot without serving anyone, since only a release hands a connection
+      // over, so a waiter can also end up here while the pool is below its cap.
       const err = new Error('IMAP connections busy, please retry');
       err.poolExhausted = true;
       reject(err);
@@ -1812,8 +1818,10 @@ export function evictPool(accountId) {
 // value: imapflow closes an idle session with no mailbox selected (the pre-warmed one,
 // or one that only ran STATUS) when the timer fires, and a short timer there would cost
 // a fresh login each time on providers that ration them (#474).
-// imapflow's timeout handler closes the connection only when a command is overdue; a
-// session that is quiet for a reason (a held lock, an open download, IDLE) gets a NOOP.
+// When the timer fires, imapflow sends a NOOP if the session is quiet for a reason (a held
+// lock, an open download, IDLE) and no command is waiting on a reply; otherwise it closes
+// the connection. That includes a FETCH held up by its own loop body: imapflow stops
+// reading while the body works on a row, so a body busy for 30s loses the connection.
 // client.socket and client.socketTimeout are imapflow internals: without them this does
 // nothing, and imapPoolStall.test.js runs a real ImapFlow so an upgrade that moves them
 // fails there.
@@ -1832,10 +1840,11 @@ function guardPoolLease(client) {
   return lease;
 }
 
-// Exported for imapPoolStall.test.js.
-export async function withFreshClient(account, fn) {
+// Exported for imapPoolStall.test.js. stallTimeout: false keeps the lease on the normal
+// timeout, for an operation the stall timer cannot judge (appendToFolder).
+export async function withFreshClient(account, fn, { stallTimeout = true } = {}) {
   const client = await acquirePooledClient(account);
-  const lease = guardPoolLease(client);
+  const lease = stallTimeout ? guardPoolLease(client) : { stalled: false, end() {} };
   try {
     return await fn(client);
   } catch (err) {
@@ -1853,10 +1862,11 @@ export async function withFreshClient(account, fn) {
     // A command cut off by the stall timeout rejects with imapflow's 'Connection not
     // available', which isConnectionRefusal reads as the provider refusing us: callers
     // would arm the refusal backoff and the body route would say the server is limiting
-    // connections. Name it for what it was. 'timed out' is also what fetchMessageBody
-    // retries on a fresh login.
+    // connections. Name it for what was measured instead: nothing arrived, which a slow
+    // server or a busy fetch loop body causes as well as a hung one. 'timed out' is also
+    // what fetchMessageBody retries on a fresh login.
     if (lease.stalled) {
-      throw new Error(`IMAP command timed out: no reply in ${POOL_STALL_TIMEOUT_MS / 1000}s`, { cause: err });
+      throw new Error(`IMAP command timed out: nothing received for ${POOL_STALL_TIMEOUT_MS / 1000}s`, { cause: err });
     }
     throw err;
   } finally {
@@ -2082,6 +2092,8 @@ export async function noteDraftsChanged(mgr, account, folder) {
 export class ImapManager {
   constructor(wss) {
     this.wss = wss;
+    // Snoozes being woken right now, by the sweep or by hand, so neither moves one twice.
+    this._wakingSnoozes = new Set();
     this._statusSyncRunning = new Set();
     this._statusSyncBackoff = new Map();
     this._statusAccountTimers = new Map();
@@ -2155,6 +2167,7 @@ export class ImapManager {
     this._flagDebounceTimers   = new Map(); // accountId -> debounce timer for flag-change syncs
     this._expungeDebounceTimers = new Map(); // accountId -> debounce timer for expunge reconciles
     this._pendingFlagSync = new Set(); // accountId — flag sync was skipped because a full sync was running; drain after sync
+    this._pendingNewMail = new Set(); // accountId — new mail (EXISTS) arrived while a sync was running; sync again after it
     // accountId -> Map<`${messageId}:${flag}`, { messageId, flag, attempts }>: local read/star
     // changes whose IMAP push failed and must be retried until the server confirms them.
     this._pendingFlagPush = new Map();
@@ -2447,8 +2460,9 @@ export class ImapManager {
             // The body-fetch pool shares the same frozen/half-open fate as the deaf
             // persistent connection (same account, same server session state), so drop it
             // too. Otherwise the next body fetch hangs on a stale pooled connection until
-            // POOL_STALL_TIMEOUT_MS closes it before retrying — the "preview hangs then
-            // eventually loads" symptom after a late-notification reconnect.
+            // the hand-out NOOP (POOL_REFRESH_TIMEOUT_MS) or, with no mailbox selected,
+            // POOL_STALL_TIMEOUT_MS closes it — the "preview hangs then eventually loads"
+            // symptom after a late-notification reconnect.
             evictPool(accountId);
 
             // Reconnect + catch up. If a sync was hung, the close() above makes it error and
@@ -2612,7 +2626,13 @@ export class ImapManager {
           account.user_id
         );
       }
-      if (this.syncingAccounts.has(account.id)) return;
+      if (this.syncingAccounts.has(account.id)) {
+        // The running sync may already have read the mailbox, so this message could miss it and
+        // wait for the next interval tick, a minute away. Two messages a moment apart, or new
+        // mail while a fresh account's first syncs run, did exactly that. Sync again once it ends.
+        this._pendingNewMail.add(account.id);
+        return;
+      }
       // Named for the IMAP response that fired it, NOT for IDLE. An untagged EXISTS arrives
       // during IDLE *or* as an unsolicited response to any polled command, so the old
       // "IMAP IDLE:" prefix asserted push was working on connections that were only polling —
@@ -2848,6 +2868,7 @@ export class ImapManager {
     // disconnect) so a re-added account writes through instead of trusting a stale cache entry.
     this._syncErrorState.delete(accountId);
     this._pendingFlagSync.delete(accountId);
+    this._pendingNewMail.delete(accountId);
     const flagTimer = this._flagDebounceTimers.get(accountId);
     if (flagTimer) { clearTimeout(flagTimer); this._flagDebounceTimers.delete(accountId); }
     const expungeTimer = this._expungeDebounceTimers.get(accountId);
@@ -3231,7 +3252,7 @@ export class ImapManager {
         usedFreshSyncClient = true;
         syncResult = await this._syncInboxWithFreshLogin(syncAccount);
       } else {
-        // Wall-clock timeout guards against half-open TCP sockets, which imapflow would otherwise
+        // Wall-clock timeout guards against half-open TCP sockets, which imapflow can otherwise
         // wait on for its 5-minute socketTimeout (it has no per-command timeout).
         syncResult = await Promise.race([
           this.syncMessages(syncAccount, activeClient, 'INBOX', 20, false, true),
@@ -3338,7 +3359,19 @@ export class ImapManager {
     } finally {
       this.syncingAccounts.delete(account.id);
       this.syncStartedAt.delete(account.id);
+      this._syncAgainIfMailArrived(account);
     }
+  }
+
+  // New mail that arrived while a sync was running (the `exists` listener queued it): sync once more.
+  _syncAgainIfMailArrived(account) {
+    if (!this._pendingNewMail.delete(account.id)) return;
+    console.log(`IMAP EXISTS: new mail for ${logAccount(account)} arrived during a sync, syncing again`);
+    setImmediate(() => {
+      this._syncTick(account).catch(err =>
+        console.warn(`IDLE-triggered sync error for ${logAccount(account)}:`, err.message)
+      );
+    });
   }
 
   // Bulk-apply is_read/is_starred from a fetched {uid, isRead, isStarred}[] onto existing rows
@@ -4475,6 +4508,8 @@ export class ImapManager {
           // Push and client-side sound/toast are skipped for these so mark_read rules
           // don't still alert the user about mail they chose to auto-silence.
           let mutedIds = new Set();
+          // Mail a "Notify me" rule filed out of the Inbox (#588), alerted for like inbox mail.
+          let notifyMessages = [];
           if (folder === 'INBOX') {
             // Snapshot the unread candidates before the block-list / rules run, so the ingest
             // re-eval below can exclude any they move out of INBOX. Only needed with an ingest plugin.
@@ -4488,6 +4523,7 @@ export class ImapManager {
               const rulesResult = await applyInboxRules(newMessages, account, this);
               newMessages = rulesResult.remaining;
               mutedIds = rulesResult.mutedIds;
+              notifyMessages = rulesResult.notifyMessages || [];
             } catch (err) {
               console.error('inboxRules error:', err.message);
             }
@@ -4512,10 +4548,10 @@ export class ImapManager {
               }
             }
           }
-          // alertMessages: remaining messages not silenced by a mark_read rule.
-          const alertMessages = newMessages.filter(m => !mutedIds.has(m.id));
-          const alertCount = alertMessages.length;
-          if (newMessages.length > 0) this.broadcast({
+          // alertMessages: remaining messages not silenced by a mark_read rule, and mail a "Notify
+          // me" rule filed elsewhere. A push for one of those opens it by id, in its new folder.
+          const { alertMessages, alertCount, send } = newMailAlerts({ remaining: newMessages, mutedIds, notifyMessages });
+          if (send) this.broadcast({
             type: 'new_messages', accountId: account.id,
             folder, messages: newMessages.slice(-5), count: newMessages.length,
             alertMessages: alertMessages.slice(-5), alertCount,
@@ -5481,11 +5517,15 @@ export class ImapManager {
 
   async appendToFolder(account, folder, rawMessage, flags = ['\\Seen']) {
     let uid = null;
+    // Without the pool's stall timeout. Node counts an upload as activity only while part
+    // of it is still queued in this process, so the tail draining from the kernel's send
+    // buffer and the server storing the message both read as silence: a large APPEND on a
+    // slow uplink would be closed at 30s with the server still receiving it.
     await withFreshClient(account, async (client) => {
       const result = await client.append(folder, rawMessage, flags);
       if (result === false) throw new Error('IMAP append returned false — server did not confirm message was stored');
       if (result && typeof result.uid === 'number') uid = result.uid;
-    });
+    }, { stallTimeout: false });
     console.log(`Appended to IMAP ${logAccount(account)}/${folder} uid=${uid}`);
     return { uid, folder };
   }
@@ -6263,7 +6303,8 @@ export class ImapManager {
     // Providers flagged preferFreshBodyFetch (e.g. PurelyMail) skip the shared pool on the
     // FIRST attempt too: a brand-new login avoids both contending with flag writes on the
     // size-2 pool and inheriting a frozen/half-open pooled session view that would hang the
-    // fetch until POOL_STALL_TIMEOUT_MS. Other providers keep pool-first for TLS reuse.
+    // fetch until the hand-out NOOP or POOL_STALL_TIMEOUT_MS closed it. Other providers keep
+    // pool-first for TLS reuse.
     const firstAcquire = providerProfile(account).preferFreshBodyFetch ? withFreshLogin : withFreshClient;
     try {
       return await doFetch(firstAcquire);
@@ -7081,6 +7122,7 @@ export class ImapManager {
       } finally {
         this.syncingAccounts.delete(account.id);
         this.syncStartedAt.delete(account.id);
+        this._syncAgainIfMailArrived(account);
       }
     }));
 
@@ -7130,10 +7172,14 @@ export class ImapManager {
     }, 60_000);
   }
 
-  async _runSnoozeWakeup() {
-    // Find snoozed messages whose snooze_until has passed and which are still in
-    // the snoozed folder (joined via stable Message-ID header).
-    const due = await query(`
+  isWakingSnooze(snoozeId) {
+    return this._wakingSnoozes.has(snoozeId);
+  }
+
+  // The snoozed messages that are live (still in the folder they were snoozed into), with what a
+  // wake-up needs; `where` narrows them, aliasing the record sm (#269 wakes some by hand).
+  async snoozedRows(where, params) {
+    const result = await query(`
       SELECT sm.id AS snooze_id, sm.user_id, sm.account_id,
              sm.message_id_header, sm.original_folder, sm.snoozed_folder, m.uid, m.is_read
       FROM snoozed_messages sm
@@ -7141,87 +7187,122 @@ export class ImapManager {
                      AND m.message_id = sm.message_id_header
                      AND m.folder = sm.snoozed_folder
                      AND m.is_deleted = false
-      WHERE sm.snooze_until <= NOW()
-    `);
+      WHERE ${where}
+    `, params);
+    return result.rows;
+  }
 
-    for (const row of due.rows) {
+  // Brings one snoozed message back to where it was snoozed from. On its own wake-up it comes back
+  // unread, so the reader notices it; brought back by hand (#269) it keeps its read state.
+  // `onlyIfDue` (the sweep) leaves a snooze that is no longer due. Returns whether it came back,
+  // false when there was nothing left to wake; a wake of it already under way returns null.
+  async wakeSnoozed(row, { markUnread = true, onlyIfDue = false } = {}) {
+    const snoozeId = row.snooze_id;
+    if (this._wakingSnoozes.has(snoozeId)) return null;
+    this._wakingSnoozes.add(snoozeId);
+    try {
+      // `row` can be out of date: the sweep reads every due snooze first and wakes them one by
+      // one, and the reader may unsnooze one by hand, or give it a later time, in between. Read
+      // it again now that this wake holds it. Gone, no longer due, or its message no longer in
+      // the Snoozed folder: nothing to do, where waking it again would move a UID that is not
+      // there and count the message back into its folder twice. Otherwise go on with the
+      // message's UID and read state as they are now.
+      const [live] = await this.snoozedRows(
+        `sm.id = $1${onlyIfDue ? ' AND sm.snooze_until <= NOW()' : ''}`, [snoozeId]);
+      if (!live) return false;
+      row = live;
+
+      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [row.account_id]);
+      if (!accountResult.rows.length) return false;
+      const account = accountResult.rows[0];
+
+      // Guard source UID before the IMAP move so reconcileDeletes cannot delete
+      // the DB row if an EXPUNGE arrives from the Snoozed folder while the move
+      // is in flight.
+      this._guardMoveUid(row.account_id, row.snoozed_folder, row.uid);
+      let newUid;
       try {
-        const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [row.account_id]);
-        if (!accountResult.rows.length) continue;
-        const account = accountResult.rows[0];
+        // Move back to original folder
+        newUid = await this.moveMessageGetNewUid(
+          account, row.uid, row.snoozed_folder, row.original_folder
+        );
 
-        // Guard source UID before the IMAP move so reconcileDeletes cannot delete
-        // the DB row if an EXPUNGE arrives from the Snoozed folder while the move
-        // is in flight.
-        this._guardMoveUid(row.account_id, row.snoozed_folder, row.uid);
-        let newUid;
-        try {
-          // Move back to original folder
-          newUid = await this.moveMessageGetNewUid(
-            account, row.uid, row.snoozed_folder, row.original_folder
-          );
-
-          // Mark as unread so the user notices it
-          if (newUid) {
-            await this.setFlag(account, newUid, row.original_folder, '\\Seen', false);
-          } else if (row.message_id_header) {
-            // No UIDPLUS — server moved the message but returned no UID map.
-            // Search the destination folder by Message-ID to locate and unflag \Seen.
-            try {
-              await withFreshClient(account, async (client) => {
-                const lock = await client.getMailboxLock(row.original_folder);
-                try {
-                  const uids = await client.search({ header: ['Message-ID', row.message_id_header] }, { uid: true });
-                  if (uids.length > 0) {
-                    const r = await client.messageFlagsRemove(String(uids[0]), ['\\Seen'], { uid: true });
-                    if (r === false) console.warn(`Snooze wakeup: messageFlagsRemove returned false for ${row.original_folder}`);
-                  } else {
-                    console.warn(`Snooze wakeup: could not find message in ${row.original_folder} to mark unread (Message-ID: ${row.message_id_header})`);
-                  }
-                } finally {
-                  lock.release();
+        // Mark as unread so the user notices it (not when the reader asked for it back).
+        if (markUnread && newUid) {
+          await this.setFlag(account, newUid, row.original_folder, '\\Seen', false);
+        } else if (markUnread && row.message_id_header) {
+          // No UIDPLUS — server moved the message but returned no UID map.
+          // Search the destination folder by Message-ID to locate and unflag \Seen.
+          try {
+            await withFreshClient(account, async (client) => {
+              const lock = await client.getMailboxLock(row.original_folder);
+              try {
+                const uids = await client.search({ header: ['Message-ID', row.message_id_header] }, { uid: true });
+                if (uids.length > 0) {
+                  const r = await client.messageFlagsRemove(String(uids[0]), ['\\Seen'], { uid: true });
+                  if (r === false) console.warn(`Snooze wakeup: messageFlagsRemove returned false for ${row.original_folder}`);
+                } else {
+                  console.warn(`Snooze wakeup: could not find message in ${row.original_folder} to mark unread (Message-ID: ${row.message_id_header})`);
                 }
-              });
-            } catch (err) {
-              console.warn(`Snooze wakeup: could not mark message unread on server (no UIDPLUS): ${err.message}`);
-            }
+              } finally {
+                lock.release();
+              }
+            });
+          } catch (err) {
+            console.warn(`Snooze wakeup: could not mark message unread on server (no UIDPLUS): ${err.message}`);
           }
-
-          // Update DB: change folder, mark unread, and update UID if the move returned one.
-          if (newUid != null) {
-            await query(
-              'UPDATE messages SET folder = $1, is_read = false, read_changed_at = NOW(), uid = $4 WHERE account_id = $2 AND message_id = $3 AND folder = $5',
-              [row.original_folder, row.account_id, row.message_id_header, newUid, row.snoozed_folder]
-            );
-          } else {
-            // Non-UIDPLUS: DB holds the stale source UID at the destination. Guard it so
-            // reconcileDeletes does not treat it as an orphan before the next sync corrects it.
-            this._guardMoveUid(row.account_id, row.original_folder, row.uid);
-            await query(
-              'UPDATE messages SET folder = $1, is_read = false, read_changed_at = NOW() WHERE account_id = $2 AND message_id = $3 AND folder = $4',
-              [row.original_folder, row.account_id, row.message_id_header, row.snoozed_folder]
-            );
-            setTimeout(() => this._unguardMoveUid(row.account_id, row.original_folder, row.uid), 10_000);
-          }
-        } finally {
-          this._unguardMoveUid(row.account_id, row.snoozed_folder, row.uid);
         }
 
-        // Remove snooze record
-        await query('DELETE FROM snoozed_messages WHERE id = $1', [row.snooze_id]);
-
-        // Update folder counts: message leaves Snoozed and re-enters original_folder as unread.
-        // row.is_read reflects the read state in the Snoozed folder before the move.
-        adjustFolderCounts(row.account_id, row.snoozed_folder, -1, row.is_read ? 0 : -1);
-        adjustFolderCounts(row.account_id, row.original_folder, 1, 1); // always +1 unread on wakeup
-
-        // Notify the user's open clients so the message reappears
-        this.broadcast({ type: 'snooze_wakeup', accountId: row.account_id }, row.user_id);
-
-        console.log(`Snooze wakeup: message ${row.message_id_header} restored to ${row.original_folder}`);
-      } catch (err) {
-        console.error(`Snooze wakeup failed for snooze_id ${row.snooze_id}:`, err.message);
+        // Update DB: change folder (and mark unread, on its own wake-up), and update UID if the move returned one.
+        if (newUid != null) {
+          await query(
+            `UPDATE messages SET folder = $1, uid = $4${markUnread ? ', is_read = false, read_changed_at = NOW()' : ''} WHERE account_id = $2 AND message_id = $3 AND folder = $5`,
+            [row.original_folder, row.account_id, row.message_id_header, newUid, row.snoozed_folder]
+          );
+        } else {
+          // Non-UIDPLUS: DB holds the stale source UID at the destination. Guard it so
+          // reconcileDeletes does not treat it as an orphan before the next sync corrects it.
+          this._guardMoveUid(row.account_id, row.original_folder, row.uid);
+          await query(
+            `UPDATE messages SET folder = $1${markUnread ? ', is_read = false, read_changed_at = NOW()' : ''} WHERE account_id = $2 AND message_id = $3 AND folder = $4`,
+            [row.original_folder, row.account_id, row.message_id_header, row.snoozed_folder]
+          );
+          setTimeout(() => this._unguardMoveUid(row.account_id, row.original_folder, row.uid), 10_000);
+        }
+      } finally {
+        this._unguardMoveUid(row.account_id, row.snoozed_folder, row.uid);
       }
+
+      // Remove snooze record
+      await query('DELETE FROM snoozed_messages WHERE id = $1', [row.snooze_id]);
+
+      // Update folder counts: message leaves Snoozed and re-enters original_folder (unread on its own wake-up).
+      // row.is_read reflects the read state in the Snoozed folder before the move.
+      adjustFolderCounts(row.account_id, row.snoozed_folder, -1, row.is_read ? 0 : -1);
+      adjustFolderCounts(row.account_id, row.original_folder, 1, markUnread || !row.is_read ? 1 : 0);
+
+      // Notify the user's open clients so the message reappears
+      this.broadcast({ type: 'snooze_wakeup', accountId: row.account_id }, row.user_id);
+
+      console.log(`Snooze wakeup: message ${row.message_id_header} restored to ${row.original_folder}`);
+      return true;
+    } catch (err) {
+      console.error(`Snooze wakeup failed for snooze_id ${row.snooze_id}:`, err.message);
+      return false;
+    } finally {
+      this._wakingSnoozes.delete(snoozeId);
+    }
+  }
+
+  async _runSnoozeWakeup() {
+    // Find snoozed messages whose snooze_until has passed and which are still in
+    // the snoozed folder (joined via stable Message-ID header).
+    const due = { rows: await this.snoozedRows('sm.snooze_until <= NOW()', []) };
+
+    for (const row of due.rows) {
+      // One the reader is bringing back by hand right now is left to that.
+      if (this._wakingSnoozes.has(row.snooze_id)) continue;
+      await this.wakeSnoozed(row, { onlyIfDue: true });
     }
 
     // Clean up orphaned snooze records whose message has left the snoozed folder

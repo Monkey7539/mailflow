@@ -391,6 +391,7 @@ describe('quoted html header as the composer shows and sends it', () => {
   const when = new Date(date).toLocaleString();
 
   // ComposeModal loads quotedBodyHtml through this sanitize call and sends what it rendered.
+  // It makes the call through sanitizeEmailForApp, which adds only a rule for image URLs.
   const headerOf = (html) => {
     const div = window.document.createElement('div');
     div.innerHTML = DOMPurify.sanitize(html, { FORBID_TAGS: ['style'] });
@@ -493,4 +494,29 @@ describe('quoted html header as the composer shows and sends it', () => {
       `Subject: ${subject}`,
     ]);
   });
+});
+
+// Large inline images are fitted for reading (backend services/inlineImageFit.js): a forward asks
+// for them as they were sent, so the recipient gets the original photo.
+describe('openForwardFromMessage and fitted inline images', () => {
+  const message = { id: 'm1', account_id: 'a', subject: 'Photos', from_email: 'f@example.com', to_addresses: [], cc_addresses: [] };
+  const withFetch = async (fn) => {
+    const asked = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url) => { asked.push(String(url)); return { ok: true, status: 200, json: async () => ({ html: '<img src="data:image/jpeg;base64,ORIGINAL">', attachments: [] }) }; };
+    try { await fn(asked); } finally { globalThis.fetch = real; }
+  };
+
+  it('forwards the originals when what is shown was fitted', async () => withFetch(async (asked) => {
+    const h = harness({ html: '<img src="data:image/webp;base64,FITTED">', inlineImagesFitted: true, remoteImagesProxied: true, attachments: [] });
+    await openForwardFromMessage(message, { openCompose: h.openCompose, getMessageBody: h.getMessageBody });
+    assert.deepEqual(asked, ['/api/mail/messages/m1/body?remoteImages=1&original=1']);
+    assert.match(h.payload().quotedBodyHtml, /ORIGINAL/);
+  }));
+
+  it('asks for nothing more when nothing was fitted', async () => withFetch(async (asked) => {
+    const h = harness({ html: '<p>Hi</p>', attachments: [] });
+    await openForwardFromMessage(message, { openCompose: h.openCompose, getMessageBody: h.getMessageBody });
+    assert.deepEqual(asked, []);
+  }));
 });
