@@ -40,6 +40,7 @@ import { formatDateTime, formatDay, formatTime } from '../utils/formatDate.js';
 import { htmlLang } from '../utils/browserLanguage.js';
 import SpamSettings from './SpamSettings.jsx';
 import BackupSettings from './BackupSettings.jsx';
+import ApiTokensSection from './ApiTokensSection.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
 function Field({ label, required, children }) {
@@ -7894,6 +7895,9 @@ function SecurityTab() {
       admin_user_update:  t('admin.security.eventAdminUserUpdate'),
       admin_totp_disable: t('admin.security.eventAdminTotpDisable'),
       admin_user_delete:  t('admin.security.eventAdminUserDelete'),
+      api_token_created:   t('admin.security.eventApiTokenCreated'),
+      api_token_revoked:   t('admin.security.eventApiTokenRevoked'),
+      api_token_auth_fail: t('admin.security.eventApiTokenAuthFail'),
     };
     return map[type] || type;
   };
@@ -8288,6 +8292,8 @@ function SecurityTab() {
         )}
       </div>
 
+      <ApiTokensSection />
+
       {/* MFA enforcement — admin only */}
       {user?.isAdmin && (
         <div style={{
@@ -8680,6 +8686,7 @@ function makeSearchIndex(t) {
     { label: t('admin.categories.gtdReveal'), keywords: ['gtd', 'todo', 'getting things done', 'watch', 'delegated', 'someday', 'reference', 'next action', 'waiting', 'inbox zero', 'pet'], tab: 'categories', subtab: 'gtd', breadcrumb: `${tabLabel('categories')} › ${t('admin.categories.gtdReveal')}` },
     // Security
     { label: t('admin.security.totpTitle'), keywords: ['2fa', 'totp', 'authenticator', 'two factor', 'otp', 'two-factor', 'mfa', 'security code'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
+    { label: t('admin.apiTokens.title'), keywords: ['api', 'token', 'api token', 'access token', 'personal access token', 'bearer', 'mcp', 'script', 'revoke'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
     { label: t('admin.security.ssoTitle'), keywords: ['sso', 'linked', 'identity', 'provider', 'link', 'unlink', 'oidc', 'connect identity'], tab: 'security', subtab: 'security', breadcrumb: secCrumb },
     { label: t('admin.security.loginProtectionTitle'), keywords: ['login', 'attempts', 'brute force', 'lockout', 'max attempts', 'rate limit'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
     { label: t('admin.security.mailPolicyTitle'), keywords: ['server', 'tls', 'insecure', 'private ip', 'port', 'mail server', 'ssl'], tab: 'security', subtab: 'security', adminOnly: true, breadcrumb: secCrumb },
