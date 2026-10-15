@@ -270,14 +270,16 @@
       "noFolderBody": "Nenhuma pasta de arquivo configurada para esta conta. Defina uma em Configurações → Contas → Mapeamento de pastas.",
       "conversationTitle": "Conversa arquivada",
       "nothingFromAccount": "Nada desta conta para arquivar nesta conversa",
-      "otherAccountMessage": "Nada foi arquivado: a mensagem aberta é de outra conta"
+      "otherAccountMessage": "Nada foi arquivado: a mensagem aberta é de outra conta",
+      "otherAccountDraft": "Nada foi arquivado: o rascunho aberto é de outra conta"
     },
     "moved": {
       "title": "Mensagem movida",
       "failTitle": "Falha ao mover",
       "failBody": "Não foi possível mover a mensagem.",
       "conversationTitle": "Conversa movida",
-      "nothingFromAccount": "Nada desta conta para mover nesta conversa"
+      "nothingFromAccount": "Nada desta conta para mover nesta conversa",
+      "otherAccountDraft": "Nada foi movido: o rascunho aberto é de outra conta"
     },
     "snoozed": {
       "title": "Mensagem adiada",

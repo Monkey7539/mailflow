@@ -270,6 +270,7 @@
       "conversationTitle": "대화가 보관되었습니다.",
       "nothingFromAccount": "이 대화에는 보관할 이 계정의 메일이 없습니다.",
       "otherAccountMessage": "아무것도 보관하지 않았습니다. 열린 메시지는 다른 계정의 메시지입니다.",
+      "otherAccountDraft": "아무것도 보관하지 않았습니다. 열린 초안은 다른 계정의 초안입니다.",
       "noFolderTitle": "보관 폴더 없음"
     },
     "moved": {
@@ -277,6 +278,7 @@
       "title": "메시지가 이동되었습니다.",
       "conversationTitle": "대화가 이동되었습니다.",
       "nothingFromAccount": "이 대화에는 이동할 이 계정의 메일이 없습니다.",
+      "otherAccountDraft": "아무것도 이동하지 않았습니다. 열린 초안은 다른 계정의 초안입니다.",
       "failBody": "메시지를 이동할 수 없습니다."
     },
     "whitelistFail": {

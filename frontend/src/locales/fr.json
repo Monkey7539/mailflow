@@ -270,14 +270,16 @@
       "noFolderBody": "Aucun dossier d'archive configuré pour ce compte. Définissez-en un dans Paramètres → Comptes → Mappage des dossiers.",
       "conversationTitle": "Conversation archivée",
       "nothingFromAccount": "Aucun message de ce compte à archiver dans cette conversation",
-      "otherAccountMessage": "Rien n'a été archivé : le message ouvert provient d'un autre compte"
+      "otherAccountMessage": "Rien n'a été archivé : le message ouvert provient d'un autre compte",
+      "otherAccountDraft": "Rien n'a été archivé : le brouillon ouvert provient d'un autre compte"
     },
     "moved": {
       "title": "Message déplacé",
       "failTitle": "Échec du déplacement",
       "failBody": "Impossible de déplacer le message.",
       "conversationTitle": "Conversation déplacée",
-      "nothingFromAccount": "Aucun message de ce compte à déplacer dans cette conversation"
+      "nothingFromAccount": "Aucun message de ce compte à déplacer dans cette conversation",
+      "otherAccountDraft": "Rien n'a été déplacé : le brouillon ouvert provient d'un autre compte"
     },
     "snoozed": {
       "title": "Message mis en attente",

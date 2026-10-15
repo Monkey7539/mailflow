@@ -71,9 +71,9 @@ export async function resolveThreadMessages({ message, isThreadRow, cached, fetc
 //
 // Each returns whether it took anything, since a filter can leave nothing to act on (Spam spares
 // the reader's own mail, Snooze takes only an inbox copy, accountId can match no copy at all, the
-// anchor can be another account's draft), and the pane moves on only when one did. beforeRemove
-// runs once there is something to take, before anything leaves the list: that is when the pane
-// opens what takes the conversation's place.
+// anchor can be another account's draft, which Archive and Move leave alone), and the pane moves on
+// only when one did. beforeRemove runs once there is something to take, before anything leaves the
+// list: that is when the pane opens what takes the conversation's place.
 
 const UNDO_WINDOW_MS = 4500;
 
@@ -143,13 +143,18 @@ const liveThread = (fetchThread) => fetchThread
 // keepDraftsApart. Of those they take accountId's copies. Drafts are told apart among every
 // account's copies first, because the anchor can be the other account's copy picked under the row.
 // The other account's draft is not a copy of anything accountId holds, though: it is mail saved in
-// that account alone. Picked under the row it stands for none of accountId's mail, so nothing is
-// taken. Taking accountId's drafts in its place would expunge them and leave the draft picked.
-const takenCopies = (list, anchorId, accountId) => {
+// that account alone, and picked under the row it stands for none of accountId's mail. Archive and
+// Move take nothing then: taking accountId's drafts in its place would move those and leave the
+// draft the reader picked. Delete takes the picked draft itself (deleteThread). Exported for the
+// pane, which names the draft when Archive or Move take nothing, and says so before Move's picker.
+export const otherAccountsDraft = (list, anchorId, accountId) => {
   const anchor = list.find(message => message?.id === anchorId);
-  if (accountId && anchor?.is_draft && anchor.account_id !== accountId) return [];
-  return inAccount(keepDraftsApart(list, anchorId), accountId);
+  return accountId && anchor?.is_draft && anchor.account_id !== accountId ? anchor : null;
 };
+
+const takenCopies = (list, anchorId, accountId) => (otherAccountsDraft(list, anchorId, accountId)
+  ? []
+  : inAccount(keepDraftsApart(list, anchorId), accountId));
 
 const sparingDrafts = (resolve, anchorId, accountId) => resolve
   ? async (targets) => takenCopies(await resolve(targets), anchorId, accountId)
@@ -190,11 +195,17 @@ export function archiveThread(messages, { t, addNotification, fetchThread, ancho
 }
 
 export function deleteThread(messages, { t, addNotification, fetchThread, anchorId, accountId, beforeRemove }) {
+  // Picked under the row, the other account's draft is the one message outside accountId that Delete
+  // takes: the reader opened it and asked. That draft alone, since a deleted draft is expunged and its
+  // account's other drafts were not asked for, and by its id alone at commit, with no re-read: there
+  // is nothing to add to one message, and a draft gone by then (sent, discarded, saved again under a
+  // new id) would leave the re-read to take the rest of the conversation in its place.
+  const draft = otherAccountsDraft(messages, anchorId, accountId);
   return runThreadAction({
-    messages: takenCopies(messages, anchorId, accountId),
+    messages: draft ? [draft] : takenCopies(messages, anchorId, accountId),
     addNotification,
     beforeRemove,
-    resolve: sparingDrafts(liveThread(fetchThread), anchorId, accountId),
+    resolve: draft ? null : sparingDrafts(liveThread(fetchThread), anchorId, accountId),
     // The delete guards stop a sync already in flight from resurrecting the rows
     // between the optimistic removal and the commit.
     onRemove: targets => targets.forEach(message => setPendingDelete(message.id)),

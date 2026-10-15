@@ -366,20 +366,58 @@ describe('a conversation another account also received', () => {
     assert.deepEqual(sentIds(/bulk-move/), ['a1', 'a2', 'a3']);
   });
 
-  test('the other account\'s draft picked under the row takes nothing, the row account\'s own takes its drafts', async () => {
+  test('the other account\'s draft picked under the row: Delete takes that draft alone, Archive and Move nothing', async () => {
     // Acting on a draft takes the conversation's drafts, never the rest of it (keepDraftsApart), and
     // a deleted draft is expunged. A draft is not a copy of anything acct holds, so acct-b's stands
-    // for none of acct's mail: taking acct's drafts in its place would expunge them and leave the
-    // draft picked, and narrowing to acct first would take acct's whole conversation.
-    const opts = { t, addNotification, fetchThread: fetchWithDrafts, accountId: 'acct' };
-    assert.equal(archiveThread(WITH_DRAFTS, { ...opts, anchorId: 'bd', folder: 'INBOX' }), false, 'archive takes nothing');
-    assert.equal(deleteThread(WITH_DRAFTS, { ...opts, anchorId: 'bd' }), false, 'delete takes nothing');
-    assert.equal(moveThread(WITH_DRAFTS, 'Projects', { ...opts, anchorId: 'bd' }), false, 'move takes nothing');
-    assert.deepEqual(notifications, [], 'and none of them shows a toast');
-    deleteThread(WITH_DRAFTS, { ...opts, anchorId: 'ad' });
+    // for none of acct's mail: taking acct's drafts in its place would act on them and leave the
+    // draft picked, and narrowing to acct first would take acct's whole conversation. Delete is the
+    // reader discarding the draft they opened, so it takes that one, and none of acct-b's others.
+    const thread = [...WITH_DRAFTS, { ...AD, id: 'bd2', account_id: 'acct-b', date: '2026-01-06T00:00:00Z' }];
+    useStore.getState().setMessages(thread.map(m => ({ ...m })));
+    const opts = { t, addNotification, fetchThread: async () => ({ messages: thread }), accountId: 'acct', anchorId: 'bd' };
+    assert.equal(archiveThread(thread, { ...opts, folder: 'INBOX' }), false, 'archive takes nothing');
+    assert.equal(moveThread(thread, 'Projects', opts), false, 'move takes nothing');
+    assert.deepEqual(notifications, [], 'and neither shows a toast');
+    assert.equal(deleteThread(thread, opts), true, 'delete takes the draft');
+    assert.deepEqual(ids(), ['a1', 'a2', 'a3', 'ad', 'b3', 'bd2'], 'which alone leaves the list');
     await commit();
     assert.equal(requests.length, 1, 'one request in all');
-    assert.deepEqual(sentIds(/bulk-delete/), ['ad'], 'acct\'s own draft takes acct\'s drafts, not acct-b\'s');
+    assert.deepEqual(sentIds(/bulk-delete/), ['bd'], 'and alone is deleted');
+  });
+
+  test('the other account\'s draft gone by the commit has nothing taken in its place', async () => {
+    // Sent, discarded or saved again under a new id during the undo window. A re-read no longer holds
+    // it, and drafts told apart without it would take acct's conversation instead.
+    const gone = WITH_DRAFTS.filter(m => m.id !== 'bd');
+    deleteThread(WITH_DRAFTS, { t, addNotification, fetchThread: async () => ({ messages: gone }), anchorId: 'bd', accountId: 'acct' });
+    await commit();
+    assert.deepEqual(sentIds(/bulk-delete/), ['bd'], 'only the draft\'s own id is sent');
+  });
+
+  test('the row account\'s own draft picked under the row takes the row account\'s drafts', async () => {
+    // Only the other account's draft is set apart. acct's own is one of acct's drafts, and acting on
+    // it takes them all (keepDraftsApart), each action alike.
+    const thread = [...WITH_DRAFTS, { ...AD, id: 'ad2', date: '2026-01-06T00:00:00Z' }];
+    const opts = { t, addNotification, fetchThread: async () => ({ messages: thread }), anchorId: 'ad', accountId: 'acct' };
+    assert.equal(archiveThread(thread, opts), true, 'archive takes them');
+    assert.equal(moveThread(thread, 'Projects', opts), true, 'move takes them');
+    assert.equal(deleteThread(thread, opts), true, 'delete takes them');
+    await commit();
+    assert.deepEqual(sentIds(/bulk-archive/), ['ad', 'ad2']);
+    assert.deepEqual(sentIds(/bulk-move/), ['ad', 'ad2']);
+    assert.deepEqual(sentIds(/bulk-delete/), ['ad', 'ad2'], 'not acct-b\'s');
+  });
+
+  test('in the unified inbox a draft picked takes the conversation\'s drafts, whichever account\'s', async () => {
+    // There is no row account there to set acct-b's draft apart from.
+    const opts = { t, addNotification, fetchThread: fetchWithDrafts, anchorId: 'bd', accountId: null };
+    assert.equal(archiveThread(WITH_DRAFTS, opts), true, 'archive takes them');
+    assert.equal(moveThread(WITH_DRAFTS, 'Projects', opts), true, 'move takes them');
+    assert.equal(deleteThread(WITH_DRAFTS, opts), true, 'delete takes them');
+    await commit();
+    assert.deepEqual(sentIds(/bulk-archive/), ['ad', 'bd']);
+    assert.deepEqual(sentIds(/bulk-move/), ['ad', 'bd']);
+    assert.deepEqual(sentIds(/bulk-delete/), ['ad', 'bd']);
   });
 
   test('the other account\'s message picked under the row leaves the row account\'s drafts alone, even when they are all it holds', async () => {

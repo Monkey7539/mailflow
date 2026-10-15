@@ -270,14 +270,16 @@
       "noFolderBody": "此账户未配置归档文件夹。请前往「设置 → 账户 → 文件夹映射」中设置。",
       "conversationTitle": "会话已归档",
       "nothingFromAccount": "此会话中没有此账户的邮件可归档",
-      "otherAccountMessage": "未归档任何邮件：打开的邮件属于其他账户"
+      "otherAccountMessage": "未归档任何邮件：打开的邮件属于其他账户",
+      "otherAccountDraft": "未归档任何邮件：打开的草稿属于其他账户"
     },
     "moved": {
       "title": "邮件已移动",
       "failTitle": "移动失败",
       "failBody": "无法移动此邮件。",
       "conversationTitle": "会话已移动",
-      "nothingFromAccount": "此会话中没有此账户的邮件可移动"
+      "nothingFromAccount": "此会话中没有此账户的邮件可移动",
+      "otherAccountDraft": "未移动任何邮件：打开的草稿属于其他账户"
     },
     "snoozed": {
       "title": "邮件已稍后提醒",

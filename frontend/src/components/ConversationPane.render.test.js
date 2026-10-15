@@ -550,27 +550,50 @@ describe('a conversation another account also received', () => {
     assert.deepEqual(sentIds(/bulk-delete/), ['m1', 'm2', 'm3']);
   });
 
-  test('Delete with the other account\'s draft picked under the row expunges no draft', async () => {
-    // Acting on a draft takes the conversation's drafts (keepDraftsApart), and a deleted draft is
-    // expunged. acct-b's draft is no copy of acct's, so it stands for none of acct's drafts: taking
-    // those in its place expunged acct's draft and left the one the reader had open.
-    served['<50@x>'] = [
-      { ...THREAD[0], id: 'a50', message_id: '<50@x>', thread_id: '<50@x>' },
-      { ...THREAD[2], id: 'a51', message_id: '<51@x>', thread_id: '<50@x>' },
-      { ...THREAD[2], id: 'b51', account_id: 'acct-b', message_id: '<51@x>', thread_id: '<50@x>' },
-      { ...THREAD[1], id: 'ad', folder: 'Drafts', message_id: '<52@x>', thread_id: '<50@x>', date: '2026-01-04T10:00:00Z', is_draft: true },
-      { ...THREAD[1], id: 'bd', account_id: 'acct-b', folder: 'Drafts', message_id: '<53@x>', thread_id: '<50@x>', date: '2026-01-05T10:00:00Z', is_draft: true },
-    ];
-    const [, row, , ad, bd] = served['<50@x>'];
-    const listed = { rows: [{ ...row, message_count: 3, unread_count: 1 }], threadMessages: { '<50@x>': served['<50@x>'] } };
-    await open({ selected: bd, ...listed });
+  // acct's row of a conversation with a draft saved in each account, and a second one in acct-b's,
+  // opened on the message picked under the row.
+  const DRAFTED = [
+    { ...THREAD[0], id: 'a50', message_id: '<50@x>', thread_id: '<50@x>' },
+    { ...THREAD[2], id: 'a51', message_id: '<51@x>', thread_id: '<50@x>' },
+    { ...THREAD[2], id: 'b51', account_id: 'acct-b', message_id: '<51@x>', thread_id: '<50@x>' },
+    { ...THREAD[1], id: 'ad', folder: 'Drafts', message_id: '<52@x>', thread_id: '<50@x>', date: '2026-01-04T10:00:00Z', is_draft: true },
+    { ...THREAD[1], id: 'bd', account_id: 'acct-b', folder: 'Drafts', message_id: '<53@x>', thread_id: '<50@x>', date: '2026-01-05T10:00:00Z', is_draft: true },
+    { ...THREAD[1], id: 'bd2', account_id: 'acct-b', folder: 'Drafts', message_id: '<54@x>', thread_id: '<50@x>', date: '2026-01-06T10:00:00Z', is_draft: true },
+  ];
+  const openDrafted = id => {
+    served['<50@x>'] = DRAFTED;
+    return open({
+      selected: DRAFTED.find(m => m.id === id),
+      rows: [{ ...DRAFTED[1], message_count: 3, unread_count: 1 }],
+      threadMessages: { '<50@x>': DRAFTED },
+    });
+  };
+
+  test('Delete with the other account\'s draft picked under the row deletes that draft alone', async () => {
+    // The reader opened acct-b's draft under acct's row and asked to delete it, the one message
+    // outside acct that the pane takes. A deleted draft is expunged, so it goes alone: neither
+    // acct-b's other draft nor acct's, which taking the conversation's drafts (keepDraftsApart)
+    // would expunge with it.
+    await openDrafted('bd');
     await commitWindow(button('message.delete'));
-    assert.deepEqual(sentIds(/bulk-delete/), [], 'nothing is deleted');
+    assert.deepEqual(sentIds(/bulk-delete/), ['bd']);
+    assert.deepEqual(notices(), ['messageList.deleted.conversationTitle'], 'with no notice that nothing was taken');
+    await openDrafted('ad');
+    await commitWindow(button('message.delete'));
+    assert.deepEqual(sentIds(/bulk-delete/), ['ad'], 'acct\'s own draft picked takes acct\'s drafts, none of acct-b\'s');
+  });
+
+  test('Archive and Move with the other account\'s draft picked under the row take nothing and say so', async () => {
+    // acct-b's draft stands for none of acct's mail, and acct's drafts were not picked. acct has
+    // mail here, so the notice names the draft; and Move says so before a folder is picked.
+    await openDrafted('bd');
+    await commitWindow(button('message.archive'));
+    await click(button('contextMenu.moveToFolder'));
+    assert.equal(pickerOpen(), false, 'no move picker opens');
+    assert.ok(!requests.some(r => /\/accounts\/[^/]+\/folders/.test(r.url)), 'no account\'s folders are listed');
+    assert.ok(!requests.some(r => /bulk-archive|bulk-move/.test(r.url)), 'nothing is archived or moved');
     assert.equal(useStore.getState().selectedMessageId, 'bd', 'the pane stays on the draft');
-    assert.deepEqual(notices(), ['messageList.deleted.nothingFromAccount'], 'and says why');
-    await open({ selected: ad, ...listed });
-    await commitWindow(button('message.delete'));
-    assert.deepEqual(sentIds(/bulk-delete/), ['ad'], 'acct\'s own draft picked deletes acct\'s draft alone');
+    assert.deepEqual(notices(), ['message.moved.otherAccountDraft', 'message.archived.otherAccountDraft']);
   });
 
   test('picking the other account\'s copy under the row opens that copy alone', async () => {

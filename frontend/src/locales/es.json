@@ -270,14 +270,16 @@
       "noFolderBody": "No hay carpeta de archivo configurada para esta cuenta. Configura una en Ajustes → Cuentas → Asignación de carpetas.",
       "conversationTitle": "Conversación archivada",
       "nothingFromAccount": "No hay nada de esta cuenta que archivar en esta conversación",
-      "otherAccountMessage": "No se archivó nada: el mensaje abierto es de otra cuenta"
+      "otherAccountMessage": "No se archivó nada: el mensaje abierto es de otra cuenta",
+      "otherAccountDraft": "No se archivó nada: el borrador abierto es de otra cuenta"
     },
     "moved": {
       "title": "Mensaje movido",
       "failTitle": "Error al mover",
       "failBody": "No se pudo mover el mensaje.",
       "conversationTitle": "Conversación movida",
-      "nothingFromAccount": "No hay nada de esta cuenta que mover en esta conversación"
+      "nothingFromAccount": "No hay nada de esta cuenta que mover en esta conversación",
+      "otherAccountDraft": "No se movió nada: el borrador abierto es de otra cuenta"
     },
     "snoozed": {
       "title": "Mensaje pospuesto",

@@ -393,14 +393,16 @@
       "noFolderBody": "Pro tento účet není nastavena složka archivu. Nastavte ji v Nastavení → Účty → Mapování složek.",
       "conversationTitle": "Konverzace archivována",
       "nothingFromAccount": "V této konverzaci není z tohoto účtu nic k archivaci",
-      "otherAccountMessage": "Nic nebylo archivováno: otevřená zpráva je z jiného účtu"
+      "otherAccountMessage": "Nic nebylo archivováno: otevřená zpráva je z jiného účtu",
+      "otherAccountDraft": "Nic nebylo archivováno: otevřený koncept je z jiného účtu"
     },
     "moved": {
       "title": "Zpráva přesunuta",
       "failTitle": "Přesunutí se nezdařilo",
       "failBody": "Zprávu se nepodařilo přesunout.",
       "conversationTitle": "Konverzace přesunuta",
-      "nothingFromAccount": "V této konverzaci není z tohoto účtu nic k přesunutí"
+      "nothingFromAccount": "V této konverzaci není z tohoto účtu nic k přesunutí",
+      "otherAccountDraft": "Nic nebylo přesunuto: otevřený koncept je z jiného účtu"
     },
     "snoozed": {
       "title": "Zpráva odložena",

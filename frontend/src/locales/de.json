@@ -270,14 +270,16 @@
       "noFolderBody": "Kein Archivordner für dieses Konto konfiguriert. In Einstellungen → Konten → Ordnerzuordnungen festlegen.",
       "conversationTitle": "Konversation archiviert",
       "nothingFromAccount": "In dieser Konversation gibt es nichts von diesem Konto zu archivieren",
-      "otherAccountMessage": "Nichts archiviert: Die geöffnete Nachricht gehört zu einem anderen Konto"
+      "otherAccountMessage": "Nichts archiviert: Die geöffnete Nachricht gehört zu einem anderen Konto",
+      "otherAccountDraft": "Nichts archiviert: Der geöffnete Entwurf gehört zu einem anderen Konto"
     },
     "moved": {
       "title": "Nachricht verschoben",
       "failTitle": "Verschieben fehlgeschlagen",
       "failBody": "Nachricht konnte nicht verschoben werden.",
       "conversationTitle": "Konversation verschoben",
-      "nothingFromAccount": "In dieser Konversation gibt es nichts von diesem Konto zu verschieben"
+      "nothingFromAccount": "In dieser Konversation gibt es nichts von diesem Konto zu verschieben",
+      "otherAccountDraft": "Nichts verschoben: Der geöffnete Entwurf gehört zu einem anderen Konto"
     },
     "snoozed": {
       "title": "Nachricht zurückgestellt",

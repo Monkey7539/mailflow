@@ -272,14 +272,16 @@
       "noFolderBody": "Nie skonfigurowano folderu archiwum dla tego konta. Ustaw go w Ustawienia → Konta → Mapowanie folderów.",
       "conversationTitle": "Konwersacja zarchiwizowana",
       "nothingFromAccount": "W tej konwersacji nie ma nic z tego konta do zarchiwizowania",
-      "otherAccountMessage": "Nic nie zarchiwizowano: otwarta wiadomość pochodzi z innego konta"
+      "otherAccountMessage": "Nic nie zarchiwizowano: otwarta wiadomość pochodzi z innego konta",
+      "otherAccountDraft": "Nic nie zarchiwizowano: otwarta wersja robocza pochodzi z innego konta"
     },
     "moved": {
       "title": "Wiadomość przeniesiona",
       "failTitle": "Przenoszenie nie powiodło się",
       "failBody": "Nie udało się przenieść wiadomości.",
       "conversationTitle": "Konwersacja przeniesiona",
-      "nothingFromAccount": "W tej konwersacji nie ma nic z tego konta do przeniesienia"
+      "nothingFromAccount": "W tej konwersacji nie ma nic z tego konta do przeniesienia",
+      "otherAccountDraft": "Nic nie przeniesiono: otwarta wersja robocza pochodzi z innego konta"
     },
     "snoozed": {
       "title": "Wiadomość odłożona",

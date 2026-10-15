@@ -9,7 +9,7 @@ import {
   conversationMembershipKey,
   newestConversationMessage,
 } from '../utils/conversation.js';
-import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount } from '../utils/threadActions.js';
+import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount, otherAccountsDraft } from '../utils/threadActions.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
@@ -31,6 +31,12 @@ const NOTHING_TO_TAKE = {
 const NOTHING_TO_TAKE_UNIFIED = {
   spam: 'spam.nothingInConversation',
   snooze: 'message.snoozed.nothingInConversation',
+};
+// With the other account's draft picked under the row, Archive and Move take nothing even though
+// the row's account has mail in the conversation, so "nothing from this account" would be untrue.
+const NOTHING_TO_TAKE_DRAFT = {
+  archive: 'message.archived.otherAccountDraft',
+  move: 'message.moved.otherAccountDraft',
 };
 
 function ThreadBtn({ onClick, title, children }) {
@@ -148,11 +154,12 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
 
   // An action can find nothing to take: no copy of accountId at all (a link to a message of an
   // account the thread route leaves out, a disabled one), no INBOX copy to snooze, only mail the
-  // reader sent to report as spam, or the other account's draft picked under the row. Moving on as
-  // if it had worked would hide that, and so would staying put without a word: the conversation
-  // stays open and a notice says so.
+  // reader sent to report as spam, or, for Archive and Move, the other account's draft picked under
+  // the row. Moving on as if it had worked would hide that, and so would staying put without a word:
+  // the conversation stays open and a notice says so.
   const sayNothingTaken = (name) => addNotification({
-    title: t((!accountId && NOTHING_TO_TAKE_UNIFIED[name]) || NOTHING_TO_TAKE[name]),
+    title: t((otherAccountsDraft(messages, selectedMessageId, accountId) && NOTHING_TO_TAKE_DRAFT[name])
+      || (!accountId && NOTHING_TO_TAKE_UNIFIED[name]) || NOTHING_TO_TAKE[name]),
   });
 
   const runAction = (name, action) => {
@@ -176,7 +183,9 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
       // is still there to look up; with no row on screen, fall back to clearing the pane. The runner
       // calls this only once it has something to take. The row has to be accountId's: a message
       // opened from a notification can be another account's copy of a conversation this view lists,
-      // and acting for that account leaves that row where it is.
+      // and acting for that account leaves that row where it is. Deleting a draft picked under the
+      // row, the other account's included, still moves on from the row, which stays listed: the pane
+      // has always moved on after deleting a draft.
       beforeRemove: () => {
         const { messages: listed, searchResults, searchQuery } = useStore.getState();
         const row = (searchQuery.trim() ? searchResults : listed)
@@ -212,10 +221,11 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   // Both pickers open on the newest of accountId's copies (of any account's in the unified inbox):
   // the move picker lists that copy's account's folders, and the snooze picker's Back row leads
   // to the full menu, whose plugin items (GTD classify) act on that copy. With no copy of
-  // accountId on screen there is nothing to open either on.
+  // accountId on screen there is nothing to open either on. With the other account's draft picked
+  // under the row Move takes nothing (moveThread), and the reader is told before picking a folder.
   const openPicker = (event, view) => {
     const pickerMessage = newestConversationMessage(inAccount(messages, accountId));
-    if (!pickerMessage) {
+    if (!pickerMessage || (view === 'move' && otherAccountsDraft(messages, selectedMessageId, accountId))) {
       sayNothingTaken(view);
       return;
     }
