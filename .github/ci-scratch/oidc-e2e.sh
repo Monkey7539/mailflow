@@ -16,7 +16,7 @@ adb install -r -t "$APK"
 adb install -r -t "$TEST_APK"
 adb logcat -c || true
 
-adb shell am instrument -w -r -e class sh.mailflow.app.OidcLoginFlowTest \
+adb shell am instrument -w -r -e class "${TEST_FILTER:-sh.mailflow.app.OidcLoginFlowTest}" \
   sh.mailflow.app.test/androidx.test.runner.AndroidJUnitRunner > "$OUT/instrument.txt" 2>&1
 cat "$OUT/instrument.txt"
 

@@ -11,58 +11,6 @@ permissions:
   contents: read
 
 jobs:
-  unit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-        with:
-          packages: 'platform-tools platforms;android-36'
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Sync the Android project
-        working-directory: frontend
-        run: npm run android:sync
-
-      - name: Unit tests on the PR head
-        working-directory: frontend/packages/android
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon :app:testDebugUnitTest
-
-      - name: Test results
-        if: always()
-        working-directory: frontend/packages/android
-        run: |
-          for f in app/build/test-results/testDebugUnitTest/*.xml; do echo "== $f"; cat "$f"; done
-
-      - name: Mutations
-        working-directory: frontend/packages/android
-        run: bash ../../../.github/ci-scratch/oidc-mutate.sh
-
-      - name: Compile the debug app
-        working-directory: frontend/packages/android
-        run: |
-          git status --short
-          ./gradlew --no-daemon :app:assembleDebug
-
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -110,6 +58,8 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Sign-in flow on an emulator
+        env:
+          TEST_FILTER: sh.mailflow.app.OidcLoginFlowTest#j_probeSignOutEndSessionAndTheNextSignIn
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}

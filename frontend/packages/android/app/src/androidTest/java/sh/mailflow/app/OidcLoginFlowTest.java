@@ -312,8 +312,11 @@ public class OidcLoginFlowTest {
         String urlAfterEndSession = appUrl();
         instrumentation.removeMonitor(monitor);
 
+        // getUrl() reports a loadUrl target before it commits, so wait for the new document itself.
         onApp(a -> a.getBridge().getWebView().loadUrl(host + "/login"));
-        waitFor("app on /login", () -> (host + "/login").equals(appUrl()) && pageHas("session"));
+        waitFor("app on /login", () -> server.any(r -> r.fromApp() && r.target.equals("/login"))
+            && "\"/login\"".equals(evalApp("location.pathname")) && pageHas("session"));
+        SystemClock.sleep(300);
         server.clear();
         click("session");
         awaitRequest("second callback", r -> r.path().equals("/auth/oidc/session/callback"));
