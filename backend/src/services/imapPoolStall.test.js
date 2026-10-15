@@ -12,7 +12,7 @@
 // the lease's timer alone when it keeps that session with a NOOP. An upgrade that moves
 // those internals, or whose handler puts socketTimeout back when it sends the NOOP, fails
 // here. One that puts it back only while a fetch loop's body is busy on a row does not.
-// Only time is faked: socket.setTimeout is scaled so the 30s stall timeout fires in
+// Only time is faked: socket.setTimeout is scaled so the 45s stall timeout fires in
 // milliseconds.
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
