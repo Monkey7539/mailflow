@@ -1,0 +1,108 @@
+name: PostgreSQL Trash-copy and snoozed-folder check (temporary)
+
+# Scratch check for dev with fix/conversation-trash-copies, fix/conversation-snooze-picker and the
+# thread route's snoozed_folder: there is no PostgreSQL on the machine they were written on, so the
+# thread route's new SQL is run here against a real database.
+on:
+  push:
+    branches: ["ci/postgres-trash-check-dev"]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailflow
+          POSTGRES_PASSWORD: mailflow
+          POSTGRES_DB: mailflow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mailflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      MAILFLOW_TEST_DATABASE_URL: postgres://mailflow:mailflow@localhost:5432/mailflow_test
+      TRASH_TEST: src/routes/mail.threadTrash.postgres.test.js
+      SNOOZED_TEST: src/routes/mail.threadSnoozed.postgres.test.js
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Every PostgreSQL test
+        working-directory: backend
+        run: npx vitest run postgres --reporter=verbose
+
+      # A Trash-mark mutation only counts when the test fails on the marks. A broken statement would
+      # make the thread route answer 500, which fails the status check instead.
+      - name: Each mutation of the Trash mark fails the Trash test on the marks
+        working-directory: backend
+        run: |
+          status=0
+          for script in ../.github/ci-scratch/trash/mutate-*.mjs; do
+            echo "::group::$script"
+            node "$script"
+            git diff --stat
+            if npx vitest run "$TRASH_TEST" --reporter=verbose > out.txt 2>&1; then
+              cat out.txt
+              echo "::error::$script: the test passed with the mutation"
+              status=1
+            elif grep -q "expected 500 to be 200" out.txt; then
+              cat out.txt
+              echo "::error::$script: the route failed (500) rather than marking wrongly"
+              status=1
+            else
+              cat out.txt
+            fi
+            rm -f out.txt
+            git checkout -- src
+            echo "::endgroup::"
+          done
+          exit $status
+
+      # Dropping LIMIT 1 is expected to fail with a 500 (two records for one copy); the others on
+      # the snoozed_folder values.
+      - name: Each mutation of the snoozed_folder subquery fails the snoozed test
+        working-directory: backend
+        run: |
+          status=0
+          for script in ../.github/ci-scratch/snoozed/mutate-*.mjs; do
+            echo "::group::$script"
+            node "$script"
+            git diff --stat
+            if npx vitest run "$SNOOZED_TEST" --reporter=verbose > out.txt 2>&1; then
+              cat out.txt
+              echo "::error::$script: the test passed with the mutation"
+              status=1
+            else
+              cat out.txt
+            fi
+            rm -f out.txt
+            git checkout -- src
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: The whole backend suite with the database
+        working-directory: backend
+        run: npx vitest run
