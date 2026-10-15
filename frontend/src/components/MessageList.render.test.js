@@ -193,6 +193,65 @@ describe('MessageList — selected-row shortcuts', () => {
   });
 });
 
+// Moving a conversation row sends its account's copies from every folder to bulk-move, which takes a
+// copy already in Trash back out of it (deleting the row sends only this folder's copies, so it never
+// reached that copy). The route marks that copy in_trash; this account's folder list has not loaded
+// and INBOX.Trash goes by no name the client knows, so only the mark leaves it alone. The ids are
+// this test's own, so the rows later tests show are untouched.
+describe('MessageList — moving a conversation leaves its copy in Trash', () => {
+  test('the bulk-move request leaves out the copy the thread route marks in_trash', async () => {
+    const row = { ...THREAD, id: 'tr-new', message_id: '<tr-new@example.com>', thread_id: 'thr-tr' };
+    const thread = [
+      { ...MESSAGE, id: 'tr-old', folder: 'INBOX.Trash', message_id: '<tr-old@example.com>', thread_id: 'thr-tr', in_trash: true },
+      { ...MESSAGE, id: 'tr-new', message_id: '<tr-new@example.com>', thread_id: 'thr-tr', in_trash: false },
+      { ...MESSAGE, id: 'tr-reply', folder: 'Sent', message_id: '<tr-reply@example.com>', thread_id: 'thr-tr', in_trash: false },
+    ];
+    await mount({ rows: [row], threadedView: true });
+    const sent = [];
+    const serve = globalThis.fetch;
+    ROUTES = {
+      '/mail/thread?id=thr-tr&folder=INBOX': [200, { messages: thread }],
+      // The picker's own folder list, which it keeps to itself rather than putting in the store.
+      '/accounts/acct-1/folders': [200, [{ path: 'INBOX', name: 'INBOX' }, { path: 'Archive', name: 'Archive' }]],
+    };
+    globalThis.fetch = async (url, opts = {}) => {
+      sent.push({ url: String(url), body: typeof opts.body === 'string' ? JSON.parse(opts.body) : null });
+      return serve(url, opts);
+    };
+    // Menu rows are an icon and their text: matched by their own text.
+    const ownText = text => [...container.ownerDocument.querySelectorAll('div, span')]
+      .find(el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim() === text));
+    const click = async (text) => {
+      const el = ownText(text);
+      assert.ok(el, `expected "${text}" in the menu`);
+      await React.act(async () => {
+        el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 10));
+      });
+    };
+    try {
+      await React.act(async () => { useStore.setState({ folders: {}, notifications: [] }); });
+      // The row's menu, Move to folder, and the folder.
+      await React.act(async () => {
+        draggableIn('tr-new').dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      });
+      await click('contextMenu.moveToFolder');
+      await click('Archive');
+      // The move waits out the undo window before it reaches the server.
+      await React.act(async () => { await new Promise(r => setTimeout(r, 4700)); });
+    } finally {
+      globalThis.fetch = serve;
+      ROUTES = {};
+      // The move's undo toast would otherwise be the first thing the Ctrl+Z test below undoes.
+      await React.act(async () => { useStore.setState({ notifications: [] }); });
+    }
+    const request = sent.find(r => r.url.endsWith('/mail/messages/bulk-move'));
+    assert.ok(request, 'expected a bulk-move request');
+    assert.equal(request.body.folder, 'Archive');
+    assert.deepEqual(request.body.ids.sort(), ['tr-new', 'tr-reply']);
+  });
+});
+
 describe('MessageList — modifier-click enters multi-select (#220)', () => {
   // Before this, modifiers only worked once ALREADY in selection mode; entering it took the
   // avatar or the toolbar button. A Ctrl/Cmd- or Shift-click on a row must now enter it in
