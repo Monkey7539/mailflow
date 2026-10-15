@@ -10,6 +10,8 @@ import {
   newestConversationMessage,
 } from '../utils/conversation.js';
 import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread } from '../utils/threadActions.js';
+import { conversationSnoozeTarget } from '../utils/conversationActions.js';
+import { changeSnooze } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
@@ -161,6 +163,12 @@ export default function ConversationPane({ threadId, folder, unified = false, se
     setPicker({ x: rect.left, y: rect.bottom + 4, view });
   };
 
+  // Snooze's picker is given the message Snooze acts on (conversationSnoozeTarget), not the newest one
+  // as Move's is, so the picker's title and action are that message's: Snooze, or Change snooze time.
+  const snoozeTarget = conversationSnoozeTarget(messages, selectedMessageId);
+  // A picker stays open if the reader moves to another conversation, which may have nothing to snooze.
+  const pickerMessage = picker?.view === 'snooze' ? snoozeTarget : newestConversationMessage(messages);
+
   // Every branch that returns from here fills the reading area, for the same flex reason
   // as the stack below: a bare div would collapse to the width of its own text.
   const fill = { flex: 1, minWidth: 0, height: '100%', background: 'var(--bg-primary)' };
@@ -265,22 +273,24 @@ export default function ConversationPane({ threadId, folder, unified = false, se
           >
             {t('contextMenu.moveToFolder')}
           </ThreadBtn>
-          <ThreadBtn
-            onClick={e => openPicker(e, 'snooze')}
-            title={t('contextMenu.snooze.label')}
-          >
-            {t('contextMenu.snooze.label')}
-          </ThreadBtn>
+          {snoozeTarget && (
+            <ThreadBtn
+              onClick={e => openPicker(e, 'snooze')}
+              title={t('contextMenu.snooze.label')}
+            >
+              {t('contextMenu.snooze.label')}
+            </ThreadBtn>
+          )}
           <ThreadBtn onClick={printConversation} title={t('message.printConversation')}>
             {t('message.printConversation')}
           </ThreadBtn>
         </div>
 
-        {picker && (
+        {picker && pickerMessage && (
           <ContextMenu
             x={picker.x}
             y={picker.y}
-            message={newestConversationMessage(messages)}
+            message={pickerMessage}
             variant="conversation"
             defaultMoveView={picker.view === 'move'}
             defaultSnoozeView={picker.view === 'snooze'}
@@ -288,6 +298,8 @@ export default function ConversationPane({ threadId, folder, unified = false, se
             onAction={(action, data) => {
               if (action === 'moveTo') runAction((list, opts) => moveThread(list, data, opts));
               else if (action === 'snooze') runAction((list, opts) => snoozeThread(list, data, opts));
+              // Not runAction: nothing leaves the list, the snoozed message only comes back at another time.
+              else if (action === 'changeSnooze') changeSnooze(snoozeTarget, data, { t });
               setPicker(null);
             }}
           />

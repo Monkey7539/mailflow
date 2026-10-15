@@ -64,14 +64,14 @@ const ContextMenu = (await import('./ContextMenu.jsx')).default;
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', enabled: true };
 let root;
-async function openMenu(message) {
+async function openMenu(message, props = {}) {
   if (root) await React.act(async () => root.unmount());
   useStore.setState({ accounts: [ACCOUNT], categorizationEnabled: true, folders: {} });
   const calls = [];
   await React.act(async () => {
     root = createRoot(dom.window.document.getElementById('root'));
     root.render(React.createElement(ContextMenu, {
-      x: 10, y: 10, message, onClose: () => {}, onAction: (...args) => calls.push(args),
+      x: 10, y: 10, message, onClose: () => {}, onAction: (...args) => calls.push(args), ...props,
     }));
   });
   return calls;
@@ -82,6 +82,14 @@ async function click(text) {
   assert.ok(el, `expected "${text}" in the menu`);
   await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 }
+// Picker rows are an icon and their text: matched by their own text, not their whole content.
+const ownText = text => [...dom.window.document.querySelectorAll('div, span')].find(el =>
+  [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim() === text));
+const clickOwn = async (text) => {
+  const el = ownText(text);
+  assert.ok(el, `expected "${text}" in the menu`);
+  await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+};
 
 describe('ContextMenu — Always for this sender / domain (#490)', () => {
   const MESSAGE = { id: 'm1', account_id: 'acct-1', folder: 'INBOX', from_email: 'Orders@Shop.example', category: null, is_read: true };
@@ -120,14 +128,6 @@ describe('ContextMenu — Forward as attachment (#466)', () => {
 });
 
 describe('ContextMenu — a snoozed message (#269)', () => {
-  // Picker rows are an icon and their text: matched by their own text, not their whole content.
-  const ownText = text => [...dom.window.document.querySelectorAll('div, span')].find(el =>
-    [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim() === text));
-  const clickOwn = async (text) => {
-    const el = ownText(text);
-    assert.ok(el, `expected "${text}" in the menu`);
-    await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-  };
   const SNOOZED = { id: 'm9', account_id: 'acct-1', folder: 'Snoozed', from_email: 'a@b.example', is_read: true, snooze_until: '2030-01-01T09:00:00Z' };
 
   test('offers to change when it comes back, or to bring it back now, not to snooze it again', async () => {
@@ -153,5 +153,29 @@ describe('ContextMenu — a snoozed message (#269)', () => {
     await click('contextMenu.snooze.label');
     await clickOwn('contextMenu.snooze.threeHours');
     assert.equal(calls[0][0], 'snooze');
+  });
+});
+
+// Opened straight into the snooze picker: by a list row's hover Snooze (#440), and by the
+// conversation pane, which handles only what its pickers choose and so has no menu behind them.
+describe('ContextMenu — the snooze picker on its own', () => {
+  const MESSAGE = { id: 'm1', account_id: 'acct-1', folder: 'INBOX', from_email: 'a@b.example', is_read: true };
+
+  test('from the list, its back row goes back to the menu', async () => {
+    await openMenu(MESSAGE, { defaultSnoozeView: true });
+    await clickOwn('contextMenu.snooze.label');
+    assert.ok(byText('contextMenu.reply'), 'the whole menu, whose actions the list handles');
+  });
+
+  test('in the conversation pane, its back row closes it; Custom still goes back to the presets', async () => {
+    let closed = 0;
+    await openMenu(MESSAGE, { defaultSnoozeView: true, variant: 'conversation', onClose: () => { closed++; } });
+    await clickOwn('contextMenu.snooze.custom');
+    await clickOwn('contextMenu.snooze.label');
+    assert.ok(ownText('contextMenu.snooze.threeHours'), 'back from a custom time to the presets');
+    assert.equal(closed, 0);
+    await clickOwn('contextMenu.snooze.label');
+    assert.equal(closed, 1, 'the picker closes');
+    assert.ok(!byText('contextMenu.reply'), 'rather than opening a menu whose actions mostly do nothing there');
   });
 });

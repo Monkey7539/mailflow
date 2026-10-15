@@ -14,6 +14,7 @@ test('GTD sidebar keeps message actions but drops list-only and archive actions'
     spam: false,
     copy: true,
     viewHeaders: true,
+    menu: true,
   });
 });
 
@@ -29,6 +30,7 @@ test('inbox retains its existing action capabilities', () => {
     spam: true,
     copy: true,
     viewHeaders: true,
+    menu: true,
   });
 });
 
@@ -67,9 +69,11 @@ test('inbox actions keep their current row without resolving', async () => {
   assert.equal(result, message);
 });
 
-test('the conversation pane drops only row selection, since it has no list row', () => {
+test('the conversation pane drops row selection, and the menu behind its pickers', () => {
   // Everything else must survive: the pane's pickers are this menu's, so disabling
-  // snooze or move here would silently empty the conversation toolbar.
+  // snooze or move here would silently empty the conversation toolbar. It has no list
+  // row to select, and it handles only what its pickers choose, so a picker's back row
+  // must not open the menu, most of whose actions would do nothing there.
   assert.deepEqual(getContextMenuPolicy('conversation'), {
     select: false,
     compose: true,
@@ -81,5 +85,6 @@ test('the conversation pane drops only row selection, since it has no list row',
     spam: true,
     copy: true,
     viewHeaders: true,
+    menu: false,
   });
 });

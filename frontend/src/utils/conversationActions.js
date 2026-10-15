@@ -1,6 +1,7 @@
 import { normalizeConversation } from './conversation.js';
 import { useStore } from '../store/index.js';
 import { folderRole } from './folderDisplay.js';
+import { isSnoozed } from './snoozeActions.js';
 
 export const conversationActionIds = messages => normalizeConversation(messages)
   .map(message => message.id)
@@ -68,3 +69,14 @@ export const conversationSpamTargets = (messages, accounts = []) => normalizeCon
 export const newestSnoozeTarget = messages => normalizeConversation(messages)
   .filter(message => message.folder === 'INBOX')
   .at(-1) || null;
+
+// What the conversation pane's Snooze acts on: the newest inbox message, which snoozeThread snoozes,
+// since the conversation is in the inbox because of it. With none in the inbox, a snoozed message,
+// whose time the picker changes instead: the selected one if it is snoozed, else the newest. With
+// neither there is nothing to snooze here.
+export function conversationSnoozeTarget(messages, selectedId = null) {
+  const inbox = newestSnoozeTarget(messages);
+  if (inbox) return inbox;
+  const snoozed = normalizeConversation(messages).filter(isSnoozed);
+  return snoozed.find(message => message.id === selectedId) || snoozed.at(-1) || null;
+}

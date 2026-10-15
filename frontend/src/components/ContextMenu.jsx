@@ -588,7 +588,7 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
             /* Snooze preset picker */
             <>
               <div
-                onClick={() => setSnoozeView(false)}
+                onClick={() => (menuPolicy.menu ? setSnoozeView(false) : onClose())}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: '8px 14px', cursor: 'pointer',
