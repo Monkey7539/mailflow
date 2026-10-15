@@ -1,0 +1,128 @@
+name: Android OIDC login check (temporary)
+
+# Scratch check for the review of maathimself/mailflow#620, not for upstream. There is no JDK or
+# Android SDK on the reviewing machine, so the PR's unit tests are compiled and run here, a few
+# mutations show what they pin, and an emulator drives the real sign-in flow against a fake server.
+on:
+  push:
+    branches: ["ci/android-oidc-check"]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36'
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Sync the Android project
+        working-directory: frontend
+        run: npm run android:sync
+
+      - name: Unit tests on the PR head
+        working-directory: frontend/packages/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Test results
+        if: always()
+        working-directory: frontend/packages/android
+        run: |
+          for f in app/build/test-results/testDebugUnitTest/*.xml; do echo "== $f"; cat "$f"; done
+
+      - name: Mutations
+        working-directory: frontend/packages/android
+        run: bash ../../../.github/ci-scratch/oidc-mutate.sh
+
+      - name: Compile the debug app
+        working-directory: frontend/packages/android
+        run: |
+          git status --short
+          ./gradlew --no-daemon :app:assembleDebug
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [29, 34]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36'
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Sync the Android project
+        working-directory: frontend
+        run: npm run android:sync
+
+      - name: Build the app and the instrumented test
+        working-directory: frontend/packages/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Sign-in flow on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          working-directory: frontend/packages/android
+          script: bash ../../../.github/ci-scratch/oidc-e2e.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-api-${{ matrix.api-level }}
+          path: e2e-out
+          if-no-files-found: warn
