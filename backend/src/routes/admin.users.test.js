@@ -143,13 +143,13 @@ function users({ recoveryEmail = 'maria@example.com' } = {}) {
 }
 
 describe('what an admin password reset takes away', () => {
-  it('revokes trusted devices, pending reset links and email login codes with the password change', async () => {
+  it('revokes trusted devices, API tokens, pending reset links and email login codes with the password change', async () => {
     users();
     const res = reply();
     await setUserPassword(request({ id: USER }, { password: 'nova-senha-123' }), res);
     const run = sqls();
     const at = s => run.findIndex(x => x.startsWith(s));
-    for (const table of ['trusted_devices', 'password_reset_tokens', 'email_otp_tokens']) {
+    for (const table of ['trusted_devices', 'api_tokens', 'password_reset_tokens', 'email_otp_tokens']) {
       const i = at(`DELETE FROM ${table} WHERE user_id = $1`);
       expect(i, table).toBeGreaterThan(at('UPDATE users SET password_hash'));
       expect(query.mock.calls[i][1]).toEqual([USER]);

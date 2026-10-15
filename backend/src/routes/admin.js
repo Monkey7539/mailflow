@@ -8,6 +8,7 @@ import { decrypt, encrypt } from '../services/encryption.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
 import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
+import { invalidateApiTokenSettingsCache } from '../services/apiTokens.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
 import { imapManager } from '../index.js';
 import { stopCardavUser } from '../services/carddavSync.js';
@@ -171,8 +172,9 @@ router.patch('/users/:id', updateUser);
 
 // Sets a user's password, for someone who has lost theirs and has no recovery email. It takes
 // away what a self-service reset does, and more: every session (an admin setting their own keeps
-// the session they are using), trusted devices, which skip the second factor, and any reset link
-// or login code already sent, which would otherwise still set a different password or sign in.
+// the session they are using), trusted devices, which skip the second factor, API tokens, and any
+// reset link or login code already sent, which would otherwise still set a different password or
+// sign in.
 export async function setUserPassword(req, res) {
   const { id } = req.params;
   const { password } = req.body ?? {};
@@ -190,6 +192,7 @@ export async function setUserPassword(req, res) {
   await withTransaction(async client => {
     await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, id]);
     await client.query('DELETE FROM trusted_devices WHERE user_id = $1', [id]);
+    await client.query('DELETE FROM api_tokens WHERE user_id = $1', [id]);
     await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [id]);
     await client.query('DELETE FROM email_otp_tokens WHERE user_id = $1', [id]);
   });
@@ -251,7 +254,7 @@ router.get('/auth-events', async (req, res) => {
 router.patch('/settings', async (req, res) => {
   const { registration_open, internal_auth_disabled, auth_max_attempts, auth_window_minutes,
     allow_private_hosts, allow_insecure_tls, allow_nonstandard_ports,
-    mfa_enforcement, mfa_device_trust, custom_css, backup_include_mail } = req.body;
+    mfa_enforcement, mfa_device_trust, custom_css, backup_include_mail, api_tokens_enabled } = req.body;
   if (typeof registration_open === 'boolean') {
     await query(
       `INSERT INTO system_settings (key, value, updated_at)
@@ -259,6 +262,17 @@ router.patch('/settings', async (req, res) => {
        ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
       [registration_open ? 'true' : 'false']
     );
+  }
+  // Turning API tokens off refuses every token at once, and keeps them for when they come back on.
+  if (typeof api_tokens_enabled === 'boolean') {
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at) VALUES ('api_tokens_enabled', $1, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+      [api_tokens_enabled ? 'true' : 'false']
+    );
+    // Here as well as below: a later setting that is refused returns before the end.
+    invalidateApiTokenSettingsCache();
+    console.log(`[admin] ${req.session.username} turned API tokens ${api_tokens_enabled ? 'on' : 'off'}`);
   }
   if (typeof internal_auth_disabled === 'boolean') {
     if (internal_auth_disabled) {
@@ -364,6 +378,7 @@ router.patch('/settings', async (req, res) => {
     console.log(`[admin] ${req.session.username} updated custom_css (${sanitized.length} chars)`);
   }
   invalidateConnectionPolicyCache();
+  invalidateApiTokenSettingsCache();
   res.json({ ok: true });
 });
 
