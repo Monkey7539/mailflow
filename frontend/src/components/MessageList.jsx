@@ -49,7 +49,7 @@ import {
   unreadCountsByAccount,
 } from '../utils/threadedArchive.js';
 import { createUndoableCommit, UNDO_COMMIT_DELAY_MS, UNDO_WINDOW_MS } from '../utils/undoableAction.js';
-import { resolveConversationSelection } from '../utils/conversation.js';
+import { resolveConversationSelection, selectListedMessage } from '../utils/conversation.js';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -123,7 +123,7 @@ export default function MessageList() {
     appendMessages, messagesTotal, setMessagesTotal,
     setMessagesOffset, hasMoreMessages, setHasMoreMessages,
     loadingMessages, setLoadingMessages, selectedMessageId, lastViewedMessageId,
-    setSelectedMessage, updateMessage, removeMessage, removeMessages,
+    updateMessage, removeMessage, removeMessages,
     decrementUnread, incrementUnread, addNotification, notifications, removeNotification,
     searchQuery, setSearchQuery, setIsSearching,
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
@@ -1983,29 +1983,29 @@ export default function MessageList() {
     };
 
     const onNext = () => {
-      const { messages, searchResults, searchQuery, selectedMessageId, setSelectedMessage } = getState();
+      const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
       const idx = pool.findIndex(m => m.id === selectedMessageId);
       const next = pool[idx + 1] ?? pool[0];
-      setSelectedMessage(next.id);
+      selectListedMessage(useStore, next.id);
       markRead(next);
     };
 
     const onPrev = () => {
-      const { messages, searchResults, searchQuery, selectedMessageId, setSelectedMessage } = getState();
+      const { messages, searchResults, searchQuery, selectedMessageId } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       if (!pool.length) return;
       const idx = pool.findIndex(m => m.id === selectedMessageId);
       const prev = idx <= 0 ? pool[pool.length - 1] : pool[idx - 1];
-      setSelectedMessage(prev.id);
+      selectListedMessage(useStore, prev.id);
       markRead(prev);
     };
 
     const onOpen = () => {
-      const { messages, selectedMessageId, setSelectedMessage } = getState();
+      const { messages, selectedMessageId } = getState();
       if (selectedMessageId || !messages.length) return;
-      setSelectedMessage(messages[0].id);
+      selectListedMessage(useStore, messages[0].id);
     };
 
     const onSelect = () => {
@@ -2539,12 +2539,6 @@ export default function MessageList() {
   };
 
   const handleSelect = async (message) => {
-    // A notification, link or GTD open parks its message under __dl_<id>, and the entry outlives
-    // that open. Picked from the list, the message is a row of this view or sits under one, so a
-    // leftover entry must not keep it parked: ReadingPane would scope the conversation's actions
-    // to the message's own account rather than the row's.
-    const parkedKey = `__dl_${message.id}`;
-    if (useStore.getState().threadMessages[parkedKey]) clearThreadMessages(parkedKey);
     if (isDraftsFolder) {
       try {
         const [bodyData, bcc] = await Promise.all([
@@ -2562,7 +2556,7 @@ export default function MessageList() {
         // cannot be read the draft opens read-only instead.
         if (!Array.isArray(bcc)) {
           addNotification({ type: 'error', title: t('messageList.draftBcc.failTitle'), body: t('messageList.draftBcc.failBody') });
-          setSelectedMessage(message.id);
+          selectListedMessage(useStore, message.id);
           return;
         }
         // A saved draft is one document: body, signature, then any quoted text. Handing all of
@@ -2591,13 +2585,13 @@ export default function MessageList() {
         });
       } catch (err) {
         console.error('Failed to open draft:', err.message);
-        setSelectedMessage(message.id);
+        selectListedMessage(useStore, message.id);
       }
       return;
     }
     recentMessageOpenUntilRef.current = Date.now() + 1500;
     api.getMessageBody(message.id).catch(() => {});
-    setSelectedMessage(message.id);
+    selectListedMessage(useStore, message.id);
     listRef.current?.focus({ preventScroll: true });
     markMessageReadOnOpen(message);
   };
@@ -2607,7 +2601,7 @@ export default function MessageList() {
   // there the advance only moves the highlight, as it always has.
   const rowOpenerRef = useRef(null);
   rowOpenerRef.current = (row) => {
-    if (isDraftsFolder) { setSelectedMessage(row.id); return; }
+    if (isDraftsFolder) { selectListedMessage(useStore, row.id); return; }
     handleSelect(row);
   };
   useEffect(() => registerRowOpener(row => rowOpenerRef.current?.(row)), []);
@@ -4759,7 +4753,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {message.subject || t('common.noSubject')}
             </span>
-            <ReplyDraftIndicator message={message} />
+            <ReplyDraftIndicator message={message} listRow />
             <SpamBadge message={message} onClick={onExplainSpam} />
           </div>
           {/* Row 3: snippet */}
@@ -5088,7 +5082,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {message.subject || t('message.noSubject')}
           </span>
-          <ReplyDraftIndicator message={message} />
+          <ReplyDraftIndicator message={message} listRow />
           <SpamBadge message={message} onClick={onExplainSpam} />
         </div>
 

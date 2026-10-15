@@ -93,6 +93,17 @@ export function resolveConversationSelection({ selectedMessageId, pool = [], thr
   };
 }
 
+// A pick from the list, of a row or of a message under one, through the store given. A notification,
+// a link or the GTD sidebar parks the message it opens under __dl_<id>, and the entry outlives that
+// open: left in place, it would count this pick as parked (above) whenever the message is not a row
+// on screen, and the reading pane would act for the message's own account rather than the row's.
+export function selectListedMessage(store, id) {
+  const { threadMessages, clearThreadMessages, setSelectedMessage } = store.getState();
+  const parkedKey = `__dl_${id}`;
+  if (threadMessages[parkedKey]) clearThreadMessages(parkedKey);
+  setSelectedMessage(id);
+}
+
 export const shouldFallbackToSingleMessagePane = ({ loading, error, messages = [] }) =>
   !loading && !error && messages.length <= 1;
 

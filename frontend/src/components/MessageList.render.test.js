@@ -85,6 +85,7 @@ const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { shortcutBus } = await import('../utils/shortcutBus.js');
 const { resolveConversationSelection } = await import('../utils/conversation.js');
+const { openAdjacentRow } = await import('../utils/listSelection.js');
 const MessageList = (await import('./MessageList.jsx')).default;
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
@@ -614,6 +615,82 @@ describe('MessageList — a conversation another account also received (#476)', 
     assert.equal(selectedMessageId, copy.id, 'the copy is selected');
     const { parked } = resolveConversationSelection({ selectedMessageId, pool: messages, threadMessages });
     assert.equal(parked, false, 'it stands for the row it was picked under');
+  });
+
+  // Every other pick of a row ends a leftover park the same way. While the row is listed the entry
+  // does nothing, but once a refresh drops the row (another account's message an undo put in this
+  // list), the entry alone would still count the open message as parked.
+  const park = message => React.act(async () => { useStore.getState().setThreadMessages(`__dl_${message.id}`, [message]); });
+  const stillParked = id => {
+    const { selectedMessageId, threadMessages } = useStore.getState();
+    assert.equal(selectedMessageId, id, `${id} is picked`);
+    return resolveConversationSelection({ selectedMessageId, pool: [], threadMessages }).parked;
+  };
+
+  test('opening a row\'s reply draft picks the row as a click does', async (t) => {
+    // The server here has no draft to open, which the reader is told; later tests expect no notices.
+    t.after(() => React.act(async () => { useStore.setState({ notifications: [], replyDrafts: {} }); }));
+    for (const [row, threadedView] of [[{ ...MESSAGE, id: 'b-row', account_id: 'acct-2' }, false], [conversation(14), true]]) {
+      await start([row], { threadedView });
+      await React.act(async () => { useStore.setState({ replyDrafts: { [row.id]: { exists: true } } }); });
+      await park(row);
+      const draftButton = container.querySelector(`[data-msgid="${row.id}"] [aria-label="Open reply draft"]`);
+      await React.act(async () => { draftButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle();
+      assert.equal(stillParked(row.id), false, threadedView ? 'from a conversation row' : 'from a message row');
+    }
+  });
+
+  test('j, k and o pick a row as a click does', async () => {
+    const rows = [{ ...MESSAGE, id: 'b-j1', account_id: 'acct-2' }, { ...MESSAGE, id: 'b-j2', account_id: 'acct-2', uid: 2, message_id: '<j2@example.com>' }];
+    await start(rows, { threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(null); });
+    for (const [key, id] of [['openMessage', 'b-j1'], ['nextMessage', 'b-j2'], ['prevMessage', 'b-j1']]) {
+      await park(rows.find(r => r.id === id));
+      await React.act(async () => { shortcutBus.emit(key); });
+      assert.equal(stillParked(id), false, key);
+    }
+  });
+
+  test('in Drafts the move to the next row picks it from the list too', async () => {
+    // In Drafts a click opens the composer, so the list's row opener, behind the advance after a
+    // removal and a swipe, only selects the row.
+    const drafts = [{ ...MESSAGE, id: 'd-1', folder: 'Drafts' }, { ...MESSAGE, id: 'd-2', uid: 2, folder: 'Drafts', message_id: '<d2@example.com>' }];
+    await start(drafts, { threadedView: false, folder: 'Drafts' });
+    await React.act(async () => { useStore.getState().setSelectedMessage('d-1'); });
+    await park(drafts[1]);
+    await React.act(async () => { openAdjacentRow('next'); });
+    assert.equal(stillParked('d-2'), false);
+  });
+
+  test('in Drafts a draft that cannot open in the composer is picked from the list too', async (t) => {
+    // A click opens the composer. When the draft's Bcc cannot be read, or its body cannot be fetched
+    // at all, the draft is selected instead, and that is a pick from the list as much as the click.
+    t.mock.method(console, 'error', () => {});
+    const draft = { ...MESSAGE, id: 'd-9', folder: 'Drafts' };
+    const failures = {
+      'its Bcc cannot be read': { '/mail/messages/d-9/bcc': [502, { error: 'Bcc unreadable' }] },
+      'its body cannot be fetched': {
+        '/mail/messages/d-9/body?remoteImages=1': [500, { error: 'Body unavailable' }],
+        '/mail/messages/d-9/bcc': [200, { bcc: [] }],
+      },
+    };
+    t.after(() => React.act(async () => {
+      for (const routes of Object.values(failures)) for (const path of Object.keys(routes)) delete ROUTES[path];
+      useStore.setState({ notifications: [], selectedMessageId: null });
+    }));
+    for (const [when, routes] of Object.entries(failures)) {
+      Object.assign(ROUTES, routes);
+      await start([draft], { threadedView: false, folder: 'Drafts' });
+      await park(draft);
+      const row = container.querySelector('[data-msgid="d-9"]');
+      await React.act(async () => {
+        (row.querySelector('[draggable]') || row).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+      });
+      await settle();
+      assert.equal(stillParked('d-9'), false, when);
+      for (const path of Object.keys(routes)) delete ROUTES[path];
+    }
   });
 
   // A notification tap parks the copy it opens, and the reading pane acts for that copy's account

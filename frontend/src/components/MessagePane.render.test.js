@@ -1035,3 +1035,33 @@ describe('loading the neighbors ahead', () => {
     assert.equal(asked.slice(before).filter(id => id === 'n3').length, 0);
   });
 });
+
+// On a phone the pane's own arrows move to the next or previous row of the list, bypassing the
+// list's click. A notification parks the message it opens under __dl_<id>, and the entry outlives
+// that open; the arrows' pick ends it as the list's does (selectListedMessage).
+describe('the arrows on a phone', () => {
+  test('pick the next row as the list picks one', async () => {
+    // A root of its own: useMobile reads innerWidth once, so the shared one stays a desktop pane.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    dom.window.innerWidth = 375;
+    const phone = createRoot(container);
+    try {
+      await React.act(async () => {
+        useStore.getState().setMessages([MSG_A, MSG_B]);
+        useStore.getState().setThreadMessages('__dl_b2', [MSG_B]);
+        useStore.getState().setSelectedMessage('a1');
+        phone.render(React.createElement(MessagePane));
+      });
+      const next = container.querySelector('button[title="message.nextMessage"]');
+      assert.ok(next, 'the pane offers the next message');
+      await React.act(async () => { next.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      assert.equal(useStore.getState().selectedMessageId, 'b2');
+      assert.equal(useStore.getState().threadMessages.__dl_b2, undefined);
+    } finally {
+      await React.act(async () => phone.unmount());
+      container.remove();
+      dom.window.innerWidth = 1024;
+    }
+  });
+});

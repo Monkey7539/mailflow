@@ -807,6 +807,21 @@ describe('a conversation another account also received', () => {
     assert.deepEqual(sentIds(/bulk-delete/), ['b3']);
   });
 
+  test('the reply draft button over a message opened from a notification leaves it parked', async () => {
+    // ReadingPane shows the button on the message it has open, here acct's own message, which the
+    // inbox's reply draft lookup covers. Picking that message again is not a pick from the list:
+    // unparked, a message that no row holds would leave the pane.
+    const M1 = { ...THREAD[0], thread_id: '<1@x>' };
+    await open({ selected: M1, threadMessages: { '__dl_m1': [M1] }, rows: [] });
+    await React.act(async () => { useStore.setState({ replyDrafts: { m1: { exists: true } } }); });
+    const draftButton = button('messageList.openReplyDraft');
+    assert.ok(draftButton, 'the reading pane offers the reply draft');
+    await click(draftButton);
+    assert.ok(useStore.getState().threadMessages.__dl_m1, 'the message stays parked');
+    assert.deepEqual(cardIds(), ['b3', 'm1', 'm2', 'm3'], 'and its conversation stays on screen');
+    await React.act(async () => { useStore.setState({ replyDrafts: {} }); });
+  });
+
   test('a row of the other account in this account\'s list acts for its own account', async () => {
     // Undoing an action on a message opened from a notification, here acct-b's copy, adds it to
     // the list: restoreMessages adds every message the action took that the list lacks. Picked
