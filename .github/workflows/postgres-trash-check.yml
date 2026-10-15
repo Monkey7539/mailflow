@@ -1,0 +1,111 @@
+name: PostgreSQL Trash-copy check (temporary)
+
+# Scratch check for fix/conversation-trash-copies: there is no PostgreSQL on the machine the fix
+# was written on, so the thread route's new SQL is run here against a real database.
+on:
+  push:
+    branches: ["ci/postgres-trash-check", "ci/postgres-trash-check-dev"]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailflow
+          POSTGRES_PASSWORD: mailflow
+          POSTGRES_DB: mailflow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mailflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      MAILFLOW_TEST_DATABASE_URL: postgres://mailflow:mailflow@localhost:5432/mailflow_test
+      TRASH_TEST: src/routes/mail.threadTrash.postgres.test.js
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Every PostgreSQL test, with the fix
+        working-directory: backend
+        run: npx vitest run postgres --reporter=verbose
+
+      # A mutation only counts when the test fails on the marks. A broken statement would make the
+      # thread route answer 500, which fails the status check instead.
+      - name: Each mutation of the Trash mark fails the PostgreSQL test on the marks
+        working-directory: backend
+        run: |
+          status=0
+          for script in ../.github/ci-scratch/mutate-*.mjs; do
+            echo "::group::$script"
+            node "$script"
+            git diff --stat
+            if npx vitest run "$TRASH_TEST" --reporter=verbose > out.txt 2>&1; then
+              cat out.txt
+              echo "::error::$script: the test passed with the mutation"
+              status=1
+            elif grep -q "expected 500 to be 200" out.txt; then
+              cat out.txt
+              echo "::error::$script: the route failed (500) rather than marking wrongly"
+              status=1
+            else
+              cat out.txt
+            fi
+            rm -f out.txt
+            git checkout -- src
+            echo "::endgroup::"
+          done
+          exit $status
+
+      # Failing-first for the new PostgreSQL test: it must fail on the backend before the fix.
+      # upstream-sources.mjs exits 3 without changing anything off the fix branch (on dev, say).
+      - name: The new test fails with c579402a's thread route and mailUtils.js
+        working-directory: backend
+        run: |
+          set +e
+          node ../.github/ci-scratch/upstream-sources.mjs
+          applied=$?
+          set -e
+          if [ "$applied" = 3 ]; then
+            echo "::notice::not the fix branch, so the failing-first check was skipped"
+            exit 0
+          fi
+          [ "$applied" = 0 ] || exit 1
+          git diff --stat
+          if npx vitest run "$TRASH_TEST" --reporter=verbose > out.txt 2>&1; then
+            cat out.txt
+            echo "::error::the test passed with c579402a's mail.js and mailUtils.js"
+            exit 1
+          fi
+          cat out.txt
+          if grep -q "expected 500 to be 200" out.txt; then
+            echo "::error::the route failed (500) rather than leaving the marks out"
+            exit 1
+          fi
+          rm -f out.txt
+          git checkout -- src
+
+      - name: The whole backend suite with the database
+        working-directory: backend
+        run: npx vitest run
