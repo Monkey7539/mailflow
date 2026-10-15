@@ -13,6 +13,9 @@ export function getContextMenuPolicy(variant = 'inbox') {
     spam: !gtdSidebar,
     copy: true,
     viewHeaders: true,
+    // A picker's back row returns to the menu. The conversation pane opens only its pickers and
+    // handles only their choice, so there most of the menu's actions would do nothing.
+    menu: !conversation,
   };
 }
 

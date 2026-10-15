@@ -631,3 +631,127 @@ describe('conversation actions act on what the list is showing', () => {
     assert.ok(!pickerOpen(), 'the picker opened on the previous conversation is gone');
   });
 });
+
+// Snooze in the conversation pane acts on the newest inbox message, as before, or with none in the
+// inbox on a snoozed message, whose time it changes; with neither it is not offered. A snoozed
+// message, or a conversation with nothing to snooze, used to get a picker that did nothing, or that
+// moved the reader on to the next conversation as if it had snoozed this one.
+describe('conversation snooze', () => {
+  const message = (id, folder, day) => ({
+    id, account_id: 'acct', folder, message_id: `<${id}@x>`, subject: 'Plans',
+    from_email: folder === 'Sent' ? 'me@x.z' : 'a@x.z', date: `2026-02-0${day}T10:00:00Z`, is_read: true,
+  });
+  const THREADS = {
+    // The reader wrote, and snoozed the answer.
+    '<answer-snoozed@x>': [message('as1', 'Sent', 1), message('as2', 'Snoozed', 2)],
+    // The reader replied, then snoozed what they replied to: their reply is the newest message.
+    '<replied-then-snoozed@x>': [message('rs1', 'Snoozed', 1), message('rs2', 'Sent', 2)],
+    // Two messages snoozed apart, each with its own time, and the reader's reply.
+    '<two-snoozed@x>': [message('s1', 'Snoozed', 1), message('s2', 'Snoozed', 2), message('s3', 'Sent', 3)],
+    // Filed and sent: nothing in the inbox, nothing snoozed.
+    '<filed@x>': [message('f1', 'Archive', 1), message('f2', 'Sent', 2)],
+  };
+  const requests = [];
+  let realFetch;
+  before(() => {
+    realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts = {}) => {
+      const u = String(url);
+      requests.push({ url: u, method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null });
+      const thread = u.includes('/mail/thread?') && THREADS[new URL(u, 'https://mail.example.invalid').searchParams.get('id')];
+      if (thread) return { ok: true, status: 200, json: async () => ({ messages: thread }) };
+      return realFetch(url, opts);
+    };
+  });
+  after(() => { globalThis.fetch = realFetch; });
+  beforeEach(() => { requests.length = 0; });
+
+  const open = async (threadId, folder, { key = threadId, ...props } = {}) => {
+    await React.act(async () => {
+      root.render(React.createElement(ConversationPane, { key: `snooze-${key}`, threadId, folder, ...props }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+  };
+  const button = title => [...document.querySelectorAll('button')].find(b => b.getAttribute('title') === title);
+  const snoozeButton = () => button('contextMenu.snooze.label');
+  // Picker rows are an icon and their text: matched by their own text.
+  const pickerRow = text => [...document.querySelectorAll('div')]
+    .find(el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim() === text));
+  const click = async el => {
+    await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  };
+  const clickSnooze = async () => {
+    assert.ok(snoozeButton(), 'Snooze is offered');
+    await click(snoozeButton());
+  };
+  const snoozeRequests = method => requests.filter(r => r.method === method && /\/snooze$/.test(r.url));
+
+  test('the newest message snoozed: a preset changes when it comes back', async () => {
+    await open('<answer-snoozed@x>', 'Sent');
+    await clickSnooze();
+    await click(pickerRow('contextMenu.snooze.threeHours'));
+    const [change] = snoozeRequests('PATCH');
+    assert.ok(change, 'the new time went to the server');
+    assert.match(change.url, /\/messages\/as2\/snooze$/);
+    assert.ok(new Date(change.body.until) > new Date(), 'a time in the future');
+  });
+
+  test('a snoozed message under a newer sent reply: the picker changes its time, and the reader stays', async (t) => {
+    const { useStore } = await import('../store/index.js');
+    // Opened from Sent, with another conversation listed after it.
+    useStore.setState({ afterRemove: 'next', searchQuery: '' });
+    useStore.getState().setMessages([
+      { id: 'rs2', thread_id: '<replied-then-snoozed@x>', account_id: 'acct', folder: 'Sent', is_read: true },
+      { id: 'next-row', thread_id: '<other@x>', account_id: 'acct', folder: 'Sent', is_read: true },
+    ]);
+    useStore.getState().setSelectedMessage('rs2');
+    t.after(() => { useStore.getState().setMessages([]); useStore.getState().setSelectedMessage(null); });
+    await open('<replied-then-snoozed@x>', 'Sent', { selectedMessageId: 'rs2' });
+    await clickSnooze();
+    assert.ok(pickerRow('contextMenu.snooze.change'), 'the picker says what it does');
+    await click(pickerRow('contextMenu.snooze.threeHours'));
+    const changes = snoozeRequests('PATCH');
+    assert.equal(changes.length, 1, 'the new time went to the server');
+    assert.match(changes[0].url, /\/messages\/rs1\/snooze$/, 'for the snoozed message, not the reply');
+    // Nothing leaves the list, so the next conversation does not take this one's place.
+    assert.equal(useStore.getState().selectedMessageId, 'rs2', 'the reader is still on the conversation');
+  });
+
+  test('of two snoozed messages, the time changed is that of the one the reader picked', async () => {
+    await open('<two-snoozed@x>', 'Sent', { selectedMessageId: 's1' });
+    await clickSnooze();
+    await click(pickerRow('contextMenu.snooze.threeHours'));
+    const changes = snoozeRequests('PATCH');
+    assert.equal(changes.length, 1, 'the new time went to the server');
+    assert.match(changes[0].url, /\/messages\/s1\/snooze$/, 'for the picked message, not the newer snoozed one');
+  });
+
+  test('nothing in the inbox and nothing snoozed: no Snooze is offered, and Move still is', async () => {
+    await open('<filed@x>', 'Sent');
+    assert.ok(button('message.archive'), 'the thread actions are there');
+    assert.ok(!snoozeButton(), 'but not a Snooze that could not act');
+    // Move's picker is given the newest message, not the snooze target, of which there is none.
+    await click(button('contextMenu.moveToFolder'));
+    assert.ok(pickerRow('contextMenu.folders.back'), 'Move opens its folder list');
+  });
+
+  test('an inbox conversation still snoozes its newest inbox message', async () => {
+    await open('<1@x>', 'INBOX');
+    await clickSnooze();
+    assert.ok(pickerRow('contextMenu.snooze.label'), 'a plain Snooze');
+    await click(pickerRow('contextMenu.snooze.threeHours'));
+    await React.act(async () => { await new Promise(r => setTimeout(r, 4700)); });
+    const snoozes = snoozeRequests('POST');
+    assert.equal(snoozes.length, 1, 'sent after the undo window');
+    assert.match(snoozes[0].url, /\/messages\/m3\/snooze$/);
+  });
+
+  test('the picker goes when the reader moves on to a conversation with nothing to snooze', async () => {
+    await open('<1@x>', 'INBOX', { key: 'moving-on' });
+    await clickSnooze();
+    assert.ok(pickerRow('contextMenu.snooze.threeHours'), 'the picker is open');
+    // The same pane, given the next conversation, as when the reader moves down the list.
+    await open('<filed@x>', 'Sent', { key: 'moving-on' });
+    assert.ok(!pickerRow('contextMenu.snooze.threeHours'), 'no snooze picker for a conversation with nothing to snooze');
+  });
+});

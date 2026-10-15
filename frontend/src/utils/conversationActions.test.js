@@ -22,6 +22,7 @@ const {
   conversationSpamTargets,
   groupConversationMessagesByAccount,
   newestSnoozeTarget,
+  conversationSnoozeTarget,
   keepDraftsApart,
 } = await import('./conversationActions.js');
 
@@ -87,6 +88,21 @@ describe('conversation action targets', () => {
 
     assert.equal(newestSnoozeTarget(messages)?.id, 'newer');
     assert.equal(newestSnoozeTarget([message('sent-only', { folder: 'Sent' })]), null);
+  });
+
+  it('snoozes the inbox message, else changes a snoozed one, else offers nothing', () => {
+    const inbox = message('inbox', { date: '2026-07-26T08:00:00Z' });
+    const snoozed = message('snoozed', { folder: 'Snoozed', date: '2026-07-26T09:00:00Z' });
+    const sent = message('sent', { folder: 'Sent', date: '2026-07-26T10:00:00Z' });
+    const snoozedLater = message('snoozed-later', { folder: 'Snoozed', date: '2026-07-26T11:00:00Z' });
+
+    // The conversation is in the inbox because of that message, so it is the one snoozed, even
+    // under a newer or selected snoozed message.
+    assert.equal(conversationSnoozeTarget([inbox, snoozed, sent, snoozedLater], 'snoozed')?.id, 'inbox');
+    // With none in the inbox, the selected snoozed message, else the newest.
+    assert.equal(conversationSnoozeTarget([snoozed, sent, snoozedLater], 'snoozed')?.id, 'snoozed');
+    assert.equal(conversationSnoozeTarget([snoozed, sent, snoozedLater], 'sent')?.id, 'snoozed-later');
+    assert.equal(conversationSnoozeTarget([sent, message('filed', { folder: 'Archive' })], 'sent'), null);
   });
 });
 
