@@ -650,6 +650,9 @@ describe('conversation snooze', () => {
     '<two-snoozed@x>': [message('s1', 'Snoozed', 1), message('s2', 'Snoozed', 2), message('s3', 'Sent', 3)],
     // Filed and sent: nothing in the inbox, nothing snoozed.
     '<filed@x>': [message('f1', 'Archive', 1), message('f2', 'Sent', 2)],
+    // Snoozed where the server keeps snoozed mail in INBOX.Snoozed: the thread route gives the copy
+    // the folder its own snooze record names.
+    '<prefix-snoozed@x>': [{ ...message('ps1', 'INBOX.Snoozed', 1), snoozed_folder: 'INBOX.Snoozed' }, message('ps2', 'Sent', 2)],
   };
   const requests = [];
   let realFetch;
@@ -753,5 +756,16 @@ describe('conversation snooze', () => {
     // The same pane, given the next conversation, as when the reader moves down the list.
     await open('<filed@x>', 'Sent', { key: 'moving-on' });
     assert.ok(!pickerRow('contextMenu.snooze.threeHours'), 'no snooze picker for a conversation with nothing to snooze');
+  });
+
+  // The folder is not named Snoozed, so only the record's folder tells the pane the copy is snoozed.
+  test('snoozed into INBOX.Snoozed: the picker changes when it comes back', async () => {
+    await open('<prefix-snoozed@x>', 'Sent');
+    await clickSnooze();
+    assert.ok(pickerRow('contextMenu.snooze.change'), 'the picker says what it does');
+    await click(pickerRow('contextMenu.snooze.threeHours'));
+    const changes = snoozeRequests('PATCH');
+    assert.equal(changes.length, 1, 'the new time went to the server');
+    assert.match(changes[0].url, /\/messages\/ps1\/snooze$/, 'for the snoozed copy, not the reply');
   });
 });

@@ -322,6 +322,14 @@ async function getThread(req, res, threadId) {
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
                m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+               -- A copy snoozed into a folder not named Snoozed (INBOX.Snoozed) is known by its own
+               -- snooze record naming the folder it is in, as the Snoozed view lists it
+               -- (services/messageService.js) and the client reads it (isSnoozed in
+               -- utils/snoozeActions.js). LIMIT 1, since more than one record can name it.
+               (SELECT sm.snoozed_folder FROM snoozed_messages sm
+                WHERE sm.account_id = m.account_id AND sm.message_id_header = m.message_id
+                  AND sm.snoozed_folder = m.folder
+                LIMIT 1) AS snoozed_folder,
                a.name AS account_name, a.email_address AS account_email, a.color AS account_color,
                -- Deleting or moving the conversation leaves its drafts alone, and its copies already
                -- in Trash, where a delete expunges (utils/conversationActions.js).
