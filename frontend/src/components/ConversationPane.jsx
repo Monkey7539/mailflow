@@ -18,6 +18,21 @@ import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { prefetchBody } from '../utils/bodyCache.js';
 
+// What the reader is told when an action finds nothing to take (runAction below). In the unified
+// inbox, which has no "this account" to speak of, only Spam and Snooze can: keepDraftsApart and
+// archiveTargetsForFolder never leave Archive, Delete or Move with nothing there.
+const NOTHING_TO_TAKE = {
+  archive: 'message.archived.nothingFromAccount',
+  delete: 'messageList.deleted.nothingFromAccount',
+  move: 'message.moved.nothingFromAccount',
+  spam: 'spam.nothingFromAccount',
+  snooze: 'message.snoozed.nothingFromAccount',
+};
+const NOTHING_TO_TAKE_UNIFIED = {
+  spam: 'spam.nothingInConversation',
+  snooze: 'message.snoozed.nothingInConversation',
+};
+
 function ThreadBtn({ onClick, title, children }) {
   return (
     <button
@@ -131,7 +146,16 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
     return next;
   });
 
-  const runAction = (action) => {
+  // An action can find nothing to take: no copy of accountId at all (a link to a message of an
+  // account the thread route leaves out, a disabled one), no INBOX copy to snooze, only mail the
+  // reader sent to report as spam, or the other account's draft picked under the row. Moving on as
+  // if it had worked would hide that, and so would staying put without a word: the conversation
+  // stays open and a notice says so.
+  const sayNothingTaken = (name) => addNotification({
+    title: t((!accountId && NOTHING_TO_TAKE_UNIFIED[name]) || NOTHING_TO_TAKE[name]),
+  });
+
+  const runAction = (name, action) => {
     const taken = action(messages, {
       t,
       addNotification,
@@ -161,11 +185,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         else setSelectedMessage(null);
       },
     });
-    // An action can find nothing to take: no copy of accountId at all (a link to a message of an
-    // account the thread route leaves out, a disabled one), no INBOX copy to snooze, only mail the
-    // reader sent to report as spam, or the other account's draft picked under the row. Moving on
-    // as if it had worked would be a silent failure.
-    if (!taken) console.warn(`Conversation ${threadId} holds nothing this action applies to${accountId ? ` in account ${accountId}` : ''}; nothing to act on`);
+    if (!taken) sayNothingTaken(name);
   };
 
   // A flag change on one card: the pane's copy of the thread and the list's copy both change.
@@ -196,7 +216,7 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
   const openPicker = (event, view) => {
     const pickerMessage = newestConversationMessage(inAccount(messages, accountId));
     if (!pickerMessage) {
-      console.warn(`Conversation ${threadId} holds no copy of account ${accountId}; nothing to act on`);
+      sayNothingTaken(view);
       return;
     }
     const rect = event.currentTarget.getBoundingClientRect();
@@ -292,13 +312,13 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         {/* Thread-level actions, the way Gmail does it: archiving a conversation archives
             all of it, so the reader does not file the same thread message by message. */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-          <ThreadBtn onClick={() => runAction(archiveThread)} title={t('message.archive')}>
+          <ThreadBtn onClick={() => runAction('archive', archiveThread)} title={t('message.archive')}>
             {t('message.archive')}
           </ThreadBtn>
-          <ThreadBtn onClick={() => runAction(deleteThread)} title={t('message.delete')}>
+          <ThreadBtn onClick={() => runAction('delete', deleteThread)} title={t('message.delete')}>
             {t('message.delete')}
           </ThreadBtn>
-          <ThreadBtn onClick={() => runAction(spamThread)} title={t('contextMenu.markAsSpam')}>
+          <ThreadBtn onClick={() => runAction('spam', spamThread)} title={t('contextMenu.markAsSpam')}>
             {t('contextMenu.markAsSpam')}
           </ThreadBtn>
           <ThreadBtn
@@ -328,8 +348,8 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
             defaultSnoozeView={picker.view === 'snooze'}
             onClose={() => setPicker(null)}
             onAction={(action, data) => {
-              if (action === 'moveTo') runAction((list, opts) => moveThread(list, data, opts));
-              else if (action === 'snooze') runAction((list, opts) => snoozeThread(list, data, opts));
+              if (action === 'moveTo') runAction('move', (list, opts) => moveThread(list, data, opts));
+              else if (action === 'snooze') runAction('snooze', (list, opts) => snoozeThread(list, data, opts));
               setPicker(null);
             }}
           />

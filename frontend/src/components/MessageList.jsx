@@ -2020,7 +2020,7 @@ export default function MessageList() {
     };
 
     const onArchive = () => {
-      const { messages, searchResults, searchQuery, selectedMessageId, threadMessages, selectedAccountId } = getState();
+      const { messages, searchResults, searchQuery, selectedMessageId, threadMessages, selectedAccountId, addNotification } = getState();
       const pool = searchQuery.trim() ? searchResults : messages;
       const ids = [...scRef.current.selectedIds];
       if (ids.length > 0) {
@@ -2037,7 +2037,7 @@ export default function MessageList() {
           selectedMessageId, pool: [...messages, ...searchResults], threadMessages,
         });
         if (selectedAccountId && parked && opened?.account_id !== msg.account_id) {
-          console.warn(`Message ${selectedMessageId} belongs to account ${opened?.account_id}, not to the row that holds it; nothing archived`);
+          addNotification({ title: tRef.current('message.archived.otherAccountMessage') });
           return;
         }
         // #449: through the context-action path, whose undoable wrapper delays the real

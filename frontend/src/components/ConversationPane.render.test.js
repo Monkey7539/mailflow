@@ -526,6 +526,8 @@ describe('a conversation another account also received', () => {
   const pickerOpen = () => Boolean(document.querySelector('input[placeholder="contextMenu.folders.search"]'));
   const textShown = text => [...document.querySelectorAll('span, div')].some(el => el.textContent === text);
   const menuEntry = name => [...document.querySelectorAll('span, div')].filter(el => el.textContent === name).at(-1);
+  // The titles of the notices on screen; the i18n stub renders each as its key.
+  const notices = () => useStore.getState().notifications.map(n => n.title);
 
   test('opening it marks the row account\'s copy read, not the other account\'s', async () => {
     await open();
@@ -548,12 +550,10 @@ describe('a conversation another account also received', () => {
     assert.deepEqual(sentIds(/bulk-delete/), ['m1', 'm2', 'm3']);
   });
 
-  test('Delete with the other account\'s draft picked under the row expunges no draft', async (t) => {
+  test('Delete with the other account\'s draft picked under the row expunges no draft', async () => {
     // Acting on a draft takes the conversation's drafts (keepDraftsApart), and a deleted draft is
     // expunged. acct-b's draft is no copy of acct's, so it stands for none of acct's drafts: taking
     // those in its place expunged acct's draft and left the one the reader had open.
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
     served['<50@x>'] = [
       { ...THREAD[0], id: 'a50', message_id: '<50@x>', thread_id: '<50@x>' },
       { ...THREAD[2], id: 'a51', message_id: '<51@x>', thread_id: '<50@x>' },
@@ -567,7 +567,7 @@ describe('a conversation another account also received', () => {
     await commitWindow(button('message.delete'));
     assert.deepEqual(sentIds(/bulk-delete/), [], 'nothing is deleted');
     assert.equal(useStore.getState().selectedMessageId, 'bd', 'the pane stays on the draft');
-    assert.equal(warned.length, 1, 'and says why');
+    assert.deepEqual(notices(), ['messageList.deleted.nothingFromAccount'], 'and says why');
     await open({ selected: ad, ...listed });
     await commitWindow(button('message.delete'));
     assert.deepEqual(sentIds(/bulk-delete/), ['ad'], 'acct\'s own draft picked deletes acct\'s draft alone');
@@ -642,11 +642,11 @@ describe('a conversation another account also received', () => {
     assert.ok(!archived.includes('b3'), 'and none of it is acct-b\'s');
   });
 
-  test('the next conversation opens only once an action has taken something', async (t) => {
+  test('the next conversation opens only once an action has taken something', async () => {
     // #572 opens the row after this one when the conversation leaves the list. An action that takes
-    // nothing leaves it there, so nothing opens in its place; one that takes the row account's
-    // copies opens the next row, whichever copy the reader picked.
-    t.mock.method(console, 'warn', () => {});
+    // nothing leaves it there, so nothing opens in its place, and says so; one that takes the row
+    // account's copies opens the next row, whichever copy the reader picked, and shows only its
+    // undo toast.
     await React.act(async () => { useStore.setState({ afterRemove: 'next' }); });
     const NEXT = { ...ROW, id: 'n1', message_id: '<40@x>', thread_id: '<40@x>' };
     // In acct's Sent view the row's copies are the reader's own, which Spam spares.
@@ -660,15 +660,18 @@ describe('a conversation another account also received', () => {
     await open({ selected: sentRow, rows: [sentRow, NEXT], folder: 'Sent' });
     await commitWindow(button('contextMenu.markAsSpam'));
     assert.equal(useStore.getState().selectedMessageId, sentRow.id, 'Spam with only the reader\'s own mail opens nothing');
+    assert.deepEqual(notices(), ['spam.nothingFromAccount']);
 
     await open({ selected: ORPHAN, threadMessages: { '__dl_c3': [ORPHAN] }, rows: [ROW, NEXT] });
     await commitWindow(button('message.delete'));
     assert.equal(useStore.getState().selectedMessageId, ORPHAN.id, 'nor Delete with none of the account\'s copies');
+    assert.deepEqual(notices(), ['messageList.deleted.nothingFromAccount']);
 
     await open({ selected: B3, threadMessages: EXPANDED, rows: [ROW, NEXT] });
     await commitWindow(button('message.delete'));
     assert.equal(useStore.getState().selectedMessageId, NEXT.id, 'Delete of the row account\'s copies opens the next row');
     assert.deepEqual(sentIds(/bulk-delete/), ['m1', 'm2', 'm3']);
+    assert.deepEqual(notices(), ['messageList.deleted.conversationTitle'], 'its undo toast is the only notice');
   });
 
   test('Move lists the row account\'s folders and moves only its copies', async () => {
@@ -842,10 +845,8 @@ describe('a conversation another account also received', () => {
     assert.deepEqual(sentIds(/bulk-delete/), ['b3', 'm1', 'm2', 'm3']);
   });
 
-  test('Move and Snooze open nothing when the conversation holds none of that account\'s copies', async (t) => {
+  test('Move and Snooze open nothing when the conversation holds none of that account\'s copies', async () => {
     // Moving or snoozing the copies on screen would act on other accounts' mail.
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
     await open({ selected: ORPHAN, threadMessages: { '__dl_c3': [ORPHAN] } });
     await click(button('contextMenu.moveToFolder'));
     assert.ok(!requests.some(r => /\/accounts\/[^/]+\/folders/.test(r.url)), 'no account\'s folders are listed');
@@ -853,28 +854,29 @@ describe('a conversation another account also received', () => {
     await click(button('contextMenu.snooze.label'));
     assert.equal(textShown('contextMenu.snooze.threeHours'), false, 'no snooze picker opens');
     assert.ok(button('message.delete'), 'the pane is still there');
-    assert.equal(warned.length, 2, 'each refusal is logged');
+    assert.deepEqual(notices(), ['message.snoozed.nothingFromAccount', 'message.moved.nothingFromAccount'], 'each says why, newest first');
   });
 
-  test('Archive, Delete and Spam leave the pane open and say why when it holds none of that account\'s copies', async (t) => {
+  test('Archive, Delete and Spam leave the pane open and say why when it holds none of that account\'s copies', async () => {
     // Nothing on screen is that account's, so there is nothing to act on. Clearing the pane as
-    // if the action had worked would hide that.
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
-    for (const title of ['message.archive', 'message.delete', 'contextMenu.markAsSpam']) {
+    // if the action had worked would hide that, and so would a refusal the reader cannot see.
+    for (const [title, notice] of [
+      ['message.archive', 'message.archived.nothingFromAccount'],
+      ['message.delete', 'messageList.deleted.nothingFromAccount'],
+      ['contextMenu.markAsSpam', 'spam.nothingFromAccount'],
+    ]) {
       await open({ selected: ORPHAN, threadMessages: { '__dl_c3': [ORPHAN] } });
       await commitWindow(button(title));
       assert.equal(useStore.getState().selectedMessageId, 'c3', `${title} does not close the pane as if it had worked`);
       assert.ok(button(title), `${title} leaves the conversation on screen`);
       assert.ok(!requests.some(r => /bulk-archive|bulk-delete|\/messages\/[^/]+\/spam/.test(r.url)), `${title} sends nothing`);
+      assert.deepEqual(notices(), [notice], `${title} says why`);
     }
-    assert.equal(warned.length, 3, 'each refusal is logged');
-    assert.match(warned[0], /acct-c/);
   });
 
   // The account has copies on screen, but none the action takes. Unscoped, the action took
   // acct-b's copy instead; scoped, it takes nothing, which must not look like success either.
-  test('Snooze with none of the account\'s copies in its inbox leaves the pane open and says why', async (t) => {
+  test('Snooze with none of the account\'s copies in its inbox leaves the pane open and says why', async () => {
     // In acct's Archive view the row's copies are filed, and Snooze takes only an inbox copy.
     const FILED = [
       { ...THREAD[0], id: 'a6o', folder: 'Archive', message_id: '<6@x>', thread_id: '<6@x>' },
@@ -883,18 +885,16 @@ describe('a conversation another account also received', () => {
     ];
     served['<6@x>'] = FILED;
     const row = { ...FILED[1], message_count: 2, unread_count: 0 };
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
     await open({ selected: row, rows: [row], folder: 'Archive' });
     await click(button('contextMenu.snooze.label'));
     await commitWindow(menuEntry('contextMenu.snooze.threeHours'));
     assert.equal(useStore.getState().selectedMessageId, 'a6n', 'the pane is not closed as if the snooze had worked');
     assert.ok(button('message.delete'), 'the conversation stays on screen');
     assert.ok(!requests.some(r => /\/snooze$/.test(r.url)), 'nothing is snoozed');
-    assert.equal(warned.length, 1, 'the refusal is logged');
+    assert.deepEqual(notices(), ['message.snoozed.nothingFromAccount'], 'the reader is told why');
   });
 
-  test('Spam with only the reader\'s own mail in the account leaves the pane open and says why', async (t) => {
+  test('Spam with only the reader\'s own mail in the account leaves the pane open and says why', async () => {
     // In acct's Sent view the row's copies are the reader's own, which Spam spares.
     const OWN = [
       { ...THREAD[1], id: 's1', folder: 'Sent', message_id: '<11@x>', thread_id: '<11@x>' },
@@ -903,14 +903,43 @@ describe('a conversation another account also received', () => {
     ];
     served['<11@x>'] = OWN;
     const row = { ...OWN[1], message_count: 2, unread_count: 0 };
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
     await open({ selected: row, rows: [row], folder: 'Sent' });
     await commitWindow(button('contextMenu.markAsSpam'));
     assert.equal(useStore.getState().selectedMessageId, 's2', 'the pane is not closed as if the report had worked');
     assert.ok(button('message.delete'), 'the conversation stays on screen');
     assert.ok(!requests.some(r => /\/spam$/.test(r.url)), 'nothing is reported');
-    assert.equal(warned.length, 1, 'the refusal is logged');
+    assert.deepEqual(notices(), ['spam.nothingFromAccount'], 'the reader is told why');
+  });
+
+  // The unified inbox has no single account to name, and there only Spam and Snooze can come up
+  // empty: Archive, Delete and Move always take something there.
+  test('in the unified inbox Spam and Snooze that find nothing say so without naming an account', async () => {
+    // Notes the reader sent themselves: in the inbox, but from their own address, which Spam spares.
+    const NOTES = [
+      { ...THREAD[1], id: 'u1', folder: 'INBOX', account_email: 'me@x.z', message_id: '<80@x>', thread_id: '<80@x>' },
+      { ...THREAD[1], id: 'u2', folder: 'INBOX', account_email: 'me@x.z', message_id: '<81@x>', thread_id: '<80@x>', date: '2026-01-04T10:00:00Z' },
+    ];
+    served['<80@x>'] = NOTES;
+    const row = { ...NOTES[1], message_count: 2, unread_count: 0 };
+    await open({ selectedAccountId: null, selected: row, rows: [row] });
+    await commitWindow(button('contextMenu.markAsSpam'));
+    assert.ok(!requests.some(r => /\/spam$/.test(r.url)), 'nothing is reported');
+    assert.equal(useStore.getState().selectedMessageId, 'u2', 'the pane stays open');
+    assert.deepEqual(notices(), ['spam.nothingInConversation'], 'Spam says why');
+
+    // Opened from the GTD sidebar with the unified inbox selected: every copy is filed.
+    const FILED = [
+      { ...THREAD[0], id: 'f1', folder: 'Archive', message_id: '<82@x>', thread_id: '<82@x>' },
+      { ...THREAD[2], id: 'f2', folder: 'Archive', message_id: '<83@x>', thread_id: '<82@x>' },
+      { ...THREAD[2], id: 'fb2', account_id: 'acct-b', folder: 'Archive', message_id: '<83@x>', thread_id: '<82@x>' },
+    ];
+    served['<82@x>'] = FILED;
+    await open({ selectedAccountId: null, selected: FILED[1], threadMessages: { '__dl_f2': [FILED[1]] }, rows: [] });
+    await click(button('contextMenu.snooze.label'));
+    await commitWindow(menuEntry('contextMenu.snooze.threeHours'));
+    assert.ok(!requests.some(r => /\/snooze$/.test(r.url)), 'nothing is snoozed');
+    assert.equal(useStore.getState().selectedMessageId, 'f2', 'the pane stays open');
+    assert.deepEqual(notices(), ['message.snoozed.nothingInConversation'], 'Snooze says why');
   });
 
   test('in the unified inbox the conversation still acts on every account\'s copies', async () => {

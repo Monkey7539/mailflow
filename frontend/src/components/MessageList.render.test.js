@@ -630,15 +630,14 @@ describe('MessageList — a conversation another account also received (#476)', 
     await settle();
   };
 
-  test('archive from the keyboard leaves the row alone when the opened copy is another account\'s', async (t) => {
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
+  test('archive from the keyboard leaves the row alone when the opened copy is another account\'s, and says so', async (t) => {
+    t.after(() => React.act(async () => { useStore.setState({ notifications: [] }); }));
     const row = conversation(10);
     await start([row]);
     await archiveParked(row, ROUTES['/mail/thread?id=thr-10&folder=INBOX'][1].messages[2]);
     assert.ok(useStore.getState().messages.some(m => m.id === row.id), 'acct-1\'s row is not archived');
-    assert.deepEqual(useStore.getState().notifications, [], 'and nothing is pending');
-    assert.equal(warned.length, 1, 'the refusal is logged');
+    // A notice and nothing else: no undo toast, so nothing is pending.
+    assert.deepEqual(useStore.getState().notifications.map(n => n.title), ['message.archived.otherAccountMessage']);
   });
 
   test('archive from the keyboard still archives the row when the opened copy is the row account\'s', async () => {
@@ -652,15 +651,13 @@ describe('MessageList — a conversation another account also received (#476)', 
     await settle();
   });
 
-  test('in the unified inbox archive from the keyboard archives the row whichever account\'s copy is opened', async (t) => {
+  test('in the unified inbox archive from the keyboard archives the row whichever account\'s copy is opened', async () => {
     // A unified row stands for every unified account's copies, as the reading pane's Archive does there.
-    const warned = [];
-    t.mock.method(console, 'warn', (...args) => { warned.push(args.join(' ')); });
     const row = conversation(13, { unified: true });
     await start([row], { accountId: null });
     await archiveParked(row, ROUTES['/mail/thread?id=thr-13&folder=INBOX&unified=true'][1].messages[2]);
     assert.ok(!useStore.getState().messages.some(m => m.id === row.id), 'the row is archived');
-    assert.equal(warned.length, 0, 'and nothing is refused');
+    assert.ok(!useStore.getState().notifications.some(n => n.title === 'message.archived.otherAccountMessage'), 'and nothing is refused');
     const toast = useStore.getState().notifications.find(n => n.onUndo);
     await React.act(async () => { toast.onUndo(); useStore.setState({ notifications: [] }); });
     await settle();
