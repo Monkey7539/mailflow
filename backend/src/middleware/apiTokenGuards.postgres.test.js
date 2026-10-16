@@ -19,6 +19,8 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
   const THEIRS = '44444444-4444-4444-8444-444444444444';
   const MOVE_ERROR = 'API tokens cannot move mail into Trash, Junk, Drafts, Snoozed or folders MailFlow does not sync';
   const DRAFT_ERROR = 'API tokens cannot move or archive drafts';
+  const ALL_MAIL_ERROR = "API tokens cannot archive into Gmail's All Mail, where the mail drops out of MailFlow. "
+    + "Create a Gmail label named Archive, or choose an archive folder in the account's settings.";
   let nextId = 1;
   const newId = () => `00000000-0000-4000-8000-${String(nextId++).padStart(12, '0')}`;
 
@@ -133,6 +135,20 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
 
   it('looks only at the user\'s own messages', async () => {
     expect(await archive([await message({ account: THEIRS, folder: 'Drafts' })])).toBe(null);
+  });
+
+  it('refuses an archive into Gmail\'s All Mail, until the account has an archive label or mapping', async () => {
+    await database.query("INSERT INTO folders VALUES ($1, '[Gmail]/All Mail', 'All Mail', '/', '\\All', false)", [GMAIL]);
+    const mail = await message({ account: GMAIL });
+    expect(await archive([mail])).toBe(ALL_MAIL_ERROR);
+    // With the other account's mail too: one account archiving into All Mail is enough.
+    expect(await archive([await message(), mail])).toBe(ALL_MAIL_ERROR);
+    // An account with an Archive folder archives there, All Mail or not.
+    expect(await archive([await message()])).toBe(null);
+    await database.query("INSERT INTO folders VALUES ($1, 'Archive', 'Archive', '/', NULL, false)", [GMAIL]);
+    expect(await archive([mail])).toBe(null);
+    await database.query(`UPDATE email_accounts SET folder_mappings = '{"archive":"[Gmail]/All Mail"}' WHERE id = $1`, [GMAIL]);
+    expect(await archive([mail])).toBe(ALL_MAIL_ERROR);
   });
 
   it('refuses to snooze a draft, or a message whose reply chain takes one along', async () => {
