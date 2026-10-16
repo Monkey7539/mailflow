@@ -1260,7 +1260,7 @@
       "allowNonstandardPorts": "Consenti porte non standard",
       "allowNonstandardPortsDesc": "Consente qualsiasi porta IMAP o SMTP, non solo 143/993 (IMAP) e 465/587 (SMTP). Necessario per server come protonmail-bridge che utilizzano porte non standard.",
       "mfaEnforcementTitle": "Applicazione MFA",
-      "mfaEnforcementDesc": "Richiedere a tutti gli utenti di verificare con un secondo fattore al momento del login.",
+      "mfaEnforcementDesc": "Richiedere a tutti gli utenti di verificare con un secondo fattore al momento del login. Renderlo obbligatorio elimina i token API confermati solo con la password.",
       "mfaEnforcementOff": "Facoltativo",
       "mfaEnforcementRequired": "Obbligatorio",
       "mfaDeviceTrustTitle": "Durata affidabilità dispositivo",
@@ -1293,11 +1293,14 @@
       "scopeDraftLabel": "Bozze",
       "scopeDraftDesc": "Salvare nuove bozze che rivedi e invii tu.",
       "readLocked": "Organizzazione e Bozze richiedono Lettura per trovare i messaggi, quindi Lettura resta attiva.",
+      "readWarning": "Lettura vede ogni messaggio per intero, compresi i link per reimpostare la password e i codici di accesso di altri servizi. Dai un token solo a strumenti di cui ti fidi.",
       "expiryLabel": "Scade dopo",
-      "noExpiry": "Nessuna scadenza",
       "totpLabel": "Conferma con il codice della tua app di autenticazione",
       "passwordLabel": "Conferma con la tua password",
-      "reauthNoneHint": "Non c'è una password né un codice di autenticazione con cui confermare, quindi il token deve scadere.",
+      "reauthOidcHint": "Conferma prima con SSO. Un accesso vale 10 minuti e un token confermato così dura al massimo 30 giorni.",
+      "reauthOidcButton": "Conferma con {{provider}}",
+      "reauthOidcDone": "Confermato con SSO fino alle {{time}}.",
+      "reauthOidcNoProvider": "Per creare un token serve un accesso recente con SSO, ma il tuo account non ha un'identità SSO con cui accedere. Collegane prima una in Account SSO collegati, in questa pagina.",
       "createButton": "Crea token",
       "creating": "Creazione…",
       "createdTitle": "Token «{{name}}» creato",
@@ -1306,6 +1309,7 @@
       "done": "Fatto",
       "listEmpty": "Non hai token API.",
       "maxReached": "Hai {{max}} token, il massimo consentito. Revocane uno per crearne un altro.",
+      "totpSetupNotice": "Questo server richiede l'autenticazione a due fattori. Configura un'app di autenticazione qui sopra per creare token API.",
       "createdAt": "Creato il {{date}}",
       "expiresAt": "Scade il {{date}}",
       "expired": "Scaduto",
@@ -1377,7 +1381,7 @@
       "deleteConfirmBody": "Questo account utente verrà eliminato in modo permanente. Questa operazione non può essere annullata.",
       "deleteConfirmLabel": "Elimina utente",
       "disable2faConfirmTitle": "Disabilitare la 2FA per \"{{username}}\"?",
-      "disable2faConfirmBody": "Questa operazione rimuoverà il requisito dell'app di autenticazione. L'utente potrà riabilitarla da solo.",
+      "disable2faConfirmBody": "Questa operazione rimuoverà il requisito dell'app di autenticazione. L'utente potrà riabilitarla da solo. Vengono eliminati anche i token API dell'utente.",
       "disable2faConfirmLabel": "Disabilita 2FA",
       "lastSeen": "Ultimo accesso {{when}}",
       "neverSeen": "Mai connesso",
@@ -1593,7 +1597,7 @@
       "adminGroupValueDesc": "Il nome del gruppo che concede l'accesso amministratore. Gli utenti in questo gruppo diventano admin ad ogni accesso SSO; gli utenti non in questo gruppo perdono l'accesso admin.",
       "loginMatchClaim": "Abbina gli account esistenti tramite",
       "loginMatchClaimDesc": "Claim OIDC confrontato con il nome utente di ogni account MailFlow quando un accesso SSO viene collegato per la prima volta a un account esistente (modalità di provisioning «solo accesso ad account esistenti»). Il valore predefinito è email. Usa preferred_username, upn, ecc. per provider di identità i cui nomi utente non sono indirizzi e-mail, solo se il provider garantisce che il claim sia univoco e non modificabile dall’utente.",
-      "passwordLoginDisableMsg": "Gli utenti potranno accedere solo tramite SSO. Se il provider SSO non è disponibile, sarà necessario l'accesso diretto al database per riabilitare l'accesso con password.",
+      "passwordLoginDisableMsg": "Gli utenti potranno accedere solo tramite SSO. Se il provider SSO non è disponibile, sarà necessario l'accesso diretto al database per riabilitare l'accesso con password. I token API non confermati con SSO vengono eliminati.",
       "passwordLoginDisableTitle": "Disabilitare l'accesso con password?",
       "passwordLoginDisabled": "L'accesso con password è disabilitato",
       "passwordLoginTitle": "Accesso con password",
@@ -1718,6 +1722,10 @@
     "ssoLinked": {
       "title": "Identità SSO collegata",
       "body": "Il tuo account è ora collegato al provider SSO."
+    },
+    "ssoReauth": {
+      "title": "Confermato con SSO",
+      "body": "Puoi creare un token API nei prossimi 10 minuti."
     },
     "ssoError": {
       "title": "Errore SSO"

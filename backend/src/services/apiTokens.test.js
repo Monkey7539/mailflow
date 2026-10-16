@@ -10,7 +10,8 @@ import { query } from './db.js';
 import {
   apiTokenCredential, apiTokensEnabled, createToken, expiryDate, findTokenByHash, generateToken, hashToken,
   invalidateApiTokenSettingsCache, isTokenFormat, listTokens, MAX_TOKENS_PER_USER, normalizeIp,
-  normalizeScopes, normalizeTokenName, recordTokenUse, RECORD_USE_EVERY_MS, resetTokenUseForTests, tokenStillValid,
+  normalizeScopes, normalizeTokenName, recordTokenUse, RECORD_USE_EVERY_MS, resetTokenUseForTests, revokedTokensNote,
+  revokeProviderTokens, revokeTokensForPolicy, tokenStillValid,
 } from './apiTokens.js';
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -94,10 +95,9 @@ describe('names', () => {
 });
 
 describe('expiry', () => {
-  it('is that many days from now, or none', () => {
+  it('is that many days from now', () => {
     const now = Date.UTC(2026, 9, 14);
     expect(expiryDate(90, now)).toEqual(new Date(now + 90 * 24 * 60 * 60 * 1000));
-    expect(expiryDate(null, now)).toBe(null);
   });
 });
 
@@ -201,16 +201,16 @@ describe('looking tokens up', () => {
 
   // The only expiry check before a token is let in, so it is pinned here as well as run against
   // PostgreSQL in apiTokens.postgres.test.js, which CI does not do.
-  it('takes a token for expired once the database clock reaches its expiry, and never one without', async () => {
+  it('takes a token for expired once the database clock reaches its expiry', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 't1', user_id: 'u1', username: 'maria', scopes: ['read'], expired: true }] });
     expect(await findTokenByHash('a'.repeat(64))).toMatchObject({ expired: true });
-    expect(query.mock.calls[0][0]).toMatch(/\(t\.expires_at IS NOT NULL AND t\.expires_at <= NOW\(\)\) AS expired\b/);
+    expect(query.mock.calls[0][0]).toMatch(/\bt\.expires_at <= NOW\(\) AS expired\b/);
   });
 
   it('a token still valid mid-request needs its row, unexpired, and tokens still on', async () => {
     query.mockImplementation(async sql => (/system_settings/.test(sql) ? { rows: [{ value: 'true' }] } : { rows: [{}] }));
     expect(await tokenStillValid('t1')).toBe(true);
-    expect(query.mock.calls.at(-1)[0]).toMatch(/expires_at IS NULL OR expires_at > NOW\(\)/);
+    expect(query.mock.calls.at(-1)[0]).toMatch(/WHERE id = \$1 AND expires_at > NOW\(\)$/);
     query.mockImplementation(async sql => (/system_settings/.test(sql) ? { rows: [{ value: 'true' }] } : { rows: [] }));
     expect(await tokenStillValid('t1')).toBe(false);
     invalidateApiTokenSettingsCache();
@@ -220,16 +220,17 @@ describe('looking tokens up', () => {
 
   it('lists the user\'s tokens newest first, in the shape the settings page reads', async () => {
     const created = new Date('2026-10-01T10:00:00Z');
+    const expires = new Date('2026-12-30T10:00:00Z');
     query.mockResolvedValueOnce({ rows: [{
-      id: 't1', name: 'Claude', scopes: ['read'], created_at: created, expires_at: null,
-      last_used_at: null, last_used_ip: null, expired: false, token_hash: 'never-sent',
+      id: 't1', name: 'Claude', scopes: ['read'], created_at: created, expires_at: expires,
+      last_used_at: null, last_used_ip: null, expired: false, token_hash: 'never-sent', confirmed_with: 'totp',
     }] });
     expect(await listTokens('u1')).toEqual([{
-      id: 't1', name: 'Claude', scopes: ['read'], createdAt: created, expiresAt: null,
+      id: 't1', name: 'Claude', scopes: ['read'], createdAt: created, expiresAt: expires,
       lastUsedAt: null, lastUsedIp: null, expired: false,
     }]);
     expect(query.mock.calls[0][0]).toMatch(/WHERE user_id = \$1 ORDER BY created_at DESC/);
-    expect(query.mock.calls[0][0]).toMatch(/\(expires_at IS NOT NULL AND expires_at <= NOW\(\)\) AS expired\b/);
+    expect(query.mock.calls[0][0]).toMatch(/\bexpires_at <= NOW\(\) AS expired\b/);
     expect(query.mock.calls[0][0]).not.toMatch(/token_hash/);
   });
 });
@@ -239,23 +240,65 @@ describe('creating a token', () => {
     query.mockImplementation(async sql => {
       if (/COUNT/.test(sql)) return { rows: [{ count: 3 }] };
       if (/INSERT INTO api_tokens/.test(sql)) {
-        return { rows: [{ id: 't9', name: 'Claude', scopes: ['read', 'draft'], created_at: new Date(), expires_at: null, last_used_at: null, last_used_ip: null, expired: false }] };
+        return { rows: [{ id: 't9', name: 'Claude', scopes: ['read', 'draft'], created_at: new Date(), expires_at: expires, last_used_at: null, last_used_ip: null, expired: false }] };
       }
       return { rows: [] };
     });
-    const created = await createToken('u1', { name: 'Claude', scopes: ['read', 'draft'], expiresAt: null });
+    const expires = new Date(Date.now() + 86_400_000);
+    const created = await createToken('u1', { name: 'Claude', scopes: ['read', 'draft'], expiresAt: expires, confirmedWith: 'totp' });
     expect(isTokenFormat(created.token)).toBe(true);
     expect(created.apiToken).toMatchObject({ id: 't9', scopes: ['read', 'draft'], lastUsedAt: null, expired: false });
     const insert = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO api_tokens'));
-    expect(insert[1]).toEqual(['u1', 'Claude', hashToken(created.token), '["read","draft"]', null]);
+    expect(insert[1]).toEqual(['u1', 'Claude', hashToken(created.token), '["read","draft"]', expires, 'totp', null]);
     expect(JSON.stringify(query.mock.calls)).not.toContain(created.token);
+  });
+
+  it('records the provider when single sign-on confirmed it', async () => {
+    query.mockImplementation(async sql => (/COUNT/.test(sql) ? { rows: [{ count: 0 }] } : { rows: [{ id: 't9', scopes: ['read'] }] }));
+    await createToken('u1', { name: 'x', scopes: ['read'], expiresAt: new Date(), confirmedWith: 'oidc', oidcProviderId: 'p1' });
+    const insert = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO api_tokens'));
+    expect(insert[1].slice(-2)).toEqual(['oidc', 'p1']);
   });
 
   it('holds the user row while it counts, and stores nothing at the limit', async () => {
     query.mockImplementation(async sql => (/COUNT/.test(sql) ? { rows: [{ count: MAX_TOKENS_PER_USER }] } : { rows: [] }));
-    expect(await createToken('u1', { name: 'x', scopes: ['read'], expiresAt: null })).toBe(null);
+    expect(await createToken('u1', { name: 'x', scopes: ['read'], expiresAt: new Date(), confirmedWith: 'password' })).toBe(null);
     const sqls = query.mock.calls.map(([sql]) => sql);
     expect(sqls[0]).toBe('SELECT 1 FROM users WHERE id = $1 FOR UPDATE');
     expect(sqls.some(sql => sql.includes('INSERT'))).toBe(false);
+  });
+});
+
+// Run against PostgreSQL in apiTokens.postgres.test.js, which CI does not do, so pinned here too.
+describe('deleting the tokens a sign-in policy no longer allows', () => {
+  const client = { query: vi.fn(async () => ({ rowCount: 2 })) };
+  beforeEach(() => client.query.mockClear());
+
+  it('keeps only single sign-on tokens once password sign-in is off', async () => {
+    expect(await revokeTokensForPolicy(client, 'ssoOnly')).toBe(2);
+    expect(client.query.mock.calls).toEqual([[
+      "DELETE FROM api_tokens WHERE NOT (COALESCE(confirmed_with, 'password') = ANY($1::text[]))", [['oidc']],
+    ]]);
+  });
+
+  it('keeps two-factor and single sign-on tokens once two-factor is required', async () => {
+    await revokeTokensForPolicy(client, 'mfaRequired');
+    expect(client.query.mock.calls[0][1]).toEqual([['totp', 'oidc']]);
+  });
+
+  it('refuses a policy it does not know rather than deleting nothing', async () => {
+    await expect(revokeTokensForPolicy(client, 'ssoonly')).rejects.toThrow('No API token policy named ssoonly');
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it('deletes the tokens confirmed through a provider being turned off', async () => {
+    expect(await revokeProviderTokens(client, 'p1')).toBe(2);
+    expect(client.query.mock.calls).toEqual([['DELETE FROM api_tokens WHERE oidc_provider_id = $1', ['p1']]]);
+  });
+
+  it('says how many went, for the admin log line', () => {
+    expect(revokedTokensNote(0)).toBe('');
+    expect(revokedTokensNote(1)).toBe(', and deleted 1 API token');
+    expect(revokedTokensNote(3)).toBe(', and deleted 3 API tokens');
   });
 });

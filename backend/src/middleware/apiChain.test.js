@@ -414,6 +414,10 @@ describe('CSRF and token requests', () => {
     // An auth proxy's JWT leaves the cookie session in charge, and its CSRF check with it.
     const refused = await post('/api/mail/messages/bulk-read', { ids: [ID1], read: true }, { cookie, Authorization: 'Bearer eyJhbGciOi.eyJzdWIi.sig' });
     expect(refused.status).toBe(403);
+    // Nor cached Basic credentials, which a browser can attach to a cross-site request by itself.
+    const basic = await post('/api/mail/messages/bulk-read', { ids: [ID1], read: true }, { cookie, Authorization: 'Basic dTE6cGFzc3dvcmQ=' });
+    expect(basic.status).toBe(403);
+    expect(await basic.json()).toEqual({ error: 'Missing required X-Requested-With header' });
   });
 });
 

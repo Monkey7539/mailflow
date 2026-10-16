@@ -1260,7 +1260,7 @@
       "allowNonstandardPorts": "Autoriser les ports non standard",
       "allowNonstandardPortsDesc": "Autorise n'importe quel port IMAP ou SMTP, pas seulement 143/993 (IMAP) et 465/587 (SMTP). Nécessaire pour les serveurs comme protonmail-bridge qui utilisent des ports non standard.",
       "mfaEnforcementTitle": "Application de la MFA",
-      "mfaEnforcementDesc": "Obliger tous les utilisateurs à vérifier avec un deuxième facteur à la connexion.",
+      "mfaEnforcementDesc": "Obliger tous les utilisateurs à vérifier avec un deuxième facteur à la connexion. L'exiger supprime les jetons d'API confirmés uniquement par mot de passe.",
       "mfaEnforcementOff": "Facultatif",
       "mfaEnforcementRequired": "Obligatoire",
       "mfaDeviceTrustTitle": "Durée de confiance de l’appareil",
@@ -1293,11 +1293,14 @@
       "scopeDraftLabel": "Brouillons",
       "scopeDraftDesc": "Enregistrer de nouveaux brouillons que vous relisez et envoyez vous-même.",
       "readLocked": "Organisation et Brouillons ont besoin de Lecture pour trouver les messages ; Lecture reste donc cochée.",
+      "readWarning": "Lecture voit chaque message en entier, y compris les liens de réinitialisation de mot de passe et les codes de connexion d'autres services. Ne donnez un jeton qu'à des outils de confiance.",
       "expiryLabel": "Expire après",
-      "noExpiry": "Aucune expiration",
       "totpLabel": "Confirmez avec le code de votre application d'authentification",
       "passwordLabel": "Confirmez avec votre mot de passe",
-      "reauthNoneHint": "Aucun mot de passe ni code d'authentification ne permet de le confirmer, le jeton doit donc expirer.",
+      "reauthOidcHint": "Confirmez d'abord via SSO. Une connexion vaut pour 10 minutes, et un jeton confirmé ainsi dure au plus 30 jours.",
+      "reauthOidcButton": "Confirmer avec {{provider}}",
+      "reauthOidcDone": "Confirmé via SSO jusqu'à {{time}}.",
+      "reauthOidcNoProvider": "Créer un jeton demande une connexion récente via SSO, et votre compte n'a aucune identité SSO pour se connecter. Liez-en d'abord une dans Comptes SSO liés, sur cette page.",
       "createButton": "Créer le jeton",
       "creating": "Création…",
       "createdTitle": "Jeton « {{name}} » créé",
@@ -1306,6 +1309,7 @@
       "done": "Terminé",
       "listEmpty": "Vous n'avez aucun jeton d'API.",
       "maxReached": "Vous avez {{max}} jetons, le maximum autorisé. Révoquez-en un pour en créer un autre.",
+      "totpSetupNotice": "Ce serveur exige l'authentification à deux facteurs. Configurez une application d'authentification ci-dessus pour créer des jetons d'API.",
       "createdAt": "Créé le {{date}}",
       "expiresAt": "Expire le {{date}}",
       "expired": "Expiré",
@@ -1377,7 +1381,7 @@
       "deleteConfirmBody": "Ce compte utilisateur sera définitivement supprimé. Cette action est irréversible.",
       "deleteConfirmLabel": "Supprimer l'utilisateur",
       "disable2faConfirmTitle": "Désactiver la 2FA pour « {{username}} » ?",
-      "disable2faConfirmBody": "Cela supprimera l'exigence de leur application d'authentification. Ils peuvent la réactiver eux-mêmes.",
+      "disable2faConfirmBody": "Cela supprimera l'exigence de leur application d'authentification. Ils peuvent la réactiver eux-mêmes. Leurs jetons d'API sont également supprimés.",
       "disable2faConfirmLabel": "Désactiver la 2FA",
       "lastSeen": "Dernière activité {{when}}",
       "neverSeen": "Jamais connecté",
@@ -1593,7 +1597,7 @@
       "adminGroupValueDesc": "Le nom du groupe accordant l'accès administrateur. Les utilisateurs de ce groupe deviennent admins à chaque connexion SSO ; les utilisateurs absents de ce groupe perdent l'accès admin.",
       "loginMatchClaim": "Associer les comptes existants par",
       "loginMatchClaimDesc": "Revendication (claim) OIDC comparée au nom d’utilisateur de chaque compte MailFlow lors de la première association d’une connexion SSO à un compte existant (mode d’approvisionnement « connexion aux comptes existants uniquement »). Valeur par défaut : email. Utilisez preferred_username, upn, etc. pour les fournisseurs d’identité dont les noms d’utilisateur ne sont pas des adresses e-mail — uniquement si votre fournisseur garantit que cette revendication est unique et non modifiable par l’utilisateur.",
-      "passwordLoginDisableMsg": "Les utilisateurs ne pourront se connecter que via SSO. Si votre fournisseur SSO devient indisponible, un accès direct à la base de données sera nécessaire pour réactiver la connexion par mot de passe.",
+      "passwordLoginDisableMsg": "Les utilisateurs ne pourront se connecter que via SSO. Si votre fournisseur SSO devient indisponible, un accès direct à la base de données sera nécessaire pour réactiver la connexion par mot de passe. Les jetons d'API qui n'ont pas été confirmés via SSO sont supprimés.",
       "passwordLoginDisableTitle": "Désactiver la connexion par mot de passe ?",
       "passwordLoginDisabled": "La connexion par mot de passe est désactivée",
       "passwordLoginTitle": "Connexion par mot de passe",
@@ -1718,6 +1722,10 @@
     "ssoLinked": {
       "title": "Identité SSO liée",
       "body": "Votre compte est maintenant lié au fournisseur SSO."
+    },
+    "ssoReauth": {
+      "title": "Confirmé via SSO",
+      "body": "Vous pouvez créer un jeton d'API pendant les 10 prochaines minutes."
     },
     "ssoError": {
       "title": "Erreur SSO"

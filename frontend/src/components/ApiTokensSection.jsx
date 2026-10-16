@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { copyToClipboard, selectElementText } from '../utils/clipboard.js';
-import { appLocale, formatDateTime, formatDay } from '../utils/formatDate.js';
+import { appLocale, formatDateTime, formatDay, formatTime } from '../utils/formatDate.js';
 import PasswordInput from './PasswordInput.jsx';
 
 // Personal API tokens (#617), in Settings → Security after two-factor. Self-contained, like
@@ -29,10 +29,8 @@ const SCOPE_LABELS = Object.fromEntries(SCOPES.map(s => [s.id, s.label]));
 
 const NEW_FORM = { name: '', picked: { read: true, organize: false, draft: false }, expiry: undefined, code: '', password: '' };
 
-// The server says which expiries it offers (fewer when there is nothing to confirm a new token
-// with), so the list is shown as given. A select value is a string; null is "no expiry".
-const expiryValue = (days) => (days === null ? 'none' : String(days));
-const parseExpiry = (value) => (value === 'none' ? null : Number(value));
+// The server says which expiries it offers (fewer when single sign-on confirms the token), so the
+// list is shown as given.
 const defaultExpiry = (choices) => (choices.includes(90) ? 90 : choices.includes(30) ? 30 : choices[0]);
 // "90 days" in the UI language, in the right plural form for any count the server sends.
 const formatDays = (days) => new Intl.NumberFormat(appLocale(), { style: 'unit', unit: 'day', unitDisplay: 'long' }).format(days);
@@ -77,6 +75,12 @@ const noticeBox = {
 };
 // overflowWrap: an IPv6 address in "last used from" is one word too wide for a phone's column.
 const metaStyle = { fontSize: 12, color: 'var(--text-tertiary)', marginTop: 3, overflowWrap: 'anywhere' };
+const hintStyle = { fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.5 };
+const linkButton = {
+  padding: '7px 14px', borderRadius: 7, fontSize: 13, fontWeight: 500,
+  background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+  color: 'var(--text-secondary)', textDecoration: 'none', cursor: 'pointer', display: 'inline-flex',
+};
 
 export default function ApiTokensSection() {
   const { t } = useTranslation();
@@ -85,7 +89,7 @@ export default function ApiTokensSection() {
   const totpEnabled = useStore(s => !!s.user?.totpEnabled);
   const ids = useId();
 
-  const [data, setData] = useState(null); // { enabled, reauth, maxTokens, expiryChoices, tokens }
+  const [data, setData] = useState(null); // { enabled, reauth, oidc?, maxTokens, expiryChoices, tokens }
   const [loadError, setLoadError] = useState('');
   const loadSeq = useRef(0);
 
@@ -155,7 +159,13 @@ export default function ApiTokensSection() {
   const scopes = SCOPES.map(s => s.id).filter(id => form.picked[id] || (id === 'read' && readLocked));
   const tokens = data?.tokens || [];
   const atLimit = Number.isFinite(data?.maxTokens) && tokens.length >= data.maxTokens;
-  const confirmed = reauth === 'totp' ? form.code.length === 6 : reauth === 'password' ? !!form.password : true;
+  // An account that cannot sign in with a password confirms with a recent sign-in through single
+  // sign-on: the Confirm button goes through the provider and back to this page.
+  const oidcProviders = Array.isArray(data?.oidc?.providers) ? data.oidc.providers : [];
+  const oidcUntil = data?.oidc?.confirmedUntil ?? null;
+  const confirmed = reauth === 'totp' ? form.code.length === 6
+    : reauth === 'password' ? !!form.password
+      : reauth === 'oidc' ? !!oidcUntil : false;
   const canCreate = !creating && !!form.name.trim() && scopes.length > 0 && expiry !== undefined && confirmed;
 
   const setField = (field, value) => setForm(f => ({ ...f, [field]: value }));
@@ -256,7 +266,6 @@ export default function ApiTokensSection() {
 
   const expiryText = (tok) => {
     if (tok.expired) return <span style={{ color: 'var(--red)' }}>{t('admin.apiTokens.expired')}</span>;
-    if (!tok.expiresAt) return t('admin.apiTokens.noExpiry');
     return t('admin.apiTokens.expiresAt', { date: formatDay(tok.expiresAt) });
   };
   const lastUseText = (tok) => {
@@ -290,7 +299,7 @@ export default function ApiTokensSection() {
               <label key={id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: locked ? 'default' : 'pointer' }}>
                 <input
                   type="checkbox" value={id} checked={scopes.includes(id)} disabled={locked}
-                  aria-describedby={locked ? `${ids}-read-locked` : undefined}
+                  aria-describedby={id === 'read' ? [locked && `${ids}-read-locked`, `${ids}-read-warning`].filter(Boolean).join(' ') : undefined}
                   onChange={() => toggleScope(id)} style={{ marginTop: 2, accentColor: 'var(--accent)' }}
                 />
                 <span>
@@ -304,19 +313,21 @@ export default function ApiTokensSection() {
         {readLocked && (
           <div id={`${ids}-read-locked`} style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 8 }}>{t('admin.apiTokens.readLocked')}</div>
         )}
+        {/* Every token has Read, and with it every message in full, whatever else it is for. */}
+        <div id={`${ids}-read-warning`} style={{ ...noticeBox, marginTop: 10, marginBottom: 0, lineHeight: 1.5, borderLeft: '3px solid var(--amber)' }}>
+          {t('admin.apiTokens.readWarning')}
+        </div>
       </fieldset>
 
       <div>
         <label htmlFor={`${ids}-expiry`} style={labelStyle}>{t('admin.apiTokens.expiryLabel')}</label>
         <select
-          id={`${ids}-expiry`} value={expiry === undefined ? '' : expiryValue(expiry)}
-          onChange={e => setField('expiry', parseExpiry(e.target.value))}
+          id={`${ids}-expiry`} value={expiry === undefined ? '' : String(expiry)}
+          onChange={e => setField('expiry', Number(e.target.value))}
           style={{ padding: '7px 9px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', fontSize: 13 }}
         >
           {choices.map(days => (
-            <option key={expiryValue(days)} value={expiryValue(days)}>
-              {days === null ? t('admin.apiTokens.noExpiry') : formatDays(days)}
-            </option>
+            <option key={days} value={String(days)}>{formatDays(days)}</option>
           ))}
         </select>
       </div>
@@ -342,9 +353,22 @@ export default function ApiTokensSection() {
           />
         </div>
       )}
-      {reauth === 'none' && !choices.includes(null) && (
-        <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{t('admin.apiTokens.reauthNoneHint')}</div>
-      )}
+      {reauth === 'oidc' && (oidcUntil ? (
+        <div style={hintStyle}>{t('admin.apiTokens.reauthOidcDone', { time: formatTime(oidcUntil) })}</div>
+      ) : oidcProviders.length ? (
+        <div>
+          <div id={`${ids}-oidc-hint`} style={{ ...hintStyle, marginBottom: 8 }}>{t('admin.apiTokens.reauthOidcHint')}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {oidcProviders.map(p => (
+              <a key={p.slug} href={`/auth/oidc/${p.slug}/start?action=reauth`} aria-describedby={`${ids}-oidc-hint`} style={linkButton}>
+                {t('admin.apiTokens.reauthOidcButton', { provider: p.name })}
+              </a>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={hintStyle}>{t('admin.apiTokens.reauthOidcNoProvider')}</div>
+      ))}
 
       {createError && <div role="alert" style={errorBox}>{createError}</div>}
 
@@ -443,6 +467,9 @@ export default function ApiTokensSection() {
           {data.enabled && !shown && (
             atLimit ? (
               <div ref={noticeRef} tabIndex={-1} style={noticeBox}>{t('admin.apiTokens.maxReached', { max: data.maxTokens })}</div>
+            ) : reauth === 'totpSetup' ? (
+              // Two-factor is required and the user has no authenticator: the card above sets one up.
+              <div ref={noticeRef} tabIndex={-1} style={noticeBox}>{t('admin.apiTokens.totpSetupNotice')}</div>
             ) : formOpen ? createForm : (
               <button type="button" ref={newTokenRef} onClick={() => setFormOpen(true)} style={{ ...primaryButton(false), marginBottom: 16 }}>
                 {t('admin.apiTokens.newToken')}

@@ -1279,7 +1279,7 @@
       "allowNonstandardPorts": "Zezwalaj na niestandardowe porty",
       "allowNonstandardPortsDesc": "Zezwala na używanie dowolnego portu IMAP lub SMTP, nie tylko 143/993 (IMAP) i 465/587 (SMTP). Wymagane w przypadku serwerów takich jak protonmail-bridge, które używają niestandardowych portów.",
       "mfaEnforcementTitle": "Wymuszanie MFA",
-      "mfaEnforcementDesc": "Wymagaj od wszystkich użytkowników weryfikacji drugim składnikiem podczas logowania.",
+      "mfaEnforcementDesc": "Wymagaj od wszystkich użytkowników weryfikacji drugim składnikiem podczas logowania. Włączenie wymogu usuwa tokeny API potwierdzone tylko hasłem.",
       "mfaEnforcementOff": "Opcjonalne",
       "mfaEnforcementRequired": "Wymagane",
       "mfaDeviceTrustTitle": "Czas zaufania urządzenia",
@@ -1312,11 +1312,14 @@
       "scopeDraftLabel": "Szkice",
       "scopeDraftDesc": "Zapisywanie nowych szkiców, które sam przejrzysz i wyślesz.",
       "readLocked": "Porządkowanie i Szkice potrzebują Odczytu, aby znajdować wiadomości, więc Odczyt pozostaje włączony.",
+      "readWarning": "Odczyt widzi każdą wiadomość w całości, w tym linki do resetowania hasła i kody logowania z innych usług. Dawaj token tylko narzędziom, którym ufasz.",
       "expiryLabel": "Wygasa po",
-      "noExpiry": "Bez wygasania",
       "totpLabel": "Potwierdź kodem z aplikacji uwierzytelniającej",
       "passwordLabel": "Potwierdź hasłem",
-      "reauthNoneHint": "Nie ma hasła ani kodu uwierzytelniającego, którym można to potwierdzić, więc token musi wygasać.",
+      "reauthOidcHint": "Najpierw potwierdź przez SSO. Logowanie jest ważne 10 minut, a tak potwierdzony token działa najwyżej 30 dni.",
+      "reauthOidcButton": "Potwierdź przez {{provider}}",
+      "reauthOidcDone": "Potwierdzono przez SSO do {{time}}.",
+      "reauthOidcNoProvider": "Utworzenie tokenu wymaga niedawnego logowania przez SSO, a twoje konto nie ma tożsamości SSO, przez którą można się zalogować. Najpierw połącz ją w sekcji Połączone konta SSO na tej stronie.",
       "createButton": "Utwórz token",
       "creating": "Tworzenie…",
       "createdTitle": "Utworzono token „{{name}}”",
@@ -1325,6 +1328,7 @@
       "done": "Gotowe",
       "listEmpty": "Nie masz tokenów API.",
       "maxReached": "Masz już maksymalną liczbę tokenów ({{max}}). Unieważnij jeden, aby utworzyć nowy.",
+      "totpSetupNotice": "Ten serwer wymaga uwierzytelniania dwuskładnikowego. Aby tworzyć tokeny API, skonfiguruj powyżej aplikację uwierzytelniającą.",
       "createdAt": "Utworzono {{date}}",
       "expiresAt": "Wygasa {{date}}",
       "expired": "Wygasł",
@@ -1396,7 +1400,7 @@
       "deleteConfirmBody": "Konto użytkownika zostanie trwale usunięte. Tej operacji nie można cofnąć.",
       "deleteConfirmLabel": "Usuń użytkownika",
       "disable2faConfirmTitle": "Wyłącz 2FA dla \"{{username}}\"?",
-      "disable2faConfirmBody": "Spowoduje to usunięcie wymogu korzystania z aplikacji uwierzytelniającej. Użytkownik może ponownie włączyć tę funkcję samodzielnie.",
+      "disable2faConfirmBody": "Spowoduje to usunięcie wymogu korzystania z aplikacji uwierzytelniającej. Użytkownik może ponownie włączyć tę funkcję samodzielnie. Tokeny API użytkownika również zostaną usunięte.",
       "disable2faConfirmLabel": "Wyłącz 2FA",
       "lastSeen": "Ostatnia aktywność {{when}}",
       "neverSeen": "Nigdy się nie logował",
@@ -1565,7 +1569,7 @@
       "passwordLoginEnabledDesc": "Użytkownicy mogą logować się za pomocą nazwy użytkownika i hasła",
       "passwordLoginDisabledDesc": "Użytkownicy muszą logować się przez SSO",
       "passwordLoginDisableTitle": "Wyłączyć logowanie hasłem?",
-      "passwordLoginDisableMsg": "Użytkownicy będą mogli logować się tylko przez SSO. Jeśli dostawca SSO stanie się niedostępny, do ponownego włączenia logowania hasłem będzie wymagany bezpośredni dostęp do bazy danych.",
+      "passwordLoginDisableMsg": "Użytkownicy będą mogli logować się tylko przez SSO. Jeśli dostawca SSO stanie się niedostępny, do ponownego włączenia logowania hasłem będzie wymagany bezpośredni dostęp do bazy danych. Tokeny API, które nie zostały potwierdzone przez SSO, zostaną usunięte.",
       "passwordLoginDisableConfirm": "Wyłącz logowanie hasłem",
       "empty": "Brak skonfigurowanych dostawców SSO.",
       "addProvider": "+ Dodaj dostawcę SSO",
@@ -1737,6 +1741,10 @@
     "ssoLinked": {
       "title": "Połączono tożsamość SSO",
       "body": "Twoje konto zostało połączone z dostawcą SSO."
+    },
+    "ssoReauth": {
+      "title": "Potwierdzono przez SSO",
+      "body": "Przez najbliższe 10 minut możesz utworzyć token API."
     },
     "ssoError": {
       "title": "Błąd SSO"

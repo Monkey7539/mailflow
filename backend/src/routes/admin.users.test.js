@@ -217,6 +217,7 @@ describe('the security log records admin changes and who made them', () => {
     const res = reply();
     await disableUserTotp(request({ id: USER }), res);
     expect(sqls()).toContain('UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1');
+    expect(sqls()).toContain('DELETE FROM api_tokens WHERE user_id = $1');
     expectEvent('admin_totp_disable', 'maria');
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
