@@ -9,7 +9,7 @@ vi.mock('../services/encryption.js', () => ({ decrypt: v => v, encrypt: v => v }
 vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(), resolveForConnection: vi.fn() }));
 vi.mock('../services/smtpTransport.js', () => ({ createSmtpTransport: vi.fn() }));
 vi.mock('../services/connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn(), invalidateConnectionPolicyCache: vi.fn() }));
-vi.mock('../services/apiTokens.js', () => ({ invalidateApiTokenSettingsCache: vi.fn() }));
+vi.mock('../services/apiTokens.js', async (importOriginal) => ({ ...(await importOriginal()), invalidateApiTokenSettingsCache: vi.fn() }));
 vi.mock('../services/authLimiter.js', () => ({ reloadAuthSettings: vi.fn() }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
 vi.mock('../services/carddavSync.js', () => ({ stopCardavUser: vi.fn() }));
@@ -17,7 +17,7 @@ vi.mock('../plugins/registry.js', () => ({ pluginRegistry: {} }));
 vi.mock('../services/userSessions.js', () => ({ destroyUserSessions: vi.fn() }));
 
 import express from 'express';
-import adminRoutes, { setUserPassword } from './admin.js';
+import adminRoutes, { disableUserTotp, setUserPassword } from './admin.js';
 import { query } from '../services/db.js';
 import { invalidateApiTokenSettingsCache } from '../services/apiTokens.js';
 
@@ -82,5 +82,94 @@ describe('an admin setting a password', () => {
     expect(inTransaction).toContain('DELETE FROM api_tokens WHERE user_id = $1');
     expect(query.mock.calls.some(([sql]) => sql.includes('api_tokens'))).toBe(false);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+});
+
+// #617: a token must not get round the server's sign-in policy, so a change that tightens it
+// deletes the tokens it no longer allows, in the transaction that makes the change.
+describe('sign-in policy changes and API tokens', () => {
+  const USER = 'b2b2b2b2-0000-4000-8000-000000000002';
+  const PROVIDER = 'c0c0c0c0-0000-4000-8000-000000000001';
+  let inTransaction;
+  const firstWords = () => inTransaction.map(([sql]) => sql.trim().split(/\s+/).slice(0, 3).join(' '));
+  beforeEach(() => {
+    inTransaction = [];
+    tx.query = vi.fn(async (sql, params) => {
+      inTransaction.push([sql, params]);
+      if (sql.startsWith('UPDATE oidc_providers')) return { rows: [{ id: PROVIDER, slug: 'corp' }] };
+      return { rows: [], rowCount: sql.startsWith('DELETE') ? 2 : 1 };
+    });
+    // An enabled provider, and an identity at it for the admin, so password sign-in can go off.
+    query.mockImplementation(async sql => {
+      if (sql.includes('COUNT(*)')) return { rows: [{ count: '1' }] };
+      if (sql.startsWith('SELECT allow_insecure FROM oidc_providers')) return { rows: [{ allow_insecure: false }] };
+      if (sql.includes("key = 'internal_auth_disabled'")) return { rows: [{ value: 'false' }] };
+      return { rows: [{ username: 'maria' }] };
+    });
+  });
+
+  it('password sign-in turned off: every token not confirmed through single sign-on', async () => {
+    expect((await patch({ internal_auth_disabled: true })).status).toBe(200);
+    expect(firstWords()).toEqual(['INSERT INTO system_settings', 'DELETE FROM api_tokens']);
+    expect(inTransaction[0][1]).toEqual(['true']);
+    expect(inTransaction[1][1]).toEqual([['oidc']]);
+    expect(console.log).toHaveBeenCalledWith('[admin] admin set internal_auth_disabled=true, and deleted 2 API tokens');
+  });
+
+  it('two-factor required: tokens confirmed with only a password', async () => {
+    expect((await patch({ mfa_enforcement: 'required' })).status).toBe(200);
+    expect(firstWords()).toEqual(['INSERT INTO system_settings', 'DELETE FROM api_tokens']);
+    expect(inTransaction[1][1]).toEqual([['totp', 'oidc']]);
+    expect(console.log).toHaveBeenCalledWith('[admin] admin set mfa_enforcement=required, and deleted 2 API tokens');
+  });
+
+  it('turning either one off deletes nothing', async () => {
+    expect((await patch({ internal_auth_disabled: false, mfa_enforcement: 'off' })).status).toBe(200);
+    expect(firstWords()).toEqual(['INSERT INTO system_settings', 'INSERT INTO system_settings']);
+    expect(console.log).toHaveBeenCalledWith('[admin] admin set internal_auth_disabled=false');
+    expect(console.log).toHaveBeenCalledWith('[admin] admin set mfa_enforcement=off');
+  });
+
+  it('a refused change deletes nothing', async () => {
+    query.mockImplementation(async sql => (sql.includes('COUNT(*)') ? { rows: [{ count: '0' }] } : { rows: [] }));
+    expect((await patch({ internal_auth_disabled: true })).status).toBe(400);
+    expect((await patch({ mfa_enforcement: 'sometimes' })).status).toBe(400);
+    expect(inTransaction).toEqual([]);
+  });
+
+  it("an admin turning off a user's two-factor: all of that user's tokens", async () => {
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await disableUserTotp({ params: { id: USER }, session: { userId: 'admin-1', username: 'admin' }, ip: '203.0.113.7' }, res);
+    expect(inTransaction).toEqual([
+      ['UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1', [USER]],
+      ['DELETE FROM api_tokens WHERE user_id = $1', [USER]],
+    ]);
+    expect(console.log).toHaveBeenCalledWith(`[admin] admin disabled 2FA for user maria (${USER}), and deleted 2 API tokens`);
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  describe('an SSO provider turned off', () => {
+    const update = body => fetch(`${base}/api/admin/oidc/${PROVIDER}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    it('takes the tokens confirmed through it along', async () => {
+      expect((await update({ enabled: false })).status).toBe(200);
+      expect(firstWords()).toEqual(['UPDATE oidc_providers SET', 'DELETE FROM api_tokens']);
+      expect(inTransaction[1]).toEqual(['DELETE FROM api_tokens WHERE oidc_provider_id = $1', [PROVIDER]]);
+      expect(console.log).toHaveBeenCalledWith('[admin] admin turned off SSO provider corp, and deleted 2 API tokens');
+    });
+
+    it('leaves them while it stays on, through any other change', async () => {
+      expect((await update({ enabled: true })).status).toBe(200);
+      expect((await update({ name: 'Corp' })).status).toBe(200);
+      expect(firstWords()).toEqual(['UPDATE oidc_providers SET', 'UPDATE oidc_providers SET']);
+    });
+
+    it('deletes nothing for a provider that is not there', async () => {
+      tx.query = vi.fn(async (sql, params) => { inTransaction.push([sql, params]); return { rows: [] }; });
+      expect((await update({ enabled: false })).status).toBe(404);
+      expect(firstWords()).toEqual(['UPDATE oidc_providers SET']);
+    });
   });
 });

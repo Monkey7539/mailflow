@@ -8,8 +8,8 @@ import { query, withTransaction } from './db.js';
 export const TOKEN_PREFIX = 'mfat_';
 const TOKEN_RE = /^mfat_[A-Za-z0-9_-]{43}$/;
 export const API_TOKEN_SCOPES = ['read', 'organize', 'draft'];
-// In days; null is no expiry.
-export const EXPIRY_CHOICES = [7, 30, 90, 365, null];
+// In days. Every token expires: there is no choice of none.
+export const EXPIRY_CHOICES = [7, 30, 90, 365];
 export const MAX_TOKENS_PER_USER = 20;
 const MAX_NAME_CHARS = 60;
 
@@ -57,7 +57,7 @@ export function normalizeTokenName(raw) {
 }
 
 export function expiryDate(days, now = Date.now()) {
-  return days === null ? null : new Date(now + days * 24 * 60 * 60 * 1000);
+  return new Date(now + days * 24 * 60 * 60 * 1000);
 }
 
 // req.ip comes from X-Forwarded-For as far as trust proxy reaches, so it is whatever a proxy (or a
@@ -130,7 +130,7 @@ const knownScopes = scopes => (Array.isArray(scopes) ? scopes.filter(s => API_TO
 export async function findTokenByHash(tokenHash) {
   const { rows: [row] } = await query(
     `SELECT t.id, t.user_id, t.name, t.scopes, t.created_at, t.expires_at,
-            (t.expires_at IS NOT NULL AND t.expires_at <= NOW()) AS expired, u.username
+            t.expires_at <= NOW() AS expired, u.username
        FROM api_tokens t JOIN users u ON u.id = t.user_id
       WHERE t.token_hash = $1`,
     [tokenHash]
@@ -143,14 +143,14 @@ export async function findTokenByHash(tokenHash) {
 export async function tokenStillValid(tokenId) {
   if (!(await apiTokensEnabled())) return false;
   const { rows } = await query(
-    'SELECT 1 FROM api_tokens WHERE id = $1 AND (expires_at IS NULL OR expires_at > NOW())',
+    'SELECT 1 FROM api_tokens WHERE id = $1 AND expires_at > NOW()',
     [tokenId]
   );
   return rows.length > 0;
 }
 
 const TOKEN_COLUMNS = `id, name, scopes, created_at, expires_at, last_used_at, last_used_ip,
-  (expires_at IS NOT NULL AND expires_at <= NOW()) AS expired`;
+  expires_at <= NOW() AS expired`;
 
 export function publicToken(row) {
   return {
@@ -180,8 +180,9 @@ export async function countTokens(userId) {
 }
 
 // Returns { token, apiToken } with the secret, which is never available again, or null when the
-// user already has MAX_TOKENS_PER_USER tokens.
-export async function createToken(userId, { name, scopes, expiresAt }) {
+// user already has MAX_TOKENS_PER_USER tokens. confirmedWith is what creating it was confirmed
+// with, and oidcProviderId the provider when that was single sign-on (apiTokenReauth.js).
+export async function createToken(userId, { name, scopes, expiresAt, confirmedWith, oidcProviderId = null }) {
   const token = generateToken();
   const row = await withTransaction(async client => {
     // One creation at a time per user, so two at once cannot both pass the limit.
@@ -192,10 +193,10 @@ export async function createToken(userId, { name, scopes, expiresAt }) {
     );
     if (count >= MAX_TOKENS_PER_USER) return null;
     const { rows: [inserted] } = await client.query(
-      `INSERT INTO api_tokens (user_id, name, token_hash, scopes, expires_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5)
+      `INSERT INTO api_tokens (user_id, name, token_hash, scopes, expires_at, confirmed_with, oidc_provider_id)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
        RETURNING ${TOKEN_COLUMNS}`,
-      [userId, name, hashToken(token), JSON.stringify(scopes), expiresAt]
+      [userId, name, hashToken(token), JSON.stringify(scopes), expiresAt, confirmedWith, oidcProviderId]
     );
     return inserted;
   });
@@ -210,3 +211,36 @@ export async function deleteToken(userId, tokenId) {
   );
   return row ? row.name : null;
 }
+
+// A change to the server's sign-in policy deletes the tokens it no longer allows (#617), by what
+// each was confirmed with when it was made. Deleting rather than suspending them means turning the
+// policy off again cannot bring them back. Each of these runs in the caller's transaction, so the
+// setting and the tokens it removes change together, and returns how many tokens it deleted.
+const POLICY_CONFIRMATIONS = {
+  // Password sign-in is off, so only the single sign-on provider vouches for anyone.
+  ssoOnly: ['oidc'],
+  // Two-factor required: a password alone no longer does. Single sign-on stays, as it does at
+  // sign-in, which leaves two-factor to the provider.
+  mfaRequired: ['totp', 'oidc'],
+};
+
+export async function revokeTokensForPolicy(client, policy) {
+  const allowed = POLICY_CONFIRMATIONS[policy];
+  if (!allowed) throw new Error(`No API token policy named ${policy}`);
+  // A token made before confirmations were recorded counts as confirmed with a password only.
+  const { rowCount } = await client.query(
+    "DELETE FROM api_tokens WHERE NOT (COALESCE(confirmed_with, 'password') = ANY($1::text[]))",
+    [allowed]
+  );
+  return rowCount;
+}
+
+// The tokens confirmed through a single sign-on provider that is being turned off. Deleting the
+// provider deletes them too, by the foreign key.
+export async function revokeProviderTokens(client, providerId) {
+  const { rowCount } = await client.query('DELETE FROM api_tokens WHERE oidc_provider_id = $1', [providerId]);
+  return rowCount;
+}
+
+// ", and deleted 3 API tokens" for the [admin] log line that reports the change, or nothing.
+export const revokedTokensNote = count => (count > 0 ? `, and deleted ${count} API token${count === 1 ? '' : 's'}` : '');

@@ -8,7 +8,9 @@ import { decrypt, encrypt } from '../services/encryption.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
 import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy, invalidateConnectionPolicyCache } from '../services/connectionPolicy.js';
-import { invalidateApiTokenSettingsCache } from '../services/apiTokens.js';
+import {
+  invalidateApiTokenSettingsCache, revokedTokensNote, revokeProviderTokens, revokeTokensForPolicy,
+} from '../services/apiTokens.js';
 import { reloadAuthSettings } from '../services/authLimiter.js';
 import { imapManager } from '../index.js';
 import { stopCardavUser } from '../services/carddavSync.js';
@@ -73,6 +75,8 @@ async function logAdminChange(req, eventType, target) {
   });
 }
 
+// Usually a recovery, for someone who has lost their authenticator, so their API tokens go too: they
+// may have gone with it, and the user makes new ones once they are back in (#617).
 export async function disableUserTotp(req, res) {
   const { id } = req.params;
   if (id === req.session.userId) {
@@ -80,8 +84,11 @@ export async function disableUserTotp(req, res) {
   }
   const target = await query('SELECT username FROM users WHERE id = $1', [id]);
   if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
-  await query('UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1', [id]);
-  console.log(`[admin] ${req.session.username} disabled 2FA for user ${target.rows[0].username} (${id})`);
+  const revoked = await withTransaction(async client => {
+    await client.query('UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1', [id]);
+    return (await client.query('DELETE FROM api_tokens WHERE user_id = $1', [id])).rowCount;
+  });
+  console.log(`[admin] ${req.session.username} disabled 2FA for user ${target.rows[0].username} (${id})${revokedTokensNote(revoked)}`);
   await logAdminChange(req, 'admin_totp_disable', { id, username: target.rows[0].username });
   res.json({ ok: true });
 }
@@ -298,13 +305,18 @@ router.patch('/settings', async (req, res) => {
         });
       }
     }
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at)
-       VALUES ('internal_auth_disabled', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [internal_auth_disabled ? 'true' : 'false']
-    );
-    console.log(`[admin] ${req.session.username} set internal_auth_disabled=${internal_auth_disabled}`);
+    // With password sign-in off, only the single sign-on provider vouches for anyone, so a token
+    // confirmed any other way goes with the change (#617).
+    const revoked = await withTransaction(async client => {
+      await client.query(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES ('internal_auth_disabled', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+        [internal_auth_disabled ? 'true' : 'false']
+      );
+      return internal_auth_disabled ? revokeTokensForPolicy(client, 'ssoOnly') : 0;
+    });
+    console.log(`[admin] ${req.session.username} set internal_auth_disabled=${internal_auth_disabled}${revokedTokensNote(revoked)}`);
   }
   if (auth_max_attempts != null) {
     const val = parseInt(auth_max_attempts);
@@ -348,12 +360,16 @@ router.patch('/settings', async (req, res) => {
     if (!['off', 'required'].includes(mfa_enforcement)) {
       return res.status(400).json({ error: 'mfa_enforcement must be "off" or "required"' });
     }
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('mfa_enforcement', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [mfa_enforcement]
-    );
-    console.log(`[admin] ${req.session.username} set mfa_enforcement=${mfa_enforcement}`);
+    // Once two-factor is required, a token confirmed with only a password goes (#617).
+    const revoked = await withTransaction(async client => {
+      await client.query(
+        `INSERT INTO system_settings (key, value, updated_at) VALUES ('mfa_enforcement', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+        [mfa_enforcement]
+      );
+      return mfa_enforcement === 'required' ? revokeTokensForPolicy(client, 'mfaRequired') : 0;
+    });
+    console.log(`[admin] ${req.session.username} set mfa_enforcement=${mfa_enforcement}${revokedTokensNote(revoked)}`);
   }
   if (mfa_device_trust != null) {
     if (!['never', '7d', '30d', 'permanent'].includes(mfa_device_trust)) {
@@ -784,46 +800,54 @@ router.patch('/oidc/:id', async (req, res) => {
     ? encrypt(client_secret)
     : undefined;
   try {
-    const result = await query(
-      `UPDATE oidc_providers SET
-        name = COALESCE($2, name),
-        slug = COALESCE($3, slug),
-        issuer_url = COALESCE($4, issuer_url),
-        client_id = COALESCE($5, client_id),
-        client_secret = COALESCE($6, client_secret),
-        scopes = COALESCE($7, scopes),
-        provisioning_mode = COALESCE($8, provisioning_mode),
-        allowed_domains = CASE WHEN $9::text IS DISTINCT FROM '__keep__' THEN $9::text ELSE allowed_domains END,
-        enabled = COALESCE($10, enabled),
-        require_email_verified = COALESCE($11, require_email_verified),
-        allow_insecure = COALESCE($12, allow_insecure),
-        admin_group_claim = CASE WHEN $13::text IS DISTINCT FROM '__keep__' THEN $13::text ELSE admin_group_claim END,
-        admin_group_value = CASE WHEN $14::text IS DISTINCT FROM '__keep__' THEN $14::text ELSE admin_group_value END,
-        rp_initiated_logout = COALESCE($15, rp_initiated_logout),
-        login_match_claim = COALESCE($16, login_match_claim),
-        updated_at = NOW()
-       WHERE id = $1
-       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim`,
-      [
-        id,
-        name?.trim() || null,
-        slug?.trim() || null,
-        issuer_url?.trim() || null,
-        client_id?.trim() || null,
-        secretUpdate || null,
-        scopes?.trim() || null,
-        provisioning_mode || null,
-        allowed_domains !== undefined ? (allowed_domains?.trim() || null) : '__keep__',
-        enabled !== undefined ? enabled : null,
-        require_email_verified !== undefined ? require_email_verified : null,
-        allow_insecure !== undefined ? allow_insecure : null,
-        admin_group_claim !== undefined ? (admin_group_claim?.trim() || null) : '__keep__',
-        admin_group_value !== undefined ? (admin_group_value?.trim() || null) : '__keep__',
-        rp_initiated_logout !== undefined ? rp_initiated_logout : null,
-        loginMatchClaimParam,
-      ]
-    );
+    // A provider turned off no longer vouches for anyone, so the API tokens confirmed through it go
+    // with it (#617). Deleting the provider deletes them by the foreign key.
+    let revoked = 0;
+    const result = await withTransaction(async client => {
+      const updated = await client.query(
+        `UPDATE oidc_providers SET
+          name = COALESCE($2, name),
+          slug = COALESCE($3, slug),
+          issuer_url = COALESCE($4, issuer_url),
+          client_id = COALESCE($5, client_id),
+          client_secret = COALESCE($6, client_secret),
+          scopes = COALESCE($7, scopes),
+          provisioning_mode = COALESCE($8, provisioning_mode),
+          allowed_domains = CASE WHEN $9::text IS DISTINCT FROM '__keep__' THEN $9::text ELSE allowed_domains END,
+          enabled = COALESCE($10, enabled),
+          require_email_verified = COALESCE($11, require_email_verified),
+          allow_insecure = COALESCE($12, allow_insecure),
+          admin_group_claim = CASE WHEN $13::text IS DISTINCT FROM '__keep__' THEN $13::text ELSE admin_group_claim END,
+          admin_group_value = CASE WHEN $14::text IS DISTINCT FROM '__keep__' THEN $14::text ELSE admin_group_value END,
+          rp_initiated_logout = COALESCE($15, rp_initiated_logout),
+          login_match_claim = COALESCE($16, login_match_claim),
+          updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim`,
+        [
+          id,
+          name?.trim() || null,
+          slug?.trim() || null,
+          issuer_url?.trim() || null,
+          client_id?.trim() || null,
+          secretUpdate || null,
+          scopes?.trim() || null,
+          provisioning_mode || null,
+          allowed_domains !== undefined ? (allowed_domains?.trim() || null) : '__keep__',
+          enabled !== undefined ? enabled : null,
+          require_email_verified !== undefined ? require_email_verified : null,
+          allow_insecure !== undefined ? allow_insecure : null,
+          admin_group_claim !== undefined ? (admin_group_claim?.trim() || null) : '__keep__',
+          admin_group_value !== undefined ? (admin_group_value?.trim() || null) : '__keep__',
+          rp_initiated_logout !== undefined ? rp_initiated_logout : null,
+          loginMatchClaimParam,
+        ]
+      );
+      if (updated.rows.length && enabled === false) revoked = await revokeProviderTokens(client, id);
+      return updated;
+    });
     if (!result.rows.length) return res.status(404).json({ error: 'Provider not found' });
+    if (revoked) console.log(`[admin] ${req.session.username} turned off SSO provider ${result.rows[0].slug}${revokedTokensNote(revoked)}`);
     res.json({ provider: result.rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'A provider with this slug already exists' });
