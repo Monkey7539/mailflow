@@ -1,5 +1,5 @@
 import { query } from '../services/db.js';
-import { draftMessageSql, folderRoles } from '../utils/mailUtils.js';
+import { draftMessageSql, folderRoles, isAllMailFolder, resolveArchiveFolder } from '../utils/mailUtils.js';
 import { providerProfile } from '../services/imapManager.js';
 import { isValidFolderName, areValidUUIDs, gatherSnoozeConversation } from '../routes/mail.js';
 import { isUuid } from '../utils/uuid.js';
@@ -24,6 +24,8 @@ export async function apiTokenGuards(req, res, next) {
 }
 
 const DRAFT_SOURCE_ERROR = 'API tokens cannot move or archive drafts';
+export const ALL_MAIL_ARCHIVE_ERROR = "API tokens cannot archive into Gmail's All Mail, where the mail drops out of MailFlow. "
+  + "Create a Gmail label named Archive, or choose an archive folder in the account's settings.";
 const PLAIN_TEXT_ERROR = 'API token drafts must be plain text';
 
 // What the bulk routes accept: 1 to 500 UUID strings. Anything else is left to the route's own
@@ -36,7 +38,7 @@ const acceptedIds = ids => Array.isArray(ids) && ids.length >= 1 && ids.length <
 // Gmail an archive into All Mail deletes MailFlow's rows.
 async function sourceAccounts(userId, ids) {
   const { rows } = await query(
-    `SELECT a.id, a.imap_host, a.oauth_provider, bool_or(${draftMessageSql('m')}) AS has_draft
+    `SELECT a.id, a.imap_host, a.oauth_provider, a.folder_mappings, bool_or(${draftMessageSql('m')}) AS has_draft
        FROM messages m JOIN email_accounts a ON a.id = m.account_id
       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1
       GROUP BY a.id`,
@@ -45,11 +47,21 @@ async function sourceAccounts(userId, ids) {
   return rows;
 }
 
+// An archive goes to the folder resolveArchiveFolder picks for each account, as in the route. On
+// Gmail without an archive label or mapping, that is All Mail: Gmail only drops the Inbox label,
+// but MailFlow does not sync All Mail, so the mail leaves every view and only Gmail can bring it
+// back. The archive button still does that; a token may not.
 async function bulkArchive(req) {
   const { ids } = req.body ?? {};
   if (!acceptedIds(ids)) return null;
   const accounts = await sourceAccounts(req.session.userId, ids);
   if (accounts.some(a => a.has_draft)) return { status: 403, error: DRAFT_SOURCE_ERROR };
+  for (const account of accounts) {
+    const destination = await resolveArchiveFolder(account.id, account.folder_mappings);
+    if (destination && await isAllMailFolder(account.id, destination)) {
+      return { status: 403, error: ALL_MAIL_ARCHIVE_ERROR };
+    }
+  }
   return null;
 }
 

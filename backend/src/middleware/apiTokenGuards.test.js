@@ -16,19 +16,29 @@ const ID2 = 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2';
 const MOVE_ERROR = 'API tokens cannot move mail into Trash, Junk, Drafts, Snoozed or folders MailFlow does not sync';
 const DRAFT_SOURCE_ERROR = 'API tokens cannot move or archive drafts';
 const PLAIN_TEXT_ERROR = 'API token drafts must be plain text';
+const ALL_MAIL_ERROR = "API tokens cannot archive into Gmail's All Mail, where the mail drops out of MailFlow. "
+  + "Create a Gmail label named Archive, or choose an archive folder in the account's settings.";
 
 // The database: which accounts the ids are in (and whether one is a draft, or one of `drafts` is
-// among them), each account's folders with the roles folderRoles reads, and the user's messages
-// for the snooze guard to look up and gather.
+// among them), each account's folders with the roles folderRoles reads, the folder each account's
+// archive query finds, and the user's messages for the snooze guard to look up and gather.
 let sources;
 let folders;
+let archives;
 let messages;
 let drafts;
 function database() {
   query.mockImplementation(async (sql, params) => {
     if (sql.includes('bool_or(')) {
-      return { rows: sources.map(s => ({ ...s, has_draft: s.has_draft || params[1].some(id => drafts.has(id)) })) };
+      return { rows: sources.map(s => ({ folder_mappings: null, ...s, has_draft: s.has_draft || params[1].some(id => drafts.has(id)) })) };
     }
+    // resolveArchiveFolder, a mapping it checks, and isAllMailFolder, in mailUtils.js.
+    if (sql.includes("special_use = '\\Archive'")) return { rows: archives[params[0]] ? [{ path: archives[params[0]] }] : [] };
+    if (sql.includes('AND no_select = false')) {
+      const folder = folders[params[0]]?.[params[1]];
+      return { rows: folder && !folder.no_select ? [{}] : [] };
+    }
+    if (sql.includes("AND special_use = '\\All'")) return { rows: folders[params[0]]?.[params[1]]?.special_use === '\\All' ? [{}] : [] };
     if (sql.startsWith('SELECT m.* FROM messages m')) {
       const msg = messages.find(m => m.id === params[0]);
       return { rows: msg && params[1] === USER ? [msg] : [] };
@@ -50,6 +60,7 @@ beforeEach(() => {
   query.mockReset();
   sources = [{ id: GENERIC, imap_host: 'mail.example.com', oauth_provider: null, has_draft: false }];
   folders = { [GENERIC]: { Archive: {}, Receipts: {} } };
+  archives = { [GENERIC]: 'Archive' };
   messages = [];
   drafts = new Set();
   database();
@@ -174,6 +185,42 @@ describe('bulk-archive with a token', () => {
       expect((await archive(body)).passed).toBe(true);
     }
     expect(query).not.toHaveBeenCalled();
+  });
+
+  describe('on Gmail', () => {
+    beforeEach(() => {
+      sources = [{ id: GMAIL, imap_host: 'imap.gmail.com', oauth_provider: null, has_draft: false }];
+      folders[GMAIL] = { '[Gmail]/All Mail': { special_use: '\\All' }, Archive: {} };
+      archives[GMAIL] = '[Gmail]/All Mail';
+    });
+
+    it('refuses an archive into All Mail, which MailFlow does not sync', async () => {
+      expect(await archive({ ids: [ID1] })).toMatchObject({ status: 403, body: { error: ALL_MAIL_ERROR } });
+    });
+
+    it('refuses it when the account maps its archive folder to All Mail', async () => {
+      archives[GMAIL] = 'Archive';
+      sources[0].folder_mappings = { archive: '[Gmail]/All Mail' };
+      expect(await archive({ ids: [ID1] })).toMatchObject({ status: 403, body: { error: ALL_MAIL_ERROR } });
+    });
+
+    it('archives into a label named Archive, or the folder the account maps', async () => {
+      archives[GMAIL] = 'Archive';
+      expect((await archive({ ids: [ID1] })).passed).toBe(true);
+      archives[GMAIL] = '[Gmail]/All Mail';
+      sources[0].folder_mappings = { archive: 'Archive' };
+      expect((await archive({ ids: [ID1] })).passed).toBe(true);
+    });
+
+    it('refuses when any account the messages are in would archive into All Mail', async () => {
+      sources.unshift({ id: GENERIC, imap_host: 'mail.example.com', oauth_provider: null, has_draft: false });
+      expect(await archive({ ids: [ID1, ID2] })).toMatchObject({ status: 403, body: { error: ALL_MAIL_ERROR } });
+    });
+  });
+
+  it('leaves an account with no archive folder to the route, which reports it', async () => {
+    archives = {};
+    expect((await archive({ ids: [ID1] })).passed).toBe(true);
   });
 });
 
