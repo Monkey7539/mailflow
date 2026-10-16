@@ -88,10 +88,10 @@ const token = (fields) => ({
 });
 function freshServer() {
   return {
-    enabled: true, reauth: 'password', maxTokens: 20, expiryChoices: [7, 30, 90, 365, null], tokens: [],
+    enabled: true, reauth: 'password', oidc: null, maxTokens: 20, expiryChoices: [7, 30, 90, 365], tokens: [],
     listError: null, events: [],
     create: (body) => {
-      const apiToken = token({ name: body.name, scopes: body.scopes, createdAt: '2026-10-14T12:00:00Z', expiresAt: null });
+      const apiToken = token({ name: body.name, scopes: body.scopes, createdAt: '2026-10-14T12:00:00Z', expiresAt: '2027-01-12T12:00:00Z' });
       server.tokens = [apiToken, ...server.tokens];
       return json({ token: SECRET, apiToken }, 201);
     },
@@ -113,8 +113,8 @@ globalThis.fetch = async (url, init = {}) => {
   CALLS.push({ path, method, body });
   if (path === '/api/api-tokens' && method === 'GET') {
     if (server.listError) return json({ error: server.listError }, 500);
-    const { enabled, reauth, maxTokens, expiryChoices, tokens } = server;
-    return json({ enabled, reauth, maxTokens, expiryChoices, tokens });
+    const { enabled, reauth, oidc, maxTokens, expiryChoices, tokens } = server;
+    return json({ enabled, reauth, ...(oidc ? { oidc } : {}), maxTokens, expiryChoices, tokens });
   }
   if (path === '/api/api-tokens' && method === 'POST') return server.create(body);
   const one = path.match(/^\/api\/api-tokens\/([^/?]+)$/);
@@ -132,7 +132,7 @@ globalThis.fetch = async (url, init = {}) => {
 const { default: React, act } = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
-const { formatDateTime, formatDay } = await import('../utils/formatDate.js');
+const { formatDateTime, formatDay, formatTime } = await import('../utils/formatDate.js');
 const { default: ApiTokensSection } = await import('./ApiTokensSection.jsx');
 const { default: AdminPanel } = await import('./AdminPanel.jsx');
 
@@ -169,6 +169,7 @@ const codeInput = () => host.querySelector('input[autocomplete="one-time-code"]'
 const passwordInput = () => host.querySelector('input[autocomplete="current-password"]');
 const expirySelect = () => host.querySelector('select');
 const createButton = () => button('admin.apiTokens.createButton');
+const links = () => [...host.querySelectorAll('a')];
 const row = (name) => [...host.querySelectorAll('li')].find(li => li.textContent.includes(name));
 const posts = () => CALLS.filter(c => c.method === 'POST');
 const deletes = () => CALLS.filter(c => c.method === 'DELETE');
@@ -384,6 +385,8 @@ describe('API tokens card', () => {
     }
     assert.equal(scopeBox('read').checked, true, 'Read is the starting choice');
     assert.equal(scopeBox('read').disabled, false);
+    // Every token has Read, so the warning is always there, and read out with the checkbox.
+    assert.deepEqual(description(scopeBox('read')), ['admin.apiTokens.readWarning']);
     await click(scopeBox('read'));
     assert.equal(scopeBox('read').checked, false, 'Read on its own can be unticked');
 
@@ -391,6 +394,7 @@ describe('API tokens card', () => {
     assert.equal(scopeBox('read').checked, true, 'Draft ticks Read');
     assert.equal(scopeBox('read').disabled, true, 'and locks it');
     assert.ok(text().includes('admin.apiTokens.readLocked'), 'saying why');
+    assert.deepEqual(description(scopeBox('read')), ['admin.apiTokens.readLocked', 'admin.apiTokens.readWarning']);
     await click(scopeBox('read'));
     assert.equal(scopeBox('read').checked, true, 'Read cannot be unticked while Draft is ticked');
 
@@ -443,17 +447,58 @@ describe('API tokens card', () => {
     assert.equal('totpCode' in posts()[0].body, false);
   });
 
-  test('with nothing to confirm with, there is no field, and the shorter expiries are explained', async () => {
-    server.reauth = 'none';
+  test('an account that signs in through SSO confirms with its provider, then has nothing to type', async () => {
+    server.reauth = 'oidc';
     server.expiryChoices = [7, 30];
+    server.oidc = { providers: [{ slug: 'corp', name: 'Corp SSO' }, { slug: 'backup-idp', name: 'Backup' }], confirmedUntil: null };
     await mount();
     await openForm();
     assertNone(codeInput());
     assertNone(passwordInput());
-    assert.ok(text().includes('admin.apiTokens.reauthNoneHint'));
+    // One button per provider, through the provider and back to this card.
+    assert.deepEqual(links().map(a => [a.textContent, a.getAttribute('href')]), [
+      ['admin.apiTokens.reauthOidcButton {"provider":"Corp SSO"}', '/auth/oidc/corp/start?action=reauth'],
+      ['admin.apiTokens.reauthOidcButton {"provider":"Backup"}', '/auth/oidc/backup-idp/start?action=reauth'],
+    ]);
+    assert.deepEqual(description(links()[0]), ['admin.apiTokens.reauthOidcHint']);
+    assert.equal(createButton().disabled, true, 'nothing is created before the provider confirms');
+    await act(async () => { root.unmount(); });
+
+    // Back from the provider: the sign-in counts for a few minutes.
+    server.oidc = { ...server.oidc, confirmedUntil: '2026-10-16T14:40:00Z' };
+    await mount();
+    await openForm();
+    assert.deepEqual(links(), []);
+    assert.ok(text().includes(`admin.apiTokens.reauthOidcDone {"time":"${formatTime('2026-10-16T14:40:00Z')}"}`));
+    assert.equal(expirySelect().value, '30');
     await click(createButton());
     await until(() => posts().length === 1, 'the create request');
     assert.deepEqual(posts()[0].body, { name: 'MCP server', scopes: ['read'], expiresInDays: 30 });
+  });
+
+  test('an account with no SSO identity to confirm with is told so, and cannot create', async () => {
+    server.reauth = 'oidc';
+    server.expiryChoices = [7, 30];
+    server.oidc = { providers: [], confirmedUntil: null };
+    await mount();
+    await openForm();
+    assert.ok(textBlock('admin.apiTokens.reauthOidcNoProvider'));
+    assert.deepEqual(links(), []);
+    assert.equal(createButton().disabled, true);
+  });
+
+  test('when two-factor is required and the user has no authenticator, they are sent to set one up', async () => {
+    server.reauth = 'totpSetup';
+    server.tokens = [token({ name: 'Old script' })];
+    await mount({ user: { id: 'u1', totpEnabled: false } });
+    assert.ok(textBlock('admin.apiTokens.totpSetupNotice'));
+    assertNone(button('admin.apiTokens.newToken'), 'no form that could only be refused');
+    assert.ok(buttonIn(row('Old script'), 'admin.apiTokens.revokeButton'), 'a token made before can still be revoked');
+
+    server.reauth = 'totp';
+    await act(async () => { useStore.setState({ user: { id: 'u1', totpEnabled: true } }); });
+    await until(() => button('admin.apiTokens.newToken'), 'New token once two-factor is on');
+    assertNone(textBlock('admin.apiTokens.totpSetupNotice'));
   });
 
   test('turning two-factor on in the card above switches the confirmation to a code', async () => {
@@ -467,18 +512,18 @@ describe('API tokens card', () => {
     assertNone(passwordInput());
   });
 
-  test('the expiry choices are the server\'s, 90 days by default', async () => {
+  test('the expiry choices are the server\'s, 90 days by default, sent as a number', async () => {
     await mount();
     await openForm();
     assert.deepEqual([...expirySelect().options].map(o => [o.value, o.textContent]), [
-      ['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['none', 'admin.apiTokens.noExpiry'],
+      ['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'],
     ]);
     assert.equal(expirySelect().value, '90');
-    await choose(expirySelect(), 'none');
+    await choose(expirySelect(), '365');
     await type(passwordInput(), 'correct horse');
     await click(createButton());
     await until(() => posts().length === 1, 'the create request');
-    assert.equal(posts()[0].body.expiresInDays, null, 'no expiry is sent as null');
+    assert.equal(posts()[0].body.expiresInDays, 365);
   });
 
   test('fewer expiry choices are followed too: 30 days by default, else the first', async () => {
@@ -625,7 +670,7 @@ describe('API tokens card', () => {
   test('rows show scopes, dates and last use, and a full list says why there is no New token', async () => {
     server.maxTokens = 3;
     server.tokens = [
-      token({ name: 'Reader bot', scopes: ['read', 'draft'], expiresAt: null }),
+      token({ name: 'Reader bot', scopes: ['read', 'draft'], expiresAt: '2026-12-30T08:00:00Z' }),
       token({ name: 'Expired job', expired: true, expiresAt: '2026-10-08T08:00:00Z', lastUsedAt: '2026-10-07T21:15:00Z', lastUsedIp: '203.0.113.7' }),
       token({ name: 'Proxy job', expiresAt: '2027-01-14T08:00:00Z', lastUsedAt: '2026-10-14T09:30:00Z', lastUsedIp: null }),
     ];
@@ -634,7 +679,7 @@ describe('API tokens card', () => {
     assert.ok(reader.includes('admin.apiTokens.scopeReadLabel') && reader.includes('admin.apiTokens.scopeDraftLabel'));
     assert.ok(!reader.includes('admin.apiTokens.scopeOrganizeLabel'));
     assert.ok(reader.includes(`admin.apiTokens.createdAt {"date":"${formatDay(CREATED)}"}`));
-    assert.ok(reader.includes('admin.apiTokens.noExpiry'));
+    assert.ok(reader.includes(`admin.apiTokens.expiresAt {"date":"${formatDay('2026-12-30T08:00:00Z')}"}`));
     assert.ok(reader.includes('admin.apiTokens.neverUsed'));
     const expired = row('Expired job').textContent;
     assert.ok(expired.includes('admin.apiTokens.expired'));
@@ -653,7 +698,7 @@ describe('API tokens card', () => {
   // The card loads its list on mount and again when two-factor changes, after a refusal and after
   // the switch, so two loads can be out at once.
   for (const [what, staleAnswer] of [
-    ['a slow answer', () => json({ enabled: true, reauth: 'password', maxTokens: 20, expiryChoices: [7, 30, 90, 365, null], tokens: [] })],
+    ['a slow answer', () => json({ enabled: true, reauth: 'password', maxTokens: 20, expiryChoices: [7, 30, 90, 365], tokens: [] })],
     ['a slow failure', () => json({ error: 'The database is not answering' }, 500)],
   ]) {
     test(`only the newest list load counts: ${what} that a newer load overtook is dropped`, async () => {

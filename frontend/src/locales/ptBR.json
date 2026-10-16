@@ -1249,7 +1249,7 @@
       "allowNonstandardPorts": "Permitir portas não padrão",
       "allowNonstandardPortsDesc": "Permite qualquer porta IMAP ou SMTP, não apenas 143/993 (IMAP) e 465/587 (SMTP). Necessário para servidores como o protonmail-bridge, que usam portas não padrão.",
       "mfaEnforcementTitle": "Exigência de MFA",
-      "mfaEnforcementDesc": "Exigir que todos os usuários verifiquem com um segundo fator ao entrar.",
+      "mfaEnforcementDesc": "Exigir que todos os usuários verifiquem com um segundo fator ao entrar. Exigi-la exclui os tokens de API confirmados só com senha.",
       "mfaEnforcementOff": "Opcional",
       "mfaEnforcementRequired": "Obrigatório",
       "mfaDeviceTrustTitle": "Duração da confiança no dispositivo",
@@ -1282,11 +1282,14 @@
       "scopeDraftLabel": "Rascunhos",
       "scopeDraftDesc": "Salvar novos rascunhos para você revisar e enviar.",
       "readLocked": "Organização e Rascunhos precisam de Leitura para encontrar mensagens, então Leitura continua marcada.",
+      "readWarning": "Leitura vê cada mensagem por inteiro, inclusive links de redefinição de senha e códigos de acesso de outros serviços. Só dê um token a ferramentas em que você confia.",
       "expiryLabel": "Expira após",
-      "noExpiry": "Sem expiração",
       "totpLabel": "Confirme com o código do seu aplicativo autenticador",
       "passwordLabel": "Confirme com sua senha",
-      "reauthNoneHint": "Não há senha nem código de autenticação para confirmar isso, então o token precisa expirar.",
+      "reauthOidcHint": "Confirme primeiro pelo SSO. Um login vale por 10 minutos, e um token confirmado assim dura no máximo 30 dias.",
+      "reauthOidcButton": "Confirmar com {{provider}}",
+      "reauthOidcDone": "Confirmado pelo SSO até {{time}}.",
+      "reauthOidcNoProvider": "Criar um token exige um login recente pelo SSO, e sua conta não tem nenhuma identidade SSO para entrar. Vincule uma primeiro em Contas SSO vinculadas, nesta página.",
       "createButton": "Criar token",
       "creating": "Criando…",
       "createdTitle": "Token “{{name}}” criado",
@@ -1295,6 +1298,7 @@
       "done": "Concluído",
       "listEmpty": "Você não tem tokens de API.",
       "maxReached": "Você tem {{max}} tokens, o máximo permitido. Revogue um para criar outro.",
+      "totpSetupNotice": "Este servidor exige autenticação em dois fatores. Configure um aplicativo autenticador acima para criar tokens de API.",
       "createdAt": "Criado em {{date}}",
       "expiresAt": "Expira em {{date}}",
       "expired": "Expirado",
@@ -1366,7 +1370,7 @@
       "deleteConfirmBody": "Esta conta de usuário será excluída permanentemente. Isso não pode ser desfeito.",
       "deleteConfirmLabel": "Excluir usuário",
       "disable2faConfirmTitle": "Desativar o 2FA de \"{{username}}\"?",
-      "disable2faConfirmBody": "Isso removerá a exigência do aplicativo autenticador. O usuário poderá reativá-lo por conta própria.",
+      "disable2faConfirmBody": "Isso removerá a exigência do aplicativo autenticador. O usuário poderá reativá-lo por conta própria. Os tokens de API desse usuário também são excluídos.",
       "disable2faConfirmLabel": "Desativar 2FA",
       "lastSeen": "Último acesso {{when}}",
       "neverSeen": "Nunca acessou",
@@ -1535,7 +1539,7 @@
       "passwordLoginEnabledDesc": "Os usuários podem entrar com nome de usuário e senha",
       "passwordLoginDisabledDesc": "Os usuários devem entrar via SSO",
       "passwordLoginDisableTitle": "Desativar o login com senha?",
-      "passwordLoginDisableMsg": "Os usuários só poderão entrar via SSO. Se o seu provedor SSO ficar indisponível, será necessário acesso direto ao banco de dados para reativar o login com senha.",
+      "passwordLoginDisableMsg": "Os usuários só poderão entrar via SSO. Se o seu provedor SSO ficar indisponível, será necessário acesso direto ao banco de dados para reativar o login com senha. Os tokens de API que não foram confirmados pelo SSO são excluídos.",
       "passwordLoginDisableConfirm": "Desativar login com senha",
       "empty": "Nenhum provedor SSO configurado ainda.",
       "addProvider": "+ Adicionar provedor SSO",
@@ -1707,6 +1711,10 @@
     "ssoLinked": {
       "title": "Identidade SSO vinculada",
       "body": "Sua conta agora está vinculada ao provedor SSO."
+    },
+    "ssoReauth": {
+      "title": "Confirmado pelo SSO",
+      "body": "Você pode criar um token de API nos próximos 10 minutos."
     },
     "ssoError": {
       "title": "Erro de SSO"

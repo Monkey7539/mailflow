@@ -1249,7 +1249,7 @@
       "allowNonstandardPorts": "允许非标准端口",
       "allowNonstandardPortsDesc": "允许任意 IMAP 或 SMTP 端口，而不仅限于 143/993（IMAP）和 465/587（SMTP）。protonmail-bridge 等使用非标准端口的服务器需要此选项。",
       "mfaEnforcementTitle": "MFA强制要求",
-      "mfaEnforcementDesc": "要求所有用户登录时使用第二因素验证。",
+      "mfaEnforcementDesc": "要求所有用户登录时使用第二因素验证。设为必需后，仅通过密码确认的 API 令牌将被删除。",
       "mfaEnforcementOff": "可选",
       "mfaEnforcementRequired": "必需",
       "mfaDeviceTrustTitle": "设备信任时长",
@@ -1282,11 +1282,14 @@
       "scopeDraftLabel": "草稿",
       "scopeDraftDesc": "保存新草稿，由您检查后自行发送。",
       "readLocked": "整理和草稿需要读取权限来查找邮件，因此读取会保持开启。",
+      "readWarning": "“读取”可以看到每封邮件的全部内容，包括其他服务发来的密码重置链接和登录验证码。请只把令牌交给您信任的工具。",
       "expiryLabel": "有效期",
-      "noExpiry": "永不过期",
       "totpLabel": "使用身份验证器应用中的验证码确认",
       "passwordLabel": "使用您的密码确认",
-      "reauthNoneHint": "没有可用于确认的密码或验证码，因此令牌必须设置有效期。",
+      "reauthOidcHint": "请先通过 SSO 确认。一次登录在 10 分钟内有效，以这种方式确认的令牌最长有效 30 天。",
+      "reauthOidcButton": "通过 {{provider}} 确认",
+      "reauthOidcDone": "已通过 SSO 确认，有效至 {{time}}。",
+      "reauthOidcNoProvider": "创建令牌需要最近通过 SSO 登录，但您的账户没有可用于登录的 SSO 身份。请先在此页面的“已绑定的单点登录账户”中绑定一个。",
       "createButton": "创建令牌",
       "creating": "正在创建…",
       "createdTitle": "已创建令牌“{{name}}”",
@@ -1295,6 +1298,7 @@
       "done": "完成",
       "listEmpty": "您还没有 API 令牌。",
       "maxReached": "您已有 {{max}} 个令牌，已达上限。撤销一个后才能创建新令牌。",
+      "totpSetupNotice": "此服务器要求双重身份验证。请先在上方设置身份验证器应用，才能创建 API 令牌。",
       "createdAt": "创建于 {{date}}",
       "expiresAt": "{{date}} 过期",
       "expired": "已过期",
@@ -1366,7 +1370,7 @@
       "deleteConfirmBody": "此用户账户将被永久删除，操作无法撤销。",
       "deleteConfirmLabel": "删除用户",
       "disable2faConfirmTitle": "为「{{username}}」停用双重验证？",
-      "disable2faConfirmBody": "此操作将解除其身份验证器应用要求。该用户可自行重新启用。",
+      "disable2faConfirmBody": "此操作将解除其身份验证器应用要求。该用户可自行重新启用。该用户的 API 令牌也会被删除。",
       "disable2faConfirmLabel": "停用双重验证",
       "lastSeen": "最近访问：{{when}}",
       "neverSeen": "从未登录",
@@ -1582,7 +1586,7 @@
       "adminGroupValueDesc": "授予管理员访问权限的组名。该组中的用户在每次 SSO 登录时成为管理员；不在该组中的用户将失去管理员权限。",
       "loginMatchClaim": "匹配现有账户所用声明",
       "loginMatchClaimDesc": "首次将 SSO 登录关联到现有账户时（预配模式“仅登录现有账户”），用于与每个 MailFlow 账户用户名进行匹配的 OIDC 声明（claim）。默认为 email。对于用户名不是电子邮件地址的身份提供商，可设置为 preferred_username、upn 等——但仅当您的提供商保证该声明唯一且用户不可自行修改时。",
-      "passwordLoginDisableMsg": "用户将只能通过 SSO 登录。如果 SSO 提供商不可用，则需要直接访问数据库才能重新启用密码登录。",
+      "passwordLoginDisableMsg": "用户将只能通过 SSO 登录。如果 SSO 提供商不可用，则需要直接访问数据库才能重新启用密码登录。未通过 SSO 确认的 API 令牌将被删除。",
       "passwordLoginDisableTitle": "是否禁用密码登录？",
       "passwordLoginDisabled": "密码登录已禁用",
       "passwordLoginTitle": "密码登录",
@@ -1707,6 +1711,10 @@
     "ssoLinked": {
       "title": "SSO 身份已绑定",
       "body": "您的账户已成功绑定至该 SSO 服务商。"
+    },
+    "ssoReauth": {
+      "title": "已通过 SSO 确认",
+      "body": "接下来的 10 分钟内，您可以创建 API 令牌。"
     },
     "ssoError": {
       "title": "SSO 错误"

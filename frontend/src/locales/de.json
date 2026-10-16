@@ -1174,7 +1174,7 @@
       "allowNonstandardPorts": "Nicht-standardmäßige Ports erlauben",
       "allowNonstandardPortsDesc": "Erlaubt beliebige IMAP- oder SMTP-Ports, nicht nur 143/993 (IMAP) und 465/587 (SMTP). Erforderlich für Server wie protonmail-bridge, die andere Ports verwenden.",
       "mfaEnforcementTitle": "MFA-Durchsetzung",
-      "mfaEnforcementDesc": "Alle Benutzer müssen sich beim Anmelden mit einem zweiten Faktor verifizieren.",
+      "mfaEnforcementDesc": "Alle Benutzer müssen sich beim Anmelden mit einem zweiten Faktor verifizieren. Beim Aktivieren werden API-Tokens gelöscht, die nur mit einem Passwort bestätigt wurden.",
       "mfaEnforcementOff": "Optional",
       "mfaEnforcementRequired": "Pflicht",
       "mfaDeviceTrustTitle": "Gerätevertrauen",
@@ -1207,11 +1207,14 @@
       "scopeDraftLabel": "Entwürfe",
       "scopeDraftDesc": "Neue Entwürfe speichern, die du selbst prüfst und sendest.",
       "readLocked": "Organisieren und Entwürfe brauchen Lesen, um Nachrichten zu finden, daher bleibt Lesen an.",
+      "readWarning": "Lesen sieht jede Nachricht vollständig, auch Links zum Zurücksetzen von Passwörtern und Anmeldecodes anderer Dienste. Gib ein Token nur Tools, denen du vertraust.",
       "expiryLabel": "Läuft ab nach",
-      "noExpiry": "Kein Ablauf",
       "totpLabel": "Mit dem Code aus deiner Authenticator-App bestätigen",
       "passwordLabel": "Mit deinem Passwort bestätigen",
-      "reauthNoneHint": "Es gibt kein Passwort und keinen Authenticator-Code, um das zu bestätigen, daher muss das Token ablaufen.",
+      "reauthOidcHint": "Bestätige dich zuerst per SSO. Eine Anmeldung gilt 10 Minuten, und ein so bestätigtes Token gilt höchstens 30 Tage.",
+      "reauthOidcButton": "Mit {{provider}} bestätigen",
+      "reauthOidcDone": "Per SSO bestätigt bis {{time}}.",
+      "reauthOidcNoProvider": "Für ein Token brauchst du eine aktuelle Anmeldung per SSO, aber mit deinem Konto ist keine SSO-Identität verknüpft, mit der du dich anmelden kannst. Verknüpfe zuerst eine unter „Verknüpfte SSO-Konten“ auf dieser Seite.",
       "createButton": "Token erstellen",
       "creating": "Wird erstellt…",
       "createdTitle": "Token „{{name}}“ erstellt",
@@ -1220,6 +1223,7 @@
       "done": "Fertig",
       "listEmpty": "Du hast keine API-Tokens.",
       "maxReached": "Du hast {{max}} Tokens, mehr sind nicht erlaubt. Widerrufe eines, um ein neues zu erstellen.",
+      "totpSetupNotice": "Dieser Server verlangt Zwei-Faktor-Authentifizierung. Richte oben eine Authenticator-App ein, um API-Tokens zu erstellen.",
       "createdAt": "Erstellt am {{date}}",
       "expiresAt": "Läuft am {{date}} ab",
       "expired": "Abgelaufen",
@@ -1291,7 +1295,7 @@
       "deleteConfirmBody": "Dieses Benutzerkonto wird dauerhaft gelöscht. Dies kann nicht rückgängig gemacht werden.",
       "deleteConfirmLabel": "Benutzer löschen",
       "disable2faConfirmTitle": "2FA für „{{username}}” deaktivieren?",
-      "disable2faConfirmBody": "Dies entfernt die Anforderung der Authenticator-App. Der Benutzer kann sie selbst wieder aktivieren.",
+      "disable2faConfirmBody": "Dies entfernt die Anforderung der Authenticator-App. Der Benutzer kann sie selbst wieder aktivieren. Auch die API-Tokens des Benutzers werden gelöscht.",
       "disable2faConfirmLabel": "2FA deaktivieren",
       "lastSeen": "Zuletzt aktiv {{when}}",
       "neverSeen": "Nie angemeldet",
@@ -1460,7 +1464,7 @@
       "passwordLoginEnabledDesc": "Benutzer können sich mit Benutzername und Passwort anmelden",
       "passwordLoginDisabledDesc": "Benutzer müssen sich über SSO anmelden",
       "passwordLoginDisableTitle": "Passwort-Login deaktivieren?",
-      "passwordLoginDisableMsg": "Benutzer können sich nur noch über SSO anmelden. Falls der SSO-Anbieter nicht verfügbar ist, ist direkter Datenbankzugriff erforderlich, um den Passwort-Login wieder zu aktivieren.",
+      "passwordLoginDisableMsg": "Benutzer können sich nur noch über SSO anmelden. Falls der SSO-Anbieter nicht verfügbar ist, ist direkter Datenbankzugriff erforderlich, um den Passwort-Login wieder zu aktivieren. API-Tokens, die nicht per SSO bestätigt wurden, werden gelöscht.",
       "passwordLoginDisableConfirm": "Passwort-Login deaktivieren",
       "empty": "Noch keine SSO-Anbieter konfiguriert.",
       "addProvider": "+ SSO-Anbieter hinzufügen",
@@ -1632,6 +1636,10 @@
     "ssoLinked": {
       "title": "SSO-Identität verknüpft",
       "body": "Dein Konto ist jetzt mit dem SSO-Anbieter verknüpft."
+    },
+    "ssoReauth": {
+      "title": "Per SSO bestätigt",
+      "body": "Du kannst in den nächsten 10 Minuten ein API-Token erstellen."
     },
     "ssoError": {
       "title": "SSO-Fehler"

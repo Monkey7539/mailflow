@@ -716,6 +716,11 @@ export default function MailApp() {
       window.history.replaceState({}, '', '/');
       if (oidcSuccess === 'linked') {
         addNotification({ type: 'info', title: t('admin.ssoLinked.title'), body: t('admin.ssoLinked.body') });
+      } else if (oidcSuccess === 'reauth') {
+        // Back from confirming for a new API token: open the card that asked for it.
+        addNotification({ type: 'info', title: t('admin.ssoReauth.title'), body: t('admin.ssoReauth.body') });
+        setAdminTab('security');
+        setShowAdmin(true);
       }
     } else if (oidcError) {
       window.history.replaceState({}, '', '/');

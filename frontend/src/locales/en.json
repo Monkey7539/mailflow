@@ -1249,7 +1249,7 @@
       "allowNonstandardPorts": "Allow non-standard ports",
       "allowNonstandardPortsDesc": "Allows any IMAP or SMTP port, not just 143/993 (IMAP) and 465/587 (SMTP). Required for servers like protonmail-bridge that use non-standard ports.",
       "mfaEnforcementTitle": "MFA enforcement",
-      "mfaEnforcementDesc": "Require all users to verify with a second factor when signing in.",
+      "mfaEnforcementDesc": "Require all users to verify with a second factor when signing in. Requiring it deletes API tokens that were confirmed with only a password.",
       "mfaEnforcementOff": "Optional",
       "mfaEnforcementRequired": "Required",
       "mfaDeviceTrustTitle": "Device trust duration",
@@ -1282,11 +1282,14 @@
       "scopeDraftLabel": "Draft",
       "scopeDraftDesc": "Save new drafts for you to review and send.",
       "readLocked": "Organize and Draft need Read to find messages, so Read stays on.",
+      "readWarning": "Read can see every message in full, including password-reset links and sign-in codes from other services. Only give a token to tools you trust.",
       "expiryLabel": "Expires after",
-      "noExpiry": "No expiry",
       "totpLabel": "Confirm with the code from your authenticator app",
       "passwordLabel": "Confirm with your password",
-      "reauthNoneHint": "There is no password or authenticator code to confirm this with, so the token has to expire.",
+      "reauthOidcHint": "Confirm with SSO first. A sign-in counts for 10 minutes, and a token confirmed this way lasts 30 days at most.",
+      "reauthOidcButton": "Confirm with {{provider}}",
+      "reauthOidcDone": "Confirmed with SSO until {{time}}.",
+      "reauthOidcNoProvider": "Creating a token needs a recent sign-in through SSO, and your account has no SSO identity to sign in with. Link one under Linked SSO accounts on this page first.",
       "createButton": "Create token",
       "creating": "Creating…",
       "createdTitle": "Token “{{name}}” created",
@@ -1295,6 +1298,7 @@
       "done": "Done",
       "listEmpty": "You have no API tokens.",
       "maxReached": "You have {{max}} tokens, the most allowed. Revoke one to create another.",
+      "totpSetupNotice": "This server requires two-factor authentication. Set up an authenticator app above to create API tokens.",
       "createdAt": "Created {{date}}",
       "expiresAt": "Expires {{date}}",
       "expired": "Expired",
@@ -1366,7 +1370,7 @@
       "deleteConfirmBody": "This user account will be permanently deleted. This cannot be undone.",
       "deleteConfirmLabel": "Delete user",
       "disable2faConfirmTitle": "Disable 2FA for \"{{username}}\"?",
-      "disable2faConfirmBody": "This will remove their authenticator app requirement. They can re-enable it themselves.",
+      "disable2faConfirmBody": "This will remove their authenticator app requirement. They can re-enable it themselves. Their API tokens are deleted too.",
       "disable2faConfirmLabel": "Disable 2FA",
       "lastSeen": "Last seen {{when}}",
       "neverSeen": "Never signed in",
@@ -1535,7 +1539,7 @@
       "passwordLoginEnabledDesc": "Users can sign in with username and password",
       "passwordLoginDisabledDesc": "Users must sign in via SSO",
       "passwordLoginDisableTitle": "Disable password login?",
-      "passwordLoginDisableMsg": "Users will only be able to sign in via SSO. If your SSO provider becomes unavailable, direct database access will be required to re-enable password login.",
+      "passwordLoginDisableMsg": "Users will only be able to sign in via SSO. If your SSO provider becomes unavailable, direct database access will be required to re-enable password login. API tokens that were not confirmed through SSO are deleted.",
       "passwordLoginDisableConfirm": "Disable password login",
       "empty": "No SSO providers configured yet.",
       "addProvider": "+ Add SSO Provider",
@@ -1707,6 +1711,10 @@
     "ssoLinked": {
       "title": "SSO identity linked",
       "body": "Your account is now linked to the SSO provider."
+    },
+    "ssoReauth": {
+      "title": "Confirmed with SSO",
+      "body": "You can create an API token for the next 10 minutes."
     },
     "ssoError": {
       "title": "SSO error"
