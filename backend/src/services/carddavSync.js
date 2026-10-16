@@ -105,34 +105,50 @@ async function upsertCardavContact(bookId, userId, c) {
 // book's per-book email-uniqueness index.
 async function mergeIntoExisting(id, c, fillOnly) {
   const cur = await query(
-    `SELECT address_book_id, uid, vcard, etag, display_name, first_name, last_name,
+    `SELECT address_book_id, uid, vcard, etag, primary_email, display_name, first_name, last_name,
             emails, phones, organization, notes, photo_data
      FROM contacts WHERE id = $1`,
     [id],
   );
   const row = cur.rows[0];
-  if (!row) return null;
+  // Deleted, or given another address, since syncBook matched it to this card.
+  if (!row || row.primary_email?.toLowerCase() !== c.primaryEmail) return null;
   const own = {
     uid: row.uid, displayName: row.display_name, firstName: row.first_name, lastName: row.last_name,
     emails: row.emails, phones: row.phones, organization: row.organization, notes: row.notes,
   };
-  // An FN that is only the email address (contactFromVCard's fallback when a card has
-  // none) is not a name.
-  const card = { ...c, displayName: c.displayName?.toLowerCase() === c.primaryEmail ? null : c.displayName };
-  const [preferred, fallback] = fillOnly ? [own, card] : [card, own];
+  // A display name that is only the email address is not a name, on either side:
+  // contactFromVCard falls back to the address when a card has no FN, and MailFlow
+  // names a contact it adds from mail after its address.
+  const nameOf = name => (name?.toLowerCase() === c.primaryEmail ? null : name);
+  const card = { ...c, displayName: nameOf(c.displayName) };
+  const mine = { ...own, displayName: nameOf(own.displayName) };
+  const [preferred, fallback] = fillOnly ? [mine, card] : [card, mine];
   const pick = field => preferred[field] || fallback[field];
-  const ownNumbers = new Set(own.phones.map(p => p.value));
+  // The contact editor saves a number as typed; parseVCard trims the card's.
+  const numberOf = p => (p.value || '').trim();
+  const ownNumbers = new Set(own.phones.map(numberOf));
+  // Each card entry stands in for at most one of the contact's, and the entries left
+  // over are added after them, so a number the card lists twice keeps both types. A TEL
+  // without TYPE, which parseVCard reads as 'other', keeps the contact's type. A later
+  // book only adds the numbers the contact does not have.
+  const unmatched = fillOnly ? card.phones.filter(p => !ownNumbers.has(p.value)) : [...card.phones];
+  const fromCard = p => {
+    const i = unmatched.findIndex(cp => cp.value === numberOf(p));
+    if (i < 0) return p;
+    const [match] = unmatched.splice(i, 1);
+    return match.type === 'other' ? { ...match, type: p.type } : match;
+  };
+  // In the contact's own order, so a client that reorders its numbers does not cause a
+  // rewrite.
+  const ownPhones = fillOnly ? own.phones : own.phones.map(fromCard);
   const merged = {
     ...own,
-    displayName: pick('displayName'),
+    // A contact named after its address keeps that name while no card has a real one.
+    displayName: pick('displayName') || own.displayName,
     firstName: pick('firstName'),
     lastName: pick('lastName'),
-    // In the contact's own order, so a client that reorders its numbers does not
-    // cause a rewrite.
-    phones: [
-      ...own.phones.map(p => (!fillOnly && card.phones.find(cp => cp.value === p.value)) || p),
-      ...card.phones.filter(p => !ownNumbers.has(p.value)),
-    ],
+    phones: [...ownPhones, ...unmatched],
     organization: pick('organization'),
     notes: pick('notes'),
   };
@@ -143,7 +159,9 @@ async function mergeIntoExisting(id, c, fillOnly) {
   // is missing or is the remote card an earlier merge copied in.
   const storedUid = parseVCard(row.vcard).uid;
   const replaceCard = storedUid !== row.uid && (!storedUid || storedUid === c.uid);
-  if (vcard === generateVCard(own) && (!photoData || photoData === row.photo_data)
+  // The generated FN falls back to the first and last name, so compare the display name too.
+  const sameName = (merged.displayName || null) === (own.displayName || null);
+  if (vcard === generateVCard(own) && sameName && (!photoData || photoData === row.photo_data)
       && !replaceCard) return null;
   const etag = crypto.createHash('md5').update(vcard).digest('hex');
   // Only if the contact is unchanged since it was read: an edit made meanwhile wins.
