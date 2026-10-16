@@ -8,7 +8,7 @@ import { providerProfile } from './imapManager.js';
 
 const gmail = providerProfile({ imap_host: 'imap.gmail.com' });
 const generic = providerProfile({ imap_host: 'mail.example.com' });
-const ordinary = { noSelect: false, specialUse: null, trash: false, drafts: false, spam: false };
+const ordinary = { noSelect: false, specialUse: null, trash: false, drafts: false, spam: false, snoozed: false };
 const isProtected = (path, roles = {}, profile = generic) => isProtectedDestination(path, { ...ordinary, ...roles }, profile);
 
 describe('where an API token may not move mail', () => {
@@ -30,6 +30,8 @@ describe('where an API token may not move mail', () => {
 
   it('the Snoozed folder, where a message moved by hand never wakes', () => {
     expect(isProtected('Snoozed')).toBe(true);
+    // INBOX.Snoozed under an INBOX. namespace prefix, which folderRoles knows by its name.
+    expect(isProtected('INBOX.Snoozed', { snoozed: true })).toBe(true);
     // A folder of the user's own that only looks like it is not the snooze folder.
     expect(isProtected('Projects/Snoozed')).toBe(false);
   });

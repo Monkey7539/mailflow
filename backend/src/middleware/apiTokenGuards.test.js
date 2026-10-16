@@ -36,11 +36,11 @@ function database() {
     if (sql.includes('AND thread_id = $2 AND message_id IS NOT NULL')) {
       return { rows: messages.filter(m => m.account_id === params[0] && m.thread_id === params[1] && m.message_id) };
     }
-    if (sql.includes('FROM snoozed_messages sm')) return { rows: [] };
+    if (sql.startsWith('SELECT sm.message_id_header FROM snoozed_messages sm')) return { rows: [] };
     if (sql.includes('FROM folders WHERE account_id = $1 AND path = $2')) {
       const folder = folders[params[0]]?.[params[1]];
       return { rows: folder ? [{ no_select: false, special_use: null, trash_rule: false, drafts_rule: false, spam_rule: false,
-        mapped_trash: false, mapped_drafts: false, mapped_spam: false, ...folder }] : [] };
+        mapped_trash: false, mapped_drafts: false, mapped_spam: false, snoozed_rule: false, snooze_record: false, ...folder }] : [] };
     }
     throw new Error(`unexpected SQL: ${sql}`);
   });
@@ -117,6 +117,8 @@ describe('bulk-move with a token', () => {
     ['the mapped Drafts', 'Wip', { mapped_drafts: true }],
     ['the mapped Spam', 'Filtered', { mapped_spam: true }],
     ['the Snoozed folder', 'Snoozed', {}],
+    ['Snoozed under an INBOX. namespace prefix', 'INBOX.Snoozed', { snoozed_rule: true }],
+    ['a folder a snooze record names', 'Later', { snooze_record: true }],
   ])('refuses %s', async (_label, path, roles) => {
     folders[GENERIC][path] = roles;
     expect(await move({ ids: [ID1], folder: path })).toMatchObject({ status: 403, body: { error: MOVE_ERROR } });

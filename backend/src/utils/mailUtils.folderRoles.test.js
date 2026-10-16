@@ -40,17 +40,28 @@ describe('folderRoles', () => {
     for (const role of ['trash', 'drafts', 'spam']) expect(sql).toContain(`folder_mappings->>'${role}'`);
   });
 
+  it('knows Snoozed by its name where the snooze route creates it, or by a snooze record of the account', async () => {
+    const { sql } = await rolesSql();
+    // At the top level, or directly under INBOX as an INBOX. namespace prefix puts it: the stock
+    // Trash and Drafts names' rule. 'Projects/Snoozed' is the user's own.
+    expect(sql).toContain("lower(name) = 'snoozed' AND (path = name OR upper(path) = ('INBOX' || delimiter || upper(name)))");
+    // Any other prefix, or where a rename took it, while mail waits there.
+    expect(sql).toContain('EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.snoozed_folder = $2)');
+  });
+
   it('unions each rule with its mapping', async () => {
     const row = over => ({ no_select: false, special_use: null, trash_rule: false, drafts_rule: false, spam_rule: false,
-      mapped_trash: false, mapped_drafts: false, mapped_spam: false, ...over });
+      mapped_trash: false, mapped_drafts: false, mapped_spam: false, snoozed_rule: false, snooze_record: false, ...over });
     const cases = [
-      [{}, { trash: false, drafts: false, spam: false }],
+      [{}, { trash: false, drafts: false, spam: false, snoozed: false }],
       [{ trash_rule: true }, { trash: true }],
       [{ mapped_trash: true }, { trash: true }],
       [{ drafts_rule: true }, { drafts: true }],
       [{ mapped_drafts: true }, { drafts: true }],
       [{ spam_rule: true }, { spam: true }],
       [{ mapped_spam: true }, { spam: true }],
+      [{ snoozed_rule: true }, { snoozed: true }],
+      [{ snooze_record: true }, { snoozed: true }],
       [{ no_select: true, special_use: '\\All' }, { noSelect: true, specialUse: '\\All' }],
     ];
     for (const [over, expected] of cases) {
