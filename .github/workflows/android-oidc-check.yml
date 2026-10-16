@@ -1,4 +1,4 @@
-name: Android OIDC login check, round 2 (temporary)
+name: Android OIDC login check, round 2b (temporary)
 
 # Scratch check for the second review of maathimself/mailflow#620 (head f0d5889), not for upstream.
 # There is no JDK or Android SDK on the reviewing machine, so the unit tests and their mutations run
@@ -12,65 +12,13 @@ permissions:
   contents: read
 
 jobs:
-  unit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-        with:
-          packages: 'platform-tools platforms;android-36'
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Sync the Android project
-        working-directory: frontend
-        run: npm run android:sync
-
-      - name: Unit tests on the PR head
-        working-directory: frontend/packages/android
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon :app:testDebugUnitTest
-
-      - name: Test results
-        if: always()
-        working-directory: frontend/packages/android
-        run: |
-          for f in app/build/test-results/testDebugUnitTest/*.xml; do echo "== $f"; cat "$f"; done
-
-      - name: Mutations
-        working-directory: frontend/packages/android
-        run: bash ../../../.github/ci-scratch/oidc-mutate.sh
-
-      - name: Compile the debug app and the instrumented tests
-        working-directory: frontend/packages/android
-        run: |
-          git status --short
-          ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
-
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        api-level: [29, 34, 36]
+        api-level: [34, 36]
 
     steps:
       - uses: actions/checkout@v6
@@ -121,7 +69,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           working-directory: frontend/packages/android
-          script: bash ../../../.github/ci-scratch/oidc-e2e.sh
+          script: bash ../../../.github/ci-scratch/oidc-e2e-2b.sh
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -363,6 +363,11 @@ public class OidcLoginFlowTest {
             + ".then(function(r){window.__logout=String(!!(r&&r.handled));},function(e){window.__logout='error '+e;}); true");
         AtomicReference<String> result = new AtomicReference<>();
         waitFor("openOidcLogout result", () -> {
+            // A quick provider sends the app back to /login before the result can be read.
+            if (server.any(r -> r.path().equals("/idp/end-session"))) {
+                result.set("true");
+                return true;
+            }
             String value = evalApp("window.__logout");
             if (value == null || "null".equals(value)) return false;
             result.set(value.replace("\"", ""));

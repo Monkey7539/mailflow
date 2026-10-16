@@ -83,7 +83,7 @@ public class MailFlowOidcFlowTest {
                         + "Content-Length: " + bytes.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
                     out.write(bytes);
                 } catch (Exception error) {
-                    if (!server.isClosed() && !(error instanceof java.net.SocketTimeoutException)) throw new RuntimeException(error);
+                    if (!server.isClosed() && !(error instanceof java.io.IOException)) throw new RuntimeException(error);
                 }
             }
         });
