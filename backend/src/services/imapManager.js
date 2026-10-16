@@ -1303,11 +1303,13 @@ const connectionPools = new Map(); // accountId -> { clients: [], waiting: [] }
 // through two connections.
 export const POOL_SIZE = 4;
 
-// How long an operation waits for a pooled connection before giving up. Longer than
-// POOL_STALL_TIMEOUT_MS, so a connection that had already stalled when a caller queued
-// has been closed before that caller gives up. Closing it does not hand the slot to the
-// queue (only a released connection does), but the next caller to arrive can grow a
-// fresh one.
+// How long an operation waits for a pooled connection before giving up. Kept under the
+// body route's 40s deadline (BODY_FETCH_TIMEOUT_MS in routes/mail.js), so a click queued
+// behind busy connections gets the route's "account is busy" answer rather than its
+// timeout, and is never handed a connection after the route has given up on it. That
+// makes it shorter than POOL_STALL_TIMEOUT_MS, at a cost: a caller that queues in the
+// first 10s of a stall gives up before the stalled connection closes, so the replacement
+// that the next caller grows and then releases cannot serve it.
 export const ACQUIRE_TIMEOUT_MS = 35000;
 
 // How long a leased pooled connection may wait on a reply, with nothing arriving, before
@@ -1318,9 +1320,11 @@ export const ACQUIRE_TIMEOUT_MS = 35000;
 // It measures silence, not duration: a long FETCH that keeps receiving data is never cut
 // off, and whole-folder writes are already chunked (_chunkedFolderOp). It cannot tell a
 // hung server from a slow one, though: a server that sends nothing for this long while it
-// works on one command (a 500-UID MOVE, a SEARCH of a large folder) is cut off too. An
-// upload is different, see appendToFolder.
-export const POOL_STALL_TIMEOUT_MS = 30000;
+// works on one command is cut off too. Hence 45s rather than the 30s commandTimeout named:
+// a header SEARCH by Message-ID on a cold, large Dovecot mailbox, or a 500-UID Gmail MOVE,
+// can be silent for over 30s on a healthy server, and 45s is still far below the 5-minute
+// socketTimeout. An upload is different, see appendToFolder.
+export const POOL_STALL_TIMEOUT_MS = 45000;
 
 // Retained as a plugin compatibility helper. Ordinary ingestion never relocates a
 // cached row by Message-ID; explicit move operations use confirmed folder/UID mappings.
@@ -1821,7 +1825,7 @@ export function evictPool(accountId) {
 // When the timer fires, imapflow sends a NOOP if the session is quiet for a reason (a held
 // lock, an open download, IDLE) and no command is waiting on a reply; otherwise it closes
 // the connection. That includes a FETCH held up by its own loop body: imapflow stops
-// reading while the body works on a row, so a body busy for 30s loses the connection.
+// reading while the body works on a row, so a body busy for 45s loses the connection.
 // client.socket and client.socketTimeout are imapflow internals: without them this does
 // nothing, and imapPoolStall.test.js runs a real ImapFlow so an upgrade that moves them
 // fails there.
@@ -1860,11 +1864,11 @@ export async function withFreshClient(account, fn, { stallTimeout = true } = {})
       drainWaiters(pool);
     }
     // A command cut off by the stall timeout rejects with imapflow's 'Connection not
-    // available', which isConnectionRefusal reads as the provider refusing us: callers
-    // would arm the refusal backoff and the body route would say the server is limiting
-    // connections. Name it for what was measured instead: nothing arrived, which a slow
-    // server or a busy fetch loop body causes as well as a hung one. 'timed out' is also
-    // what fetchMessageBody retries on a fresh login.
+    // available', which isConnectionRefusal reads as the provider refusing us, so callers
+    // such as the body prefetch would arm the refusal backoff. Name it for what was
+    // measured instead: nothing arrived, which a slow server or a busy fetch loop body
+    // causes as well as a hung one. 'timed out' is also what fetchMessageBody retries on a
+    // fresh login.
     if (lease.stalled) {
       throw new Error(`IMAP command timed out: nothing received for ${POOL_STALL_TIMEOUT_MS / 1000}s`, { cause: err });
     }
@@ -5520,7 +5524,7 @@ export class ImapManager {
     // Without the pool's stall timeout. Node counts an upload as activity only while part
     // of it is still queued in this process, so the tail draining from the kernel's send
     // buffer and the server storing the message both read as silence: a large APPEND on a
-    // slow uplink would be closed at 30s with the server still receiving it.
+    // slow uplink would be closed at 45s with the server still receiving it.
     await withFreshClient(account, async (client) => {
       const result = await client.append(folder, rawMessage, flags);
       if (result === false) throw new Error('IMAP append returned false — server did not confirm message was stored');

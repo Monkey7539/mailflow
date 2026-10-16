@@ -9,7 +9,7 @@ import {
   conversationMembershipKey,
   newestConversationMessage,
 } from '../utils/conversation.js';
-import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread } from '../utils/threadActions.js';
+import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount, otherAccountsDraft } from '../utils/threadActions.js';
 import { conversationSnoozeTarget } from '../utils/conversationActions.js';
 import { changeSnooze } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
@@ -19,6 +19,28 @@ import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/pri
 import ConversationMessageCard from './ConversationMessageCard.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { prefetchBody } from '../utils/bodyCache.js';
+
+// What the reader is told when an action finds nothing to take (runAction below). In the unified
+// inbox, which has no "this account" to speak of, Spam and Snooze can. Archive, Delete and Move can
+// only in one rare case, which gets the account wording: the selected message is not in the thread,
+// and keepDraftsApart finds every copy it could take marked in_trash.
+const NOTHING_TO_TAKE = {
+  archive: 'message.archived.nothingFromAccount',
+  delete: 'messageList.deleted.nothingFromAccount',
+  move: 'message.moved.nothingFromAccount',
+  spam: 'spam.nothingFromAccount',
+  snooze: 'message.snoozed.nothingFromAccount',
+};
+const NOTHING_TO_TAKE_UNIFIED = {
+  spam: 'spam.nothingInConversation',
+  snooze: 'message.snoozed.nothingInConversation',
+};
+// With the other account's draft picked under the row, Archive and Move take nothing even though
+// the row's account has mail in the conversation, so "nothing from this account" would be untrue.
+const NOTHING_TO_TAKE_DRAFT = {
+  archive: 'message.archived.otherAccountDraft',
+  move: 'message.moved.otherAccountDraft',
+};
 
 function ThreadBtn({ onClick, title, children }) {
   return (
@@ -40,11 +62,14 @@ function ThreadBtn({ onClick, title, children }) {
 // The whole conversation, stacked, with only what the reader has opened rendered.
 //
 // The thread endpoint already returns every message across folders, Sent replies included,
-// deduplicated by Message-ID preferring the INBOX copy, so showing it needs no scope
-// parameter of its own.
+// deduplicated by Message-ID preferring the INBOX copy, so showing it needs no scope parameter
+// of its own. It also holds another account's copy of the same email (#476), which stays on
+// screen. accountId, the account whose copies the actions take (ReadingPane says which), keeps
+// the actions and the card that opens to that account's copies; null keeps every copy. scope,
+// also ReadingPane's, keeps Archive and Delete to the folder the conversation was opened from.
 //
 // Design from #317 by YunQue0912.
-export default function ConversationPane({ threadId, folder, unified = false, scope = null, selectedMessageId = null }) {
+export default function ConversationPane({ threadId, folder, unified = false, accountId = null, scope = null, selectedMessageId = null }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const addNotification = useStore(s => s.addNotification);
@@ -55,8 +80,8 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
   const [expanded, setExpanded] = useState(() => new Set());
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  // { x, y, view, row } — the move and snooze pickers are ContextMenu's, opened straight
-  // into the relevant sub-view rather than reimplemented here.
+  // { x, y, view, message } — the move and snooze pickers are ContextMenu's, opened straight
+  // into the relevant sub-view rather than reimplemented here. message is the copy they open on.
   const [picker, setPicker] = useState(null);
   const [aiStatus, setAiStatus] = useState(null);
 
@@ -65,9 +90,11 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
   }, []);
   const aiEnabled = Boolean(aiStatus?.enabled && aiStatus?.features?.summarize);
 
+  // Read when the conversation arrives, without making the pick a reason to fetch it again.
+  const pickedRef = useRef(selectedMessageId);
+  pickedRef.current = selectedMessageId;
+
   useEffect(() => {
-    // A picker belongs to the conversation it was opened on: it lists that row's folders.
-    setPicker(null);
     if (!threadId) { setMessages([]); return; }
     let cancelled = false;
     setLoading(true);
@@ -77,15 +104,29 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
         if (cancelled) return;
         const ordered = normalizeConversation(data?.messages || []);
         setMessages(ordered);
+        // A picker opened on the previous conversation's cards while this one loaded (below).
+        setPicker(null);
         // Opens on the newest message, the way every threaded client does: the reader
         // almost always wants the latest reply, and expanding everything would render a
-        // document per message.
-        setExpanded(initialExpandedMessageIds(ordered));
+        // document per message. The newest of accountId's copies, since opening a card marks it
+        // read. When the reader picked the other account's copy under the row, that copy opens on
+        // its own (the effect below): opening the row's copy beside it would mark that read too,
+        // behind a list row whose unread count does not follow.
+        const picked = ordered.find(message => message.id === pickedRef.current);
+        setExpanded(accountId && picked && picked.account_id !== accountId
+          ? new Set()
+          : initialExpandedMessageIds(inAccount(ordered, accountId)));
       })
       .catch(err => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [threadId, folder, unified]);
+  }, [threadId, folder, unified, accountId]);
+
+  // The pane stays mounted from one conversation to the next, so an open picker would
+  // otherwise apply its pick to a conversation it was not opened on. The previous
+  // conversation's cards and buttons stay on screen until the next one lands, so a picker can
+  // still be opened on them after this runs; the fetch above closes that one when it lands.
+  useEffect(() => { setPicker(null); }, [threadId, accountId]);
 
   // Opening a message from the list opens it here too. Picking a different message in the
   // same thread leaves threadId untouched, so the pane used to re-render with identical
@@ -115,31 +156,27 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
     return next;
   });
 
-  // The row the conversation was opened from, and the folder and account its actions take it
+  // The row the conversation was opened from, and the folder Archive and Delete take its copies
   // from, as ReadingPane chose them: a message opened from a notification, a link or the GTD
-  // sidebar is not a row of the list and can live elsewhere, so its own folder and account
-  // stand in for the view's. Without a scope the view decides, as the list's archive does: the
-  // unified inbox is every account's INBOX, an account view is the selected message's account
-  // in its folder.
+  // sidebar is not a row of the list and can live elsewhere, so its own folder stands in for the
+  // view's. Without a scope the view decides, as the list's archive does: the unified inbox is
+  // every account's INBOX, an account view is its folder.
   const actionScope = scope
-    ? { row: scope.row, folder: scope.accountId ? scope.folder : 'INBOX', accountId: scope.accountId }
-    : {
-      row: newestConversationMessage(messages),
-      folder: unified ? 'INBOX' : folder,
-      accountId: unified ? null : (messages.find(message => message.id === selectedMessageId)?.account_id ?? null),
-    };
+    ? { row: scope.row, folder: scope.folder }
+    : { row: null, folder: unified ? 'INBOX' : folder };
 
-  // The move picker keeps the row it was opened on (openPicker); every other action takes the
-  // row the conversation was opened from.
-  const runAction = (action, row = actionScope.row) => {
-    // Every action here takes the conversation's row out of the list. Open what takes its place
-    // (the afterRemove setting) while the row is still there to look up; with no row on screen,
-    // fall back to clearing the pane.
-    const { messages: listed, searchResults, searchQuery } = useStore.getState();
-    const listRow = (searchQuery.trim() ? searchResults : listed).find(m => (m.thread_id || m.id) === threadId);
-    if (listRow) advanceSelectionAfterRemoval(listRow.id, true);
-    else setSelectedMessage(null);
-    action(messages, {
+  // An action can find nothing to take: no copy of accountId at all (a link to a message of an
+  // account the thread route leaves out, a disabled one), no INBOX copy to snooze, only mail the
+  // reader sent to report as spam, or, for Archive and Move, the other account's draft picked under
+  // the row. Moving on as if it had worked would hide that, and so would staying put without a word:
+  // the conversation stays open and a notice says so.
+  const sayNothingTaken = (name) => addNotification({
+    title: t((otherAccountsDraft(messages, selectedMessageId, accountId) && NOTHING_TO_TAKE_DRAFT[name])
+      || (!accountId && NOTHING_TO_TAKE_UNIFIED[name]) || NOTHING_TO_TAKE[name]),
+  });
+
+  const runAction = (name, action) => {
+    const taken = action(messages, {
       t,
       addNotification,
       accounts,
@@ -149,11 +186,31 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
       // Archive, delete and move keep drafts and the rest apart, by the selected message (keepDraftsApart).
       anchorId: selectedMessageId,
       // Archive and delete take only the copies in the folder being viewed, as the list's archive
-      // does; move only the row's account's, whose folders the picker lists.
+      // does, and the row stands in for a selected message the thread does not hold (actionScope).
       folder: actionScope.folder,
-      accountId: actionScope.accountId,
-      row,
+      row: actionScope.row,
+      // Whose copies every action takes, Archive's included, as ReadingPane decides: in one
+      // account's view the row's account even when the reader picked the other account's copy
+      // under the row, and null in the unified inbox.
+      accountId,
+      // Open what takes the place of the conversation's row (the afterRemove setting) while the row
+      // is still there to look up; with no row on screen, fall back to clearing the pane. The runner
+      // calls this only once it has something to take. The row has to be accountId's: a message
+      // opened from a notification can be another account's copy of a conversation this view lists,
+      // and acting for that account leaves that row where it is. For Archive and Delete it also has
+      // to be in the folder they take copies from, which for such a message is its own, not the one
+      // being viewed. Deleting a draft picked under the row, the other account's included, still
+      // moves on from the row, which stays listed: the pane has always moved on after deleting a draft.
+      beforeRemove: () => {
+        const { messages: listed, searchResults, searchQuery } = useStore.getState();
+        const inScopeFolder = m => !['archive', 'delete'].includes(name) || !actionScope.folder || m.folder === actionScope.folder;
+        const row = (searchQuery.trim() ? searchResults : listed)
+          .find(m => (m.thread_id || m.id) === threadId && (!accountId || m.account_id === accountId) && inScopeFolder(m));
+        if (row) advanceSelectionAfterRemoval(row.id, true);
+        else setSelectedMessage(null);
+      },
     });
+    if (!taken) sayNothingTaken(name);
   };
 
   // A flag change on one card: the pane's copy of the thread and the list's copy both change.
@@ -177,17 +234,27 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
     printInWindow(win, buildPrintDocument(entries));
   };
 
-  const openPicker = (event, view) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    // The row is kept with the picker, which lists its account's folders once, on opening:
-    // a move then sends that account's copies even if the selection changes meanwhile.
-    setPicker({ x: rect.left, y: rect.bottom + 4, view, row: actionScope.row });
-  };
+  // What Snooze acts on, of accountId's copies (of any account's in the unified inbox): the newest
+  // inbox copy, which snoozeThread snoozes, else a snoozed copy, whose time the picker changes. With
+  // neither there is no Snooze button.
+  const snoozeTarget = conversationSnoozeTarget(inAccount(messages, accountId), selectedMessageId);
 
-  // Snooze's picker is given the message Snooze acts on (conversationSnoozeTarget), not the row as
-  // Move's is, so the picker's title and action are that message's: Snooze, or Change snooze time.
-  const snoozeTarget = conversationSnoozeTarget(messages, selectedMessageId);
-  const pickerMessage = picker?.view === 'snooze' ? snoozeTarget : picker?.row;
+  // The move picker opens on the newest of accountId's copies (of any account's in the unified
+  // inbox) and lists that copy's account's folders. The snooze picker opens on the snooze target,
+  // so its title and action are that message's: Snooze, or Change snooze time. With no copy of
+  // accountId on screen there is nothing to open either on. With the other account's draft picked
+  // under the row Move takes nothing (moveThread), and the reader is told before picking a folder.
+  const openPicker = (event, view) => {
+    const pickerMessage = view === 'snooze'
+      ? snoozeTarget
+      : newestConversationMessage(inAccount(messages, accountId));
+    if (!pickerMessage || (view === 'move' && otherAccountsDraft(messages, selectedMessageId, accountId))) {
+      sayNothingTaken(view);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPicker({ x: rect.left, y: rect.bottom + 4, view, message: pickerMessage });
+  };
 
   // Every branch that returns from here fills the reading area, for the same flex reason
   // as the stack below: a bare div would collapse to the width of its own text.
@@ -279,13 +346,13 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
             it out of the folder it was opened from, so the reader does not file the same
             thread message by message. */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-          <ThreadBtn onClick={() => runAction(archiveThread)} title={t('message.archive')}>
+          <ThreadBtn onClick={() => runAction('archive', archiveThread)} title={t('message.archive')}>
             {t('message.archive')}
           </ThreadBtn>
-          <ThreadBtn onClick={() => runAction(deleteThread)} title={t('message.delete')}>
+          <ThreadBtn onClick={() => runAction('delete', deleteThread)} title={t('message.delete')}>
             {t('message.delete')}
           </ThreadBtn>
-          <ThreadBtn onClick={() => runAction(spamThread)} title={t('contextMenu.markAsSpam')}>
+          <ThreadBtn onClick={() => runAction('spam', spamThread)} title={t('contextMenu.markAsSpam')}>
             {t('contextMenu.markAsSpam')}
           </ThreadBtn>
           <ThreadBtn
@@ -307,20 +374,20 @@ export default function ConversationPane({ threadId, folder, unified = false, sc
           </ThreadBtn>
         </div>
 
-        {picker && pickerMessage && (
+        {picker && (
           <ContextMenu
             x={picker.x}
             y={picker.y}
-            message={pickerMessage}
+            message={picker.message}
             variant="conversation"
             defaultMoveView={picker.view === 'move'}
             defaultSnoozeView={picker.view === 'snooze'}
             onClose={() => setPicker(null)}
             onAction={(action, data) => {
-              if (action === 'moveTo') runAction((list, opts) => moveThread(list, data, opts), picker.row);
-              else if (action === 'snooze') runAction((list, opts) => snoozeThread(list, data, opts));
+              if (action === 'moveTo') runAction('move', (list, opts) => moveThread(list, data, opts));
+              else if (action === 'snooze') runAction('snooze', (list, opts) => snoozeThread(list, data, opts));
               // Not runAction: nothing leaves the list, the snoozed message only comes back at another time.
-              else if (action === 'changeSnooze') changeSnooze(snoozeTarget, data, { t });
+              else if (action === 'changeSnooze') changeSnooze(picker.message, data, { t });
               setPicker(null);
             }}
           />
