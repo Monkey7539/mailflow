@@ -1114,6 +1114,21 @@ const dimension = (tag, name) => {
   return decl ? Number(decl[1]) : null;
 };
 
+// The width each <img> src (as written) is shown at, where the email gives one in pixels: the
+// widest, when one image is used more than once. What the image proxy fits the image to.
+function shownWidths(html) {
+  const out = new Map();
+  for (const m of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = m[0];
+    const src = tag.match(/\ssrc=(?:"([^"]*)"|'([^']*)')/i);
+    const width = dimension(tag, 'width');
+    if (!src || !(width > 0)) continue;
+    const raw = src[1] ?? src[2];
+    out.set(raw, Math.max(out.get(raw) ?? 0, width));
+  }
+  return out;
+}
+
 // The src of every <img> in `html` sized at TINY px or less both ways, as written.
 function tinyImageSrcs(html) {
   const out = new Set();
@@ -1144,8 +1159,9 @@ export function proxyRemoteImages(html, toProxy, stats = {}) {
   if (!html) return html;
   const isTracker = trackerTest(html);
   const trackers = new Set();
+  const widths = shownWidths(html);
   const out = rewriteRemoteImageRefs(html, (raw, url) => {
-    if (!isTracker(raw, url)) return toProxy(raw);
+    if (!isTracker(raw, url)) return toProxy(raw, widths.get(raw) ?? null);
     trackers.add(url);
     return TRACKER_REPLACEMENT;
   });

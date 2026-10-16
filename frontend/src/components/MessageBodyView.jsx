@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { frameListenersRun, returnFocusFromFrame } from '../utils/frameFocus.js';
 import { measureContentHeight, createHeightController, forceEagerImages, pinFrameRoot, createScrollExpander } from '../utils/emailFrameHeight.js';
 import { forwardIframeKeydown } from '../utils/iframeKeys.js';
 import { buildFrameDoc, DARK_DEFAULTS, SCALE_WRAPPER } from '../utils/emailFrameDoc.js';
 import { applyDarkBody, restoreBody } from '../utils/darkBody.js';
+import { loadImagesNearView } from '../utils/frameLazyImages.js';
 
 // The theme's colors for a body shown dark (#228). They come from CSS variables that an admin's
 // custom CSS can redefine, and they are written into the frame's stylesheet, so only a plain
@@ -38,6 +39,9 @@ function darkPalette() {
   };
 }
 
+// Each email shown in a frame gets its own key (see docKey).
+let frameDocCount = 0;
+
 // The email body, rendered in its own sandboxed frame.
 //
 // Extracted from MessagePane so a conversation view can mount one per expanded message
@@ -64,13 +68,24 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
   const darkRef = useRef(dark);
   const paletteRef = useRef(palette);
   const onDarkResultRef = useRef(onDarkResult);
+  // The context-menu callbacks are read through refs too. The pane makes a new onContextMenu
+  // whenever the message object changes, and marking the message read, which every open does,
+  // changes it: as a dependency it tore the frame's whole setup down and ran it again (scaling,
+  // the dark pass, height) a moment after the email first showed.
+  const onContextMenuRef = useRef(onContextMenu);
+  const nativeTargetRef = useRef(hasNativeContextTarget);
   // A layout effect declared before the others, so it has run first on every commit.
   useLayoutEffect(() => {
     darkRef.current = dark;
     paletteRef.current = palette;
     onDarkResultRef.current = onDarkResult;
+    onContextMenuRef.current = onContextMenu;
+    nativeTargetRef.current = hasNativeContextTarget;
   });
   const shownDocRef = useRef(null);
+  // A new key for each email shown in the frame (see onLoaded).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- a new key whenever the email changes
+  const docKey = useMemo(() => String(++frameDocCount), [body?.html, messageId]);
 
   function showDarkOrNot(doc) {
     let outcome = 'light';
@@ -93,6 +108,7 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
     if (!iframe || !body?.html) return;
 
     let rafId;
+    let scheduleMeasure = () => { rafId = requestAnimationFrame(setHeight); };
     let pollId = null;
     const heights = createHeightController();
     let initialisedDoc = null;
@@ -103,6 +119,10 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
     let keyDoc = null;
     let iframeKeyHandler = null;
     let focusReturn = null;
+    let stopLazyImages = null;
+    // Shown once the dark pass has run (see the layout effect below), or if the document never
+    // turns up, so a frame can never be left hidden.
+    const reveal = () => { iframe.style.removeProperty('visibility'); };
 
     const setHeight = () => {
       const doc = iframe.contentDocument;
@@ -134,7 +154,11 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
       // readyState fast path further down can fire against a document that is not this
       // email, measuring it and binding a ResizeObserver to it. #mf-scale-wrapper is only
       // present in a document we rendered, which makes it a reliable marker.
-      if (!doc || !doc.getElementById(SCALE_WRAPPER)) return;
+      // The marker is not enough on its own: until the swap lands the frame still holds the
+      // previous email's document, wrapper and all. Taken for this one, it was set up (already
+      // dark), and this email, parsed a moment later, showed light until its load event, which
+      // waits for every image. Each document carries its own key.
+      if (!doc || doc.getElementById(SCALE_WRAPPER)?.getAttribute('data-mf-doc') !== docKey) return;
       // Guard the fast path against re-running on a document already wired up. This is
       // per effect run, so a genuine re-run (changed deps) still re-attaches everything
       // the cleanup tore down.
@@ -206,12 +230,31 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
 
       const expandScrollContainers = createScrollExpander(doc);
       expandScrollContainers();
+      // One measurement per frame, however many images load in it: each load and the
+      // ResizeObserver each asked for their own, and every change of the frame's height lays
+      // the pane out again.
+      let measureQueued = false;
+      let expandQueued = false;
+      scheduleMeasure = ({ expand = false } = {}) => {
+        expandQueued = expandQueued || expand;
+        if (measureQueued) return;
+        measureQueued = true;
+        rafId = requestAnimationFrame(() => {
+          measureQueued = false;
+          if (expandQueued) {
+            expandQueued = false;
+            expandScrollContainers();
+          }
+          setHeight();
+        });
+      };
 
       // Show it dark now, before the frame first paints: this runs in the animation frame after
       // the document is parsed, ahead of rendering, so the light version is never seen. After
       // the layout fixes above, so the measured text is the text as it will show.
       shownDocRef.current = doc;
       showDarkOrNot(doc);
+      reveal();
 
       // Recalculate from scratch with the new scale. The controller deliberately does
       // not seed itself from the frame's current height, so this measurement is
@@ -251,10 +294,10 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
         contextMenuDoc.removeEventListener('contextmenu', iframeContextMenuHandler);
       }
       iframeContextMenuHandler = (ev) => {
-        if (hasNativeContextTarget(ev, doc)) return;
+        if (nativeTargetRef.current?.(ev, doc)) return;
         ev.preventDefault();
         const rect = iframe.getBoundingClientRect();
-        onContextMenu(rect.left + ev.clientX, rect.top + ev.clientY, {
+        onContextMenuRef.current?.(rect.left + ev.clientX, rect.top + ev.clientY, {
           source: 'iframe',
           selectedText: doc.getSelection?.().toString() || '',
         });
@@ -280,8 +323,8 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
       // scroll containers whose content has grown due to the newly loaded image.
       doc.querySelectorAll('img').forEach(img => {
         if (!img.complete) {
-          img.addEventListener('load', () => { expandScrollContainers(); requestAnimationFrame(setHeight); }, { once: true });
-          img.addEventListener('error', () => requestAnimationFrame(setHeight), { once: true });
+          img.addEventListener('load', () => scheduleMeasure({ expand: true }), { once: true });
+          img.addEventListener('error', () => scheduleMeasure(), { once: true });
         }
       });
 
@@ -296,9 +339,13 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
         // (stale document, then the real one), and overwriting the ref without this
         // leaves the previous observer running against the old document forever.
         if (roRef.current) roRef.current.disconnect();
-        roRef.current = new ResizeObserver(() => requestAnimationFrame(setHeight));
+        roRef.current = new ResizeObserver(() => scheduleMeasure());
         roRef.current.observe(root);
       }
+
+      // Images held back further down the email load as the reader nears them.
+      stopLazyImages?.();
+      stopLazyImages = loadImagesNearView(doc);
     };
 
     // 'load' is kept, but it CANNOT be the only trigger. It waits for every subresource,
@@ -325,7 +372,8 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
     const pollUntilParsed = () => {
       pollId = null;
       onLoaded();
-      if (initialisedDoc || pollFrames++ >= MAX_POLL_FRAMES) return;
+      if (initialisedDoc) return;
+      if (pollFrames++ >= MAX_POLL_FRAMES) { reveal(); return; }
       pollId = requestAnimationFrame(pollUntilParsed);
     };
     pollUntilParsed();
@@ -344,10 +392,21 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
         keyDoc.removeEventListener('keydown', iframeKeyHandler);
       }
       focusReturn?.();
+      stopLazyImages?.();
       iframe.removeEventListener('load', onLoaded);
       emailScaleRef.current = 1;
     };
-  }, [body?.html, messageId, hasNativeContextTarget, onContextMenu, emailScaleRef, iframeRef]);
+  }, [body?.html, messageId, docKey, emailScaleRef, iframeRef]);
+
+  // With dark bodies on, the frame stays hidden until the dark pass has run. The browser parses
+  // and paints the frame's document on its own schedule, and could paint it before the page's
+  // next animation frame found it parsed: the email showed light, then switched to dark a moment
+  // later. Hidden, the pane's own (dark) background shows for that moment instead. Before the
+  // paint, and again for each new email; a light reader's frame is never hidden.
+  useLayoutEffect(() => {
+    const iframe = iframeRef.current;
+    if (iframe && body?.html && darkRef.current) iframe.style.setProperty('visibility', 'hidden');
+  }, [body?.html, docKey, iframeRef]);
 
   // The toggle: switch the document already shown, without reloading it, before the browser
   // paints. Its layout can change with a sender's dark design; the ResizeObserver on its body
@@ -359,7 +418,7 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
 
   // The frame's document (utils/emailFrameDoc.js): the email as sent, carrying the theme's dark
   // colors and the sender's own dark design switched off until showDarkOrNot uses them.
-  const srcDoc = buildFrameDoc({ html: body.html, palette, darkCss: body.darkCss, remoteImagesBlocked: body.remoteImagesBlocked, remoteImagesProxied: body.remoteImagesProxied });
+  const srcDoc = buildFrameDoc({ html: body.html, palette, darkCss: body.darkCss, remoteImagesBlocked: body.remoteImagesBlocked, remoteImagesProxied: body.remoteImagesProxied, docKey });
 
   return (
     <iframe

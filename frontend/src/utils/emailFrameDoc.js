@@ -14,6 +14,7 @@
 // and position are unchanged: after the email's HTML, so they win the source-order tiebreak.
 
 import { remoteLoadsCsp } from './remoteImagePolicy.js';
+import { deferProxiedImages } from './frameLazyImages.js';
 
 // The default dark theme's colors, for a palette value that is not a plain color.
 export const DARK_DEFAULTS = { background: '#0f0f11', text: '#e8e8f0', link: '#8b7cf8', muted: '#9a9ab0', border: '#2a2a35' };
@@ -29,16 +30,19 @@ export function usableDarkCss(darkCss) {
 
 // `remoteImagesBlocked`: the body was served with remote images blocked, so the frame forbids
 // remote loads outright; `remoteImagesProxied`: its images come through MailFlow's image proxy, so
-// the frame loads images from MailFlow alone (utils/remoteImagePolicy.js).
-export function buildFrameDoc({ html, palette = DARK_DEFAULTS, darkCss = '', remoteImagesBlocked = false, remoteImagesProxied = false }) {
+// the frame loads images from MailFlow alone (utils/remoteImagePolicy.js). `docKey` (digits) marks
+// this document as the one its frame is waiting for (MessageBodyView): the previous email's is
+// still there for a moment after it changes.
+export function buildFrameDoc({ html, palette = DARK_DEFAULTS, darkCss = '', remoteImagesBlocked = false, remoteImagesProxied = false, docKey = '' }) {
   const css = usableDarkCss(darkCss);
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <meta name="color-scheme" content="only light">
       <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; style-src 'unsafe-inline';${remoteLoadsCsp(remoteImagesBlocked, remoteImagesProxied)}">
       <base target="_blank">
-    </head><body><div id="${SCALE_WRAPPER}">${
-      html.replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1')
+    </head><body><div id="${SCALE_WRAPPER}" data-mf-doc="${String(docKey).replace(/\D/g, '')}">${
+      // Images through the proxy load as the reader nears them (utils/frameLazyImages.js).
+      (remoteImagesProxied ? deferProxiedImages(html) : html).replace(/<a(\s)/gi, '<a rel="noopener noreferrer"$1')
     }</div><style>
         /* Injected AFTER email HTML so our rules win the source-order tiebreak
            for same-specificity !important declarations inside the email's own
