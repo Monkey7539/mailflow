@@ -170,6 +170,12 @@ export async function resolveAllSpamPaths(accountId, folderMappings) {
 // of those. Unlike the resolvers this ignores whether a mapping is usable and unions every rule,
 // so it answers "could MailFlow treat this folder as Trash, Drafts or Spam?". Null when the
 // account has no folder at that path.
+//
+// It also says whether the folder is where MailFlow snoozes mail. Snoozing creates 'Snoozed',
+// which an INBOX. namespace prefix puts at INBOX.Snoozed (imapManager.js ensureMailbox), so the
+// name counts where the stock Trash and Drafts names do. A folder one of the account's snooze
+// records names counts too, which finds Snoozed under any other prefix, or where a rename took
+// it, while mail waits there.
 export async function folderRoles(accountId, path) {
   const mapped = role => `COALESCE(path = (SELECT ea.folder_mappings->>'${role}' FROM email_accounts ea WHERE ea.id = $1), false)`;
   const { rows: [row] } = await query(
@@ -179,7 +185,9 @@ export async function folderRoles(accountId, path) {
             COALESCE(${SPAM_FOLDER_SQL}, false) AS spam_rule,
             ${mapped('trash')} AS mapped_trash,
             ${mapped('drafts')} AS mapped_drafts,
-            ${mapped('spam')} AS mapped_spam
+            ${mapped('spam')} AS mapped_spam,
+            COALESCE(lower(name) = 'snoozed' AND ${TOP_LEVEL_FOLDER_SQL}, false) AS snoozed_rule,
+            EXISTS (SELECT 1 FROM snoozed_messages sm WHERE sm.account_id = $1 AND sm.snoozed_folder = $2) AS snooze_record
        FROM folders WHERE account_id = $1 AND path = $2`,
     [accountId, path]
   );
@@ -190,6 +198,7 @@ export async function folderRoles(accountId, path) {
     trash: row.trash_rule === true || row.mapped_trash === true,
     drafts: row.drafts_rule === true || row.mapped_drafts === true,
     spam: row.spam_rule === true || row.mapped_spam === true,
+    snoozed: row.snoozed_rule === true || row.snooze_record === true,
   };
 }
 
