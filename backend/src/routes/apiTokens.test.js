@@ -21,15 +21,22 @@ vi.mock('../services/db.js', () => {
     if (sql.startsWith('SELECT username FROM users WHERE id = $1')) return { rows: db.users[params[0]] ? [db.users[params[0]]] : [] };
     if (sql.startsWith('SELECT 1 FROM users WHERE id = $1 FOR UPDATE')) return { rows: [{}] };
     if (sql.includes("key = 'api_tokens_enabled'")) return { rows: [{ value: String(db.enabled) }] };
-    if (sql.includes("key = 'internal_auth_disabled'")) return { rows: [{ value: String(db.internalAuthDisabled) }] };
+    if (sql.includes("key IN ('internal_auth_disabled', 'mfa_enforcement')")) {
+      return { rows: [{ key: 'internal_auth_disabled', value: String(db.internalAuthDisabled) }, { key: 'mfa_enforcement', value: db.mfaEnforcement }] };
+    }
+    if (sql.includes('FROM user_identities ui') && sql.includes('JOIN oidc_providers op')) {
+      return { rows: db.identities.filter(i => i.user_id === params[0] && db.providers[i.provider_id].enabled)
+        .map(i => ({ id: i.provider_id, slug: db.providers[i.provider_id].slug, name: db.providers[i.provider_id].name })) };
+    }
     if (sql.includes('COUNT(*)::int AS count FROM api_tokens')) return { rows: [{ count: db.tokens.filter(t => t.user_id === params[0]).length }] };
     if (sql.includes('FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC')) {
       return { rows: db.tokens.filter(t => t.user_id === params[0]).sort((a, b) => b.created_at - a.created_at) };
     }
     if (sql.includes('INSERT INTO api_tokens')) {
-      const [userId, name, tokenHash, scopes, expiresAt] = params;
+      const [userId, name, tokenHash, scopes, expiresAt, confirmedWith, oidcProviderId] = params;
       const row = { id: `00000000-0000-4000-8000-${String(db.tokens.length + 1).padStart(12, '0')}`, user_id: userId, name, token_hash: tokenHash,
-        scopes: JSON.parse(scopes), created_at: new Date(), expires_at: expiresAt, last_used_at: null, last_used_ip: null, expired: false };
+        scopes: JSON.parse(scopes), created_at: new Date(), expires_at: expiresAt, last_used_at: null, last_used_ip: null, expired: false,
+        confirmed_with: confirmedWith, oidc_provider_id: oidcProviderId };
       db.tokens.push(row);
       return { rows: [row] };
     }
@@ -59,6 +66,19 @@ const users = () => ({
   'u-pw': { id: 'u-pw', username: 'paul', password_hash: PASSWORD_HASH, totp_enabled: false, totp_secret: null },
   'u-sso': { id: 'u-sso', username: 'sam', password_hash: null, totp_enabled: false, totp_secret: null },
 });
+const CORP = 'c0c0c0c0-0000-4000-8000-000000000001';
+const OTHER_IDP = 'c0c0c0c0-0000-4000-8000-000000000002';
+const providers = () => ({
+  [CORP]: { slug: 'corp', name: 'Corp SSO', enabled: true },
+  [OTHER_IDP]: { slug: 'other', name: 'Other', enabled: true },
+});
+// Sam signs in through Corp only; Paul has linked Corp too.
+const identities = () => [{ user_id: 'u-sso', provider_id: CORP }, { user_id: 'u-pw', provider_id: CORP }];
+// What the browser session holds beyond the user, for a request with x-test-user.
+const session = { extra: {} };
+const signedInThrough = (providerId, minutesAgo = 1) => {
+  session.extra = { oidcConfirmedAt: Date.now() - minutesAgo * 60_000, oidcConfirmedProviderId: providerId };
+};
 
 let server;
 let base;
@@ -69,7 +89,7 @@ beforeAll(async () => {
   app.use(express.json());
   // A browser session for x-test-user, or a token request for x-test-token, as apiTokenAuth leaves one.
   app.use((req, _res, next) => {
-    if (req.get('x-test-user')) req.session = { userId: req.get('x-test-user'), destroy: vi.fn() };
+    if (req.get('x-test-user')) req.session = { userId: req.get('x-test-user'), destroy: vi.fn(), ...session.extra };
     if (req.get('x-test-token')) {
       req.session = { userId: 'u-pw', apiTokenId: 't1' };
       req.apiToken = { id: 't1', userId: 'u-pw', username: 'paul', name: 'Claude', scopes: ['read'], createdAt: '2026-10-01T00:00:00.000Z', expiresAt: null };
@@ -89,7 +109,11 @@ afterAll(async () => {
 let log;
 beforeEach(() => {
   rs.store.clear();
-  Object.assign(db, { enabled: true, internalAuthDisabled: false, users: users(), tokens: [], events: [], log: [] });
+  Object.assign(db, {
+    enabled: true, internalAuthDisabled: false, mfaEnforcement: 'off', users: users(), providers: providers(),
+    identities: identities(), tokens: [], events: [], log: [],
+  });
+  session.extra = {};
   invalidateApiTokenSettingsCache();
   log = vi.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -141,19 +165,41 @@ describe('GET /api/api-tokens/self', () => {
 
 describe('listing tokens', () => {
   it('says whether tokens are on, which confirmation creating one takes, and the choices it allows', async () => {
-    expect(await (await list('u-totp')).json()).toEqual({ enabled: true, reauth: 'totp', expiryChoices: [7, 30, 90, 365, null], maxTokens: 20, tokens: [] });
-    expect(await (await list('u-pw')).json()).toMatchObject({ reauth: 'password', expiryChoices: [7, 30, 90, 365, null] });
-    expect(await (await list('u-sso')).json()).toMatchObject({ reauth: 'none', expiryChoices: [7, 30] });
+    expect(await (await list('u-totp')).json()).toEqual({ enabled: true, reauth: 'totp', expiryChoices: [7, 30, 90, 365], maxTokens: 20, tokens: [] });
+    expect(await (await list('u-pw')).json()).toMatchObject({ reauth: 'password', expiryChoices: [7, 30, 90, 365] });
+    expect(await (await list('u-sso')).json()).toMatchObject({
+      reauth: 'oidc', oidc: { providers: [{ slug: 'corp', name: 'Corp SSO' }], confirmedUntil: null }, expiryChoices: [7, 30],
+    });
+    db.mfaEnforcement = 'required';
+    expect(await (await list('u-pw')).json()).toMatchObject({ reauth: 'totpSetup' });
+    expect(await (await list('u-totp')).json()).toMatchObject({ reauth: 'totp' });
     db.internalAuthDisabled = true;
-    expect(await (await list('u-pw')).json()).toMatchObject({ reauth: 'none', expiryChoices: [7, 30] });
+    expect(await (await list('u-pw')).json()).toMatchObject({ reauth: 'oidc', expiryChoices: [7, 30] });
+    expect(await (await list('u-totp')).json()).toMatchObject({ reauth: 'oidc', oidc: { providers: [] } });
     db.enabled = false;
     invalidateApiTokenSettingsCache();
     expect(await (await list('u-pw')).json()).toMatchObject({ enabled: false });
   });
 
+  it('says until when a sign-in through single sign-on counts, and only through a provider still linked and on', async () => {
+    signedInThrough(CORP, 1);
+    const at = session.extra.oidcConfirmedAt;
+    expect((await (await list('u-sso')).json()).oidc).toEqual({
+      providers: [{ slug: 'corp', name: 'Corp SSO' }], confirmedUntil: new Date(at + 10 * 60_000).toISOString(),
+    });
+    signedInThrough(CORP, 11);
+    expect((await (await list('u-sso')).json()).oidc.confirmedUntil).toBe(null);
+    signedInThrough(OTHER_IDP, 1);
+    expect((await (await list('u-sso')).json()).oidc.confirmedUntil).toBe(null);
+    signedInThrough(CORP, 1);
+    db.providers[CORP].enabled = false;
+    expect((await (await list('u-sso')).json()).oidc).toEqual({ providers: [], confirmedUntil: null });
+  });
+
   it('lists the user\'s own tokens, newest first, without their hashes', async () => {
     await create('u-pw', { ...ok, name: 'older', password: 'right' });
     await create('u-pw', { ...ok, name: 'newer', password: 'right' });
+    signedInThrough(CORP);
     await create('u-sso', { ...ok, name: 'someone else', expiresInDays: 30 });
     db.tokens[0].created_at = new Date(Date.now() - 60_000);
     const { tokens } = await (await list('u-pw')).json();
@@ -181,7 +227,7 @@ describe('creating a token', () => {
     const { token } = await (await create('u-pw', { ...ok, password: 'right' })).json();
     expect(events('api_token_created')).toEqual([['api_token_created', 'paul', 'u-pw', null, '127.0.0.1', true]]);
     const line = log.mock.calls.map(args => args.join(' ')).find(l => l.startsWith('[apiToken]'));
-    expect(line).toMatch(/^\[apiToken\] paul created token "Claude at work" \(\S+\) scopes=read,draft expires=\d{4}-/);
+    expect(line).toMatch(/^\[apiToken\] paul created token "Claude at work" \(\S+\) scopes=read,draft expires=\d{4}-\S+ confirmed=password$/);
     expect(line).not.toContain(token);
     expect(line).not.toContain(hashToken(token));
   });
@@ -198,6 +244,7 @@ describe('creating a token', () => {
       { ...ok, name: '' }, { ...ok, name: 'x'.repeat(61) }, { ...ok, name: 'a\nb' }, { ...ok, name: undefined },
       { ...ok, scopes: [] }, { ...ok, scopes: ['send'] }, { ...ok, scopes: ['read', 'read'] }, { ...ok, scopes: 'read' },
       { ...ok, expiresInDays: undefined }, { ...ok, expiresInDays: 45 }, { ...ok, expiresInDays: '90' }, { ...ok, expiresInDays: 0 },
+      { ...ok, expiresInDays: null },
     ]) {
       const res = await create('u-pw', { ...body, password: 'right' });
       expect(res.status, JSON.stringify(body)).toBe(400);
@@ -206,11 +253,14 @@ describe('creating a token', () => {
     expect(db.tokens).toEqual([]);
   });
 
-  it('takes no expiry, and every listed one', async () => {
-    for (const expiresInDays of [7, 30, 90, 365, null]) {
+  it('takes every listed expiry, and never none', async () => {
+    for (const expiresInDays of [7, 30, 90, 365]) {
       expect((await create('u-pw', { ...ok, expiresInDays, password: 'right' })).status, String(expiresInDays)).toBe(201);
     }
-    expect(db.tokens.at(-1).expires_at).toBe(null);
+    expect(db.tokens.map(t => Math.round((t.expires_at - t.created_at) / 86_400_000))).toEqual([7, 30, 90, 365]);
+    const res = await create('u-pw', { ...ok, expiresInDays: null, password: 'right' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Choose an expiry of 7, 30, 90 or 365 days' });
   });
 
   it('stops at 20 tokens per user', async () => {
@@ -219,6 +269,7 @@ describe('creating a token', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'You already have 20 API tokens. Revoke one to create another.' });
     // Another user's limit is their own.
+    signedInThrough(CORP);
     expect((await create('u-sso', { ...ok, expiresInDays: 30 })).status).toBe(201);
   });
 
@@ -235,6 +286,7 @@ describe('creating a token', () => {
           expect(await res.json()).toEqual({ error: 'Confirm with your current two-factor code', reauth: 'totp' });
         }
         expect((await create('u-totp', { ...ok, totpCode: code() })).status).toBe(201);
+        expect(db.tokens.map(t => [t.confirmed_with, t.oidc_provider_id])).toEqual([['totp', null]]);
       } finally {
         vi.useRealTimers();
       }
@@ -246,10 +298,27 @@ describe('creating a token', () => {
       expect(await res.json()).toEqual({ error: 'Incorrect password', reauth: 'password' });
       expect((await create('u-pw', ok)).status).toBe(400);
       expect((await create('u-pw', { ...ok, password: 'right' })).status).toBe(201);
+      expect(db.tokens.map(t => [t.confirmed_with, t.oidc_provider_id])).toEqual([['password', null]]);
     });
 
-    it('a single sign-on user: nothing, but at most 30 days', async () => {
-      expect((await create('u-sso', { ...ok, expiresInDays: 30 })).status).toBe(201);
+    it('a single sign-on user: a sign-in through their provider in the last 10 minutes, and at most 30 days', async () => {
+      const sso = { ...ok, expiresInDays: 30 };
+      const refused = { error: 'Confirm with single sign-on first: a sign-in counts for 10 minutes', reauth: 'oidc' };
+      // None at all, one too long ago, one through a provider they have no identity at, and one
+      // through a provider turned off since.
+      for (const signIn of [() => {}, () => signedInThrough(CORP, 11), () => signedInThrough(OTHER_IDP, 1),
+        () => { signedInThrough(CORP, 1); db.providers[CORP].enabled = false; }]) {
+        session.extra = {};
+        db.providers[CORP].enabled = true;
+        signIn();
+        const res = await create('u-sso', sso);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual(refused);
+      }
+      db.providers[CORP].enabled = true;
+      signedInThrough(CORP, 9);
+      expect((await create('u-sso', sso)).status).toBe(201);
+      expect(db.tokens.map(t => [t.confirmed_with, t.oidc_provider_id])).toEqual([['oidc', CORP]]);
       for (const expiresInDays of [90, 365, null]) {
         const res = await create('u-sso', { ...ok, expiresInDays });
         expect(res.status).toBe(400);
@@ -257,11 +326,26 @@ describe('creating a token', () => {
       }
     });
 
-    it('a password user when password sign-in is off: nothing, and no password checked', async () => {
+    it('a password user when password sign-in is off: single sign-on, and no password checked', async () => {
       db.internalAuthDisabled = true;
       const compare = vi.spyOn(bcrypt, 'compare');
+      expect((await create('u-pw', { ...ok, expiresInDays: 30, password: 'right' })).status).toBe(400);
+      signedInThrough(CORP);
       expect((await create('u-pw', { ...ok, expiresInDays: 30, password: 'wrong' })).status).toBe(201);
       expect(compare).not.toHaveBeenCalled();
+      expect(db.tokens.map(t => t.confirmed_with)).toEqual(['oidc']);
+    });
+
+    it('a user without an authenticator while two-factor is required: refused until they set one up', async () => {
+      db.mfaEnforcement = 'required';
+      const compare = vi.spyOn(bcrypt, 'compare');
+      const res = await create('u-pw', { ...ok, password: 'right' });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({
+        error: 'This server requires two-factor authentication. Set up an authenticator app to create API tokens.', reauth: 'totpSetup',
+      });
+      expect(compare).not.toHaveBeenCalled();
+      expect(db.tokens).toEqual([]);
     });
 
     it('a refused confirmation stores nothing, and is logged as a failed sign-in or two-factor check', async () => {

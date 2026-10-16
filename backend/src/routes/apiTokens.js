@@ -7,7 +7,7 @@ import {
   apiTokensEnabled, countTokens, createToken, deleteToken, expiryDate, listTokens, MAX_TOKENS_PER_USER,
   normalizeIp, normalizeScopes, normalizeTokenName, TOKENS_OFF_ERROR,
 } from '../services/apiTokens.js';
-import { confirmReauth, expiryChoicesFor, reauthFor } from '../services/apiTokenReauth.js';
+import { confirmReauth, expiryChoicesFor, oidcConfirmationState, reauthFor } from '../services/apiTokenReauth.js';
 
 // Personal API tokens (#617): Settings → Security lists, creates and revokes them with the browser
 // session. A token itself can only ask who it is.
@@ -41,17 +41,14 @@ router.get('/', async (req, res) => {
   res.json({
     enabled: await apiTokensEnabled(),
     reauth,
+    ...(reauth === 'oidc' ? { oidc: await oidcConfirmationState(req, user) } : {}),
     expiryChoices: expiryChoicesFor(reauth),
     maxTokens: MAX_TOKENS_PER_USER,
     tokens: await listTokens(user.id),
   });
 });
 
-const describeExpiry = choices => {
-  const days = choices.filter(d => d !== null);
-  const list = `${days.slice(0, -1).join(', ')} or ${days.at(-1)} days`;
-  return choices.includes(null) ? `Choose an expiry of ${list}, or no expiry` : `Choose an expiry of ${list}`;
-};
+const describeExpiry = days => `Choose an expiry of ${days.slice(0, -1).join(', ')} or ${days.at(-1)} days`;
 
 router.post('/', async (req, res) => {
   if (!(await apiTokensEnabled())) return res.status(403).json({ error: TOKENS_OFF_ERROR });
@@ -70,14 +67,16 @@ router.post('/', async (req, res) => {
   // Checked again when the token is stored; this answers before a two-factor code is spent.
   if (await countTokens(user.id) >= MAX_TOKENS_PER_USER) return res.status(400).json(limitReached);
 
-  const refusal = await confirmReauth(req, user, reauth);
+  const { refusal, confirmedWith, oidcProviderId } = await confirmReauth(req, user, reauth);
   if (refusal) return res.status(refusal.status).set(refusal.headers ?? {}).json(refusal.body);
 
-  const created = await createToken(user.id, { name, scopes, expiresAt: expiryDate(expiresInDays) });
+  const created = await createToken(user.id, {
+    name, scopes, expiresAt: expiryDate(expiresInDays), confirmedWith, oidcProviderId,
+  });
   if (!created) return res.status(400).json(limitReached);
   const { apiToken } = created;
   logAuthEvent('api_token_created', { userId: user.id, username: user.username, ip: normalizeIp(req.ip), success: true });
-  console.log(`[apiToken] ${user.username} created token ${JSON.stringify(apiToken.name)} (${apiToken.id}) scopes=${apiToken.scopes.join(',')} expires=${apiToken.expiresAt ? new Date(apiToken.expiresAt).toISOString() : 'never'}`);
+  console.log(`[apiToken] ${user.username} created token ${JSON.stringify(apiToken.name)} (${apiToken.id}) scopes=${apiToken.scopes.join(',')} expires=${new Date(apiToken.expiresAt).toISOString()} confirmed=${confirmedWith}`);
   res.status(201).json(created);
 });
 
