@@ -67,6 +67,8 @@ const bodyRequests = [];
 const bulkReads = [];
 let blockImages = false;
 let textOnly = false;
+// What every fetched body carries as its attachment list; a test fills it to see the strip.
+const bodyAttachments = [];
 const remoteBodyRequests = [];
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
@@ -81,7 +83,7 @@ globalThis.fetch = async (url, opts = {}) => {
     const remote = u.includes('remoteImages=1');
     if (remote) remoteBodyRequests.push(id);
     if (textOnly) return { ok: true, status: 200, json: async () => ({ html: '', text: `plain body of ${id}`, attachments: [] }) };
-    return { ok: true, status: 200, json: async () => ({ html: `<p>body of ${id}</p>`, text: '', attachments: [], hasBlockedRemoteImages: blockImages && !remote }) };
+    return { ok: true, status: 200, json: async () => ({ html: `<p>body of ${id}</p>`, text: '', attachments: bodyAttachments, hasBlockedRemoteImages: blockImages && !remote }) };
   }
   return { ok: true, status: 200, json: async () => ({}) };
 };
@@ -212,6 +214,29 @@ describe('conversation pane', () => {
     await React.act(async () => { open.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
     await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
     assert.equal(bodyRequests.length, before, 'a body already loaded is kept');
+  });
+
+  test('an opened card renders the attachments its body carries (#634)', async (t) => {
+    // The body response already lists the files; before the strip the card dropped that
+    // list, so a grouped thread gave no way to see or download an attachment at all.
+    bodyAttachments.push(
+      { part: '2', filename: 'invoice.pdf', type: 'application/pdf', size: 12345 },
+      { part: '3', filename: 'notes.txt', type: 'text/plain', size: 678 },
+    );
+    t.after(() => { bodyAttachments.length = 0; });
+    await React.act(async () => {
+      root.render(React.createElement(ConversationPane, { key: 'attachments', threadId: '<1@x>', folder: 'INBOX', selectedMessageId: 'm1' }));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 50)); });
+    const opened = document.querySelector('[data-message-id="m1"]');
+    assert.match(opened.textContent, /message\.attachment/, 'the strip renders under its heading');
+    assert.match(opened.textContent, /invoice\.pdf/, 'the first file shows as a chip');
+    assert.match(opened.textContent, /notes\.txt/, 'and so does the second');
+    assert.match(opened.textContent, /12 KB/, 'with its size');
+    assert.match(opened.textContent, /message\.downloadAll/, 'and "Download all" for more than one');
+    assert.ok(
+      !document.querySelector('[data-message-id="m2"]').textContent.includes('invoice.pdf'),
+      'a collapsed card, whose body was never fetched, shows none');
   });
 
   test('a plain-text message stays translatable under the translate="no" UI', async (t) => {
