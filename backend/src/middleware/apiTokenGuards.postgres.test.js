@@ -53,6 +53,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
       ['Clients/Trash', 'Trash', null], ['Clients/Drafts', 'Drafts', null], ['Drafts', 'Drafts', null],
       ['Unsent', 'Unsent', '\\Drafts'], ['Bulk Mail', 'Bulk Mail', null], ['Everything', 'Everything', '\\All'],
       ['Container', 'Container', null, true], ['Old', 'Old', null], ['Filtered', 'Filtered', null], ['Wip', 'Wip', null],
+      ['INBOX.Snoozed', 'Snoozed', null, false, '.'], ['Clients/Snoozed', 'Snoozed', null], ['Later', 'Later', null],
     ]) {
       await database.query('INSERT INTO folders VALUES ($1, $2, $3, $4, $5, $6)', [ACCOUNT, path, name, delimiter ?? '/', specialUse, noSelect ?? false]);
     }
@@ -81,17 +82,33 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('API token guards Postg
   const archive = ids => guard('POST', '/api/mail/messages/bulk-archive', { ids });
   const snooze = id => guard('POST', `/api/mail/messages/${id}/snooze`, { until: '2026-10-20T08:00:00Z' });
 
-  it('moves into ordinary folders, a Trash or Drafts name below the top level included', async () => {
+  it('moves into ordinary folders, a Trash, Drafts or Snoozed name below the top level included', async () => {
     const id = await message();
-    for (const folder of ['Archive', 'Clients/Trash', 'Clients/Drafts', 'Nowhere']) expect(await move([id], folder), folder).toBe(null);
+    for (const folder of ['Archive', 'Clients/Trash', 'Clients/Drafts', 'Clients/Snoozed', 'Later', 'Nowhere']) {
+      expect(await move([id], folder), folder).toBe(null);
+    }
   });
 
   it('refuses Trash, Drafts, Spam and All Mail by flag or by name, Snoozed, and a folder that holds no mail', async () => {
     const id = await message();
-    for (const folder of ['Bin', 'Deleted Messages', 'INBOX.Trash', 'Drafts', 'Unsent', 'Bulk Mail', 'Everything', 'Container', 'Snoozed']) {
+    for (const folder of ['Bin', 'Deleted Messages', 'INBOX.Trash', 'Drafts', 'Unsent', 'Bulk Mail', 'Everything', 'Container', 'INBOX.Snoozed', 'Snoozed']) {
       if (folder === 'Snoozed') await database.query("INSERT INTO folders VALUES ($1, 'Snoozed', 'Snoozed', '/', NULL, false)", [ACCOUNT]);
       expect(await move([id], folder), folder).toBe(MOVE_ERROR);
     }
+  });
+
+  it('refuses a folder one of the account\'s snooze records names, as where a rename took Snoozed', async () => {
+    const id = await message();
+    const snoozedIn = (account, userId, folder) => database.query(
+      `INSERT INTO snoozed_messages (id, user_id, account_id, message_id_header, original_folder, snoozed_folder, snooze_until)
+       VALUES ($1, $2, $3, '<waiting@example.com>', 'INBOX', $4, '2026-10-20T08:00:00Z')`,
+      [newId(), userId, account, folder],
+    );
+    // Another account's snooze says nothing about this one's folders.
+    await snoozedIn(THEIRS, SOMEONE_ELSE, 'Later');
+    expect(await move([id], 'Later')).toBe(null);
+    await snoozedIn(ACCOUNT, USER, 'Later');
+    expect(await move([id], 'Later')).toBe(MOVE_ERROR);
   });
 
   it('refuses the account\'s mapped Trash, Spam and Drafts', async () => {
