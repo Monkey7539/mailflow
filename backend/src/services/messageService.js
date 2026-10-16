@@ -78,7 +78,13 @@ export async function listMessages({ userId, accountId, folder = 'INBOX', limit 
 
   let total = 0;
   try {
-    if (isSpecificAccount) {
+    if (safeCategory && !isSnoozedView) {
+      // A category tab lists only that category's mail; the folder's counts are of all its mail,
+      // so the list offered pages, or a "Load more", with nothing on them (#611). Counted by
+      // row, as the threaded list is.
+      const r = await query(`SELECT COUNT(*)::int AS n FROM messages m WHERE ${where}`, values);
+      total = r.rows[0]?.n ?? 0;
+    } else if (isSpecificAccount) {
       const r = await query(
         'SELECT total_count, unread_count FROM folders WHERE account_id = $1 AND path = $2',
         [accountId, folder]
