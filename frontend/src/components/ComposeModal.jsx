@@ -23,7 +23,7 @@ import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
 import { editorTextForAi, sharedTextStyle, aiTextToDoc } from '../utils/aiComposeText.js';
 import { PasteWithoutPageColors } from '../utils/editorPaste.js';
-import { pasteWithoutColors } from '../utils/contentEditablePaste.js';
+import { pasteWithoutPageColors } from '../utils/contentEditablePaste.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
 import { aiSenderNote, signatureText } from '../utils/aiSenderNote.js';
@@ -1440,7 +1440,7 @@ export default function ComposeModal() {
         signatureContentRef.current = signatureRef.current?.innerHTML || '';
         setHasRichSignature(Boolean(signatureContentRef.current));
       }}
-      onPaste={pasteWithoutColors}
+      onPaste={pasteWithoutPageColors}
       style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6, outline: 'none' }}
     />
   );
@@ -1906,7 +1906,7 @@ export default function ComposeModal() {
                 contentEditable
                 suppressContentEditableWarning
                 spellCheck={false}
-                onPaste={pasteWithoutColors}
+                onPaste={pasteWithoutPageColors}
                 style={{
                   padding: '10px 16px', borderTop: '1px solid var(--border-subtle)',
                   color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6,
@@ -2556,7 +2556,7 @@ export default function ComposeModal() {
               contentEditable
               suppressContentEditableWarning
               spellCheck={false}
-              onPaste={pasteWithoutColors}
+              onPaste={pasteWithoutPageColors}
               style={{
                 width: '100%', minHeight: 120,
                 padding: '10px 14px',

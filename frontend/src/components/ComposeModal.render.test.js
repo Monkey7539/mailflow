@@ -1358,7 +1358,7 @@ describe('pasting text copied from an email', () => {
 describe('pasting into the signature and the quoted message', () => {
   // What Chrome puts on the clipboard for two paragraphs copied out of the message pane: each <p>
   // carries the email frame's white page and #1a1a1a text. utils/contentEditablePaste.test.js
-  // covers the other shapes a copy takes; this checks both areas are wired to drop the colours.
+  // covers the other shapes a copy takes; this checks both areas are wired to drop the colors.
   const PAGE = 'color: rgb(26, 26, 26); font-family: -apple-system, Arial, sans-serif; font-size: 14px; font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; widows: 2; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; background-color: rgb(255, 255, 255); text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial;';
   const COPIED = `<meta charset='utf-8'><p id="p1" style="${PAGE}">Hi Marty,</p><p id="p2" style="${PAGE}">The ice resurfacer is booked.</p>`;
   const Host = () => (useStore(s => s.composing) ? React.createElement(ComposeModal) : null);
@@ -1366,7 +1366,7 @@ describe('pasting into the signature and the quoted message', () => {
 
   // jsdom has no editing, so this stands in for the browser twice: insertHTML puts its HTML at
   // the caret and fires input, and a paste the page does not cancel inserts the clipboard's HTML
-  // as it is, which is what the browser's own paste keeps of the colours.
+  // as it is, which is what the browser's own paste keeps of the colors.
   function insertAtCaret(target, html) {
     const selection = window.getSelection();
     let range = selection.rangeCount ? selection.getRangeAt(0) : null;
@@ -1433,19 +1433,19 @@ describe('pasting into the signature and the quoted message', () => {
     }
   }
 
-  function assertNoCopiedColour({ editedSignature, quotedBodyHtml }) {
+  function assertNoCopiedColor({ editedSignature, quotedBodyHtml }) {
     for (const [name, html] of [['signature', editedSignature], ['quoted message', quotedBodyHtml]]) {
       assert.match(html, /The ice resurfacer is booked\./, `the paste reached the ${name}`);
-      assert.doesNotMatch(html, /background-color|(?<![\w-])color\s*:/, `the ${name} carries no copied colour`);
+      assert.doesNotMatch(html, /background-color|(?<![\w-])color\s*:/, `the ${name} carries no copied color`);
     }
   }
 
-  test('the reply is sent without the colours of the email the text came from', async () => {
-    assertNoCopiedColour(await pasteAndSend({ phone: false }));
+  test('the reply is sent without the colors of the email the text came from', async () => {
+    assertNoCopiedColor(await pasteAndSend({ phone: false }));
   });
 
   test('and so it is from the phone layout, which has its own quoted message', async () => {
-    assertNoCopiedColour(await pasteAndSend({ phone: true }));
+    assertNoCopiedColor(await pasteAndSend({ phone: true }));
   });
 });
 

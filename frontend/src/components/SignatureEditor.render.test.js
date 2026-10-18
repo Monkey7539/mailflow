@@ -62,7 +62,7 @@ const COPIED = `<meta charset='utf-8'><p id="p1" style="${PAGE}">Hi Marty,</p><p
 
 // jsdom has no editing, so this stands in for the browser twice: insertHTML puts its HTML at the
 // caret and fires input, and a paste the page does not cancel inserts the clipboard's HTML as it
-// is, which is what the browser's own paste keeps of the colours.
+// is, which is what the browser's own paste keeps of the colors.
 function insertAtCaret(target, html) {
   const selection = window.getSelection();
   let range = selection.rangeCount ? selection.getRangeAt(0) : null;
@@ -93,7 +93,7 @@ function paste(target, html) {
 }
 
 describe('pasting into the signature editor', () => {
-  test('text copied from an email is saved without the colours of the page it came from', async () => {
+  test('text copied from an email is saved without the colors of the page it came from', async () => {
     const saved = [];
     const root = createRoot(document.getElementById('root'));
     await act(async () => {
