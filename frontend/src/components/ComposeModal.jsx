@@ -22,7 +22,7 @@ import { TableHeader } from '@tiptap/extension-table-header';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
 import { editorTextForAi, sharedTextStyle, aiTextToDoc } from '../utils/aiComposeText.js';
-import { PasteWithoutSourceColors } from '../utils/editorPaste.js';
+import { PasteWithoutPageColors } from '../utils/editorPaste.js';
 import { pasteWithoutColors } from '../utils/contentEditablePaste.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
@@ -418,7 +418,7 @@ export default function ComposeModal() {
       FontFamily,
       BackgroundColor,
       FontSize,
-      PasteWithoutSourceColors,
+      PasteWithoutPageColors,
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       ResizableImage.configure({ inline: true, allowBase64: true }),
       Table.configure({ resizable: false }),

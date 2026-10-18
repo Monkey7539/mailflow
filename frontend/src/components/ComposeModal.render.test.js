@@ -1320,9 +1320,9 @@ describe('sending or discarding while a draft save is still running', () => {
 });
 
 describe('pasting text copied from an email', () => {
-  // What Chrome puts on the clipboard for a phrase copied out of the message pane: the words
-  // wrapped in the email frame's white page and #1a1a1a text. utils/editorPaste.editor.test.js
-  // covers the other shapes a copy takes; this checks the composer is wired to drop the colours.
+  // What Chrome puts on the clipboard for a phrase copied out of an email shown as sent: the
+  // words wrapped in the frame's white page and #1a1a1a text. utils/editorPaste.editor.test.js
+  // covers the other shapes a copy takes; this checks the composer is wired to drop the colors.
   const COPIED = `<meta charset='utf-8'><span style="color: rgb(26, 26, 26); font-family: -apple-system, Arial, sans-serif; font-size: 14px; font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; orphans: 2; text-align: start; text-indent: 0px; text-transform: none; widows: 2; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; background-color: rgb(255, 255, 255); text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial; display: inline !important; float: none;">ice resurfacer is booked for</span>`;
   const Host = () => (useStore(s => s.composing) ? React.createElement(ComposeModal) : null);
   const posted = [];
@@ -1341,7 +1341,7 @@ describe('pasting text copied from an email', () => {
   });
   after(() => unmount());
 
-  test('the message is sent without the colours of the email the text came from', async () => {
+  test('the message is sent without the colors of the email the text came from', async () => {
     const editor = document.querySelector('.ProseMirror').editor;
     // An explicit event, because jsdom has no ClipboardEvent for prosemirror-view to construct.
     await React.act(async () => { editor.view.pasteHTML(COPIED, new window.Event('paste')); });
