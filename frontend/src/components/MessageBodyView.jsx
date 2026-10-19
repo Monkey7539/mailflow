@@ -161,6 +161,15 @@ function MessageBodyView({ body, messageId, emailScaleRef, hasNativeContextTarge
       // dark), and this email, parsed a moment later, showed light until its load event, which
       // waits for every image. Each document carries its own key.
       if (!doc || doc.getElementById(SCALE_WRAPPER)?.getAttribute('data-mf-doc') !== docKey) return;
+      // Nor while it is still being parsed (#639). The wrapper opens the body, so it is there as
+      // soon as parsing starts, and a browser busy with other work (the list after a folder switch)
+      // parses a long email in several slices. Set up between two of them, the dark pass ran
+      // before the frame's own styles, which close the document, existed: the body, unstyled then,
+      // was left out of the recoloring and turned white once they arrived, and any of the email
+      // still to come stayed as sent, its images never made eager. The frame runs no scripts, so
+      // nothing holds parsing up: 'interactive' follows within moments, and the frame stays hidden
+      // until then.
+      if (doc.readyState === 'loading') return;
       // Guard the fast path against re-running on a document already wired up. This is
       // per effect run, so a genuine re-run (changed deps) still re-attaches everything
       // the cleanup tore down.

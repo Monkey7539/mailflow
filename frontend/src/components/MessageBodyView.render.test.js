@@ -192,6 +192,30 @@ describe('no light flash before the dark pass', () => {
     assert.equal(iframe.style.visibility, '');
   });
 
+  // #639: the wrapper opens the body, so it is there from the first slice of a long email the
+  // browser parses in several. Set up then, the dark pass ran before the frame's own styles (which
+  // close the document) existed, and the page around a dark block turned white once they did.
+  test('a document still being parsed is not set up until parsing is done', async () => {
+    const { iframe, seen } = await show({ dark: true, messageId: 'flash-6' });
+    const doc = iframe.contentDocument;
+    let readyState = 'loading';
+    Object.defineProperty(doc, 'readyState', { configurable: true, get: () => readyState });
+    try {
+      parse(iframe); // the wrapper is in, the rest of the email and the frame's styles are not yet
+      doc.getElementById('mf-scale-wrapper').innerHTML =
+        '<table width="600" align="center"><tr><td bgcolor="#101010" style="color:#fff">A dark block on a light page</td></tr></table>';
+      for (let i = 0; i < 5; i += 1) await tick();
+      assert.deepEqual(seen, [], 'no dark pass on a half-parsed document');
+      assert.equal(iframe.style.visibility, 'hidden', 'still hidden while it parses');
+      readyState = 'interactive';
+      for (let i = 0; i < 5 && iframe.style.visibility; i += 1) await tick();
+      assert.deepEqual(seen, ['hidden'], 'the dark pass ran once parsing was done, while hidden');
+      assert.equal(iframe.style.visibility, '');
+    } finally {
+      delete doc.readyState;
+    }
+  });
+
   test('a light reader\'s frame is never hidden', async () => {
     const { iframe } = await show({ dark: false, messageId: 'flash-2' });
     assert.equal(iframe.style.visibility, '');
