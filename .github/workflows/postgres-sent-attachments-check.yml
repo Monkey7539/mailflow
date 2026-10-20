@@ -1,0 +1,115 @@
+name: PostgreSQL Sent paperclip check (temporary)
+
+# Scratch check for fix/sent-row-attachment-flag: there is no PostgreSQL on the machine the fix
+# was written on, so upsertSentMessageRecord's new SQL is run here against a real database.
+on:
+  push:
+    branches: ["ci/postgres-sent-attachments-check"]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailflow
+          POSTGRES_PASSWORD: mailflow
+          POSTGRES_DB: mailflow_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mailflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      MAILFLOW_TEST_DATABASE_URL: postgres://mailflow:mailflow@localhost:5432/mailflow_test
+      PAPERCLIP_TEST: src/services/imapManager.sentAttachments.postgres.test.js
+      # Plain output, so the greps below see vitest's summary lines as written.
+      NO_COLOR: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      # The new test must run here, not skip: all 4 of its tests pass.
+      - name: The new PostgreSQL test, with the fix
+        working-directory: backend
+        run: |
+          npx vitest run "$PAPERCLIP_TEST" --reporter=verbose 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tee out.txt
+          grep -Eq "Tests +4 passed \(4\)" out.txt || { echo "::error::the paperclip test did not run all 4 tests"; exit 1; }
+          rm -f out.txt
+
+      - name: Every PostgreSQL test, with the fix
+        working-directory: backend
+        run: npx vitest run postgres --reporter=verbose
+
+      # A mutation only counts when the test fails on the stored flag. A mutation that broke the
+      # statement would fail it with a PostgreSQL error instead.
+      - name: Each mutation of the paperclip SQL fails the test on the stored flag
+        working-directory: backend
+        run: |
+          status=0
+          for script in ../.github/ci-scratch/mutate-*.mjs; do
+            echo "::group::$script"
+            node "$script" || { echo "::error::$script did not apply"; status=1; echo "::endgroup::"; continue; }
+            git diff --stat
+            if npx vitest run "$PAPERCLIP_TEST" --reporter=verbose > out.txt 2>&1; then
+              cat out.txt
+              echo "::error::$script: the test passed with the mutation"
+              status=1
+            elif ! grep -q "AssertionError" out.txt || grep -Eq "DatabaseError|error: (syntax error|bind message|column|could not|operator|invalid input)" out.txt; then
+              cat out.txt
+              echo "::error::$script: the test did not fail on the stored flag"
+              status=1
+            else
+              cat out.txt
+            fi
+            rm -f out.txt
+            git checkout -- src
+            echo "::endgroup::"
+          done
+          exit $status
+
+      # Failing-first for the new PostgreSQL test: it must fail on the backend before the fix.
+      - name: The new test fails with 1903651d's imapManager.js
+        working-directory: backend
+        run: |
+          node ../.github/ci-scratch/upstream-sources.mjs
+          git diff --stat
+          if npx vitest run "$PAPERCLIP_TEST" --reporter=verbose > out.txt 2>&1; then
+            cat out.txt
+            echo "::error::the test passed with 1903651d's imapManager.js"
+            exit 1
+          fi
+          cat out.txt
+          if ! grep -q "AssertionError" out.txt; then
+            echo "::error::the test failed without an assertion on the stored flag"
+            exit 1
+          fi
+          grep -Eq "Tests +2 failed \| 2 passed \(4\)" out.txt || { echo "::error::expected exactly 2 of the 4 tests to fail"; exit 1; }
+          grep -q "× .*stores the paperclip of a message sent with files" out.txt || { echo "::error::the insert test did not fail"; exit 1; }
+          grep -q "× .*adds the paperclip to a row stored without one" out.txt || { echo "::error::the turn-on test did not fail"; exit 1; }
+          rm -f out.txt
+          git checkout -- src
+
+      - name: The whole backend suite with the database
+        working-directory: backend
+        run: npx vitest run
