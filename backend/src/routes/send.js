@@ -422,6 +422,10 @@ router.post('/send', async (req, res) => {
     if (allAttachments.length) {
       mailOptions.attachments = allAttachments;
     }
+    // The Sent row's paperclip, set from what was attached because no sync rewrites it on a row
+    // that exists. Every file and forwarded message counts, an .eml too although nodemailer marks
+    // message/* inline; the inline images embedded above do not, as in a sync.
+    const hasAttachments = Boolean(attachments?.length || resolvedFwdAttachments.length || resolvedFwdMessages.length);
 
     // OAuth providers (Gmail, Microsoft) save sent mail to IMAP automatically via their
     // servers — skip APPEND and sync after a delay.  All other accounts use direct IMAP
@@ -589,6 +593,7 @@ router.post('/send', async (req, res) => {
           // rather than orphaning at its own Message-ID (#378).
           inReplyTo: mailOptions.inReplyTo || null,
           references: mailOptions.references || null,
+          hasAttachments,
         } : null;
 
         if (sentFolder) {
