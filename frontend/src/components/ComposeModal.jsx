@@ -35,6 +35,7 @@ import { UNDO_SEND_SECONDS, undoWindowMs, trackHeldSend, reopenCompose } from '.
 import { openSentMessage } from '../utils/openSentMessage.js';
 import { frameGeometry } from '../utils/frameGeometry.js';
 import { AI_MESSAGE_MAX_CHARS } from '../aiActions.js';
+import { stripTags } from '../utils/stripTags.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -810,7 +811,7 @@ export default function ComposeModal() {
     aiAbortRef.current = controller;
 
     const currentText = plaintextEmail ? body
-      : (htmlMode ? htmlSource.replace(/<[^>]+>/g, ' ') : (editor ? editorTextForAi(editor.state.doc) : ''));
+      : (htmlMode ? stripTags(htmlSource) : (editor ? editorTextForAi(editor.state.doc) : ''));
 
     const toStr = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])].join(', ');
     const PROMPTS = {
@@ -906,7 +907,7 @@ export default function ComposeModal() {
     if (!skipAttachWarn) {
       const composedText = plaintextEmail
         ? body
-        : (htmlMode ? htmlSource.replace(/<[^>]+>/g, ' ') : (editor?.getText() ?? ''));
+        : (htmlMode ? stripTags(htmlSource) : (editor?.getText() ?? ''));
       const keywords = t('compose.attachmentKeywords').split('|');
       const lower = composedText.toLowerCase();
       const hasAttachmentWord = keywords.some(kw => lower.includes(kw.toLowerCase()));

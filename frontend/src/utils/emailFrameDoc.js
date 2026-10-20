@@ -38,7 +38,8 @@ export function buildFrameDoc({ html, palette = DARK_DEFAULTS, darkCss = '', rem
   // index.html marks the app translate="no" so a browser translator cannot break React's DOM,
   // and Chrome's translator carries that into this frame. React renders nothing in here, so the
   // email opts back in at its own root. Not on the <iframe>: there Chrome's translator also
-  // rewrites its title, which the app has already localised.
+  // rewrites its title, which the app has already localized, and skips an email swapped into
+  // the frame later.
   return `<!DOCTYPE html><html translate="yes"><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <meta name="color-scheme" content="only light">

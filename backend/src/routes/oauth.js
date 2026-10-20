@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
+import { providerProfile, PROVIDERS } from '../services/imapManager.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { redactEmail } from '../utils/redact.js';
 
@@ -112,15 +113,9 @@ router.get('/microsoft/callback', async (req, res) => {
     res.redirect('/?oauth_success=microsoft');
   } catch (err) {
     console.error('Microsoft OAuth callback error:', err);
-    res.redirect('/?oauth_error=Authentication+failed');
+    res.redirect(`/?oauth_error=${err.publicMessage ? encodeURIComponent(err.publicMessage) : 'Authentication+failed'}`);
   }
 });
-
-// The hosts providerProfile() in imapManager.js treats as Microsoft.
-function isMicrosoftHost(host) {
-  const h = (host || '').toLowerCase();
-  return h.includes('.outlook.com') || h.includes('office365.com') || h.includes('.hotmail.com') || h.includes('.live.com');
-}
 
 // Shared: validate tokens, upsert account, connect IMAP.
 async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publicClient = false }) {
@@ -183,9 +178,10 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       const row = existing.rows[0];
       // A Microsoft account can use any address as its sign-in name, a Gmail one included.
       // Switching a mailbox hosted elsewhere to XOAUTH2 would break it, and oauth_provider
-      // cannot be changed back from the account settings.
-      if (row.oauth_provider !== 'microsoft' && !isMicrosoftHost(row.imap_host)) {
-        throw new Error('An account with this address is already set up on a non-Microsoft mail server');
+      // cannot be changed back from the account settings. The user is told why.
+      if (providerProfile(row) !== PROVIDERS.microsoft) {
+        const reason = 'An account with this address is already set up on a non-Microsoft mail server';
+        throw Object.assign(new Error(reason), { publicMessage: reason });
       }
       accountId = row.id;
       await client.query(`

@@ -695,6 +695,8 @@ describe('message body rendering', () => {
     const text = new dom.window.DOMParser().parseFromString(srcdoc, 'text/html').getElementById('hello');
     assert.ok(text, 'the HTML body reaches the frame');
     assert.equal(text.closest('[translate]')?.getAttribute('translate'), 'yes');
+    // Not on the <iframe>, where Chrome would also translate the frame's localized title.
+    assert.equal(document.querySelector('iframe').getAttribute('translate'), null);
   });
 
   test('switching messages resets the frame height', async () => {

@@ -67,8 +67,12 @@ describe('OAuth re-link of an existing account', () => {
     const client = {
       query: vi.fn(async (sql) => {
         statements.push(sql);
-        if (/FROM email_accounts WHERE (user_id|id) =/.test(sql)) return { rows: [existingRow] };
-        return { rows: [] };
+        const select = sql.match(/SELECT ([\w\s,*]+?) FROM email_accounts WHERE (?:user_id|id) =/);
+        if (!select) return { rows: [] };
+        // Only the named columns, as PostgreSQL returns them. The whole row would hide a
+        // SELECT that stopped reading a column the code needs.
+        const cols = select[1].split(',').map(c => c.trim());
+        return { rows: [cols.includes('*') ? existingRow : Object.fromEntries(cols.map(c => [c, existingRow[c]]))] };
       }),
     };
     mocks.withTransaction.mockReset();
@@ -98,13 +102,23 @@ describe('OAuth re-link of an existing account', () => {
   }
 
   // Everything that picks password or XOAUTH2 reads oauth_provider. Left NULL, the row
-  // stores the new tokens and goes on logging in with the old password.
-  it('switches an Outlook password account to Microsoft OAuth', async () => {
+  // stores the new tokens and goes on logging in with the old password. An account already
+  // on Microsoft OAuth is Microsoft whatever its host, as it is to providerProfile().
+  it.each([
+    ['an Outlook password account', OUTLOOK_ROW],
+    ['a Microsoft OAuth account on a custom host', { ...OUTLOOK_ROW, imap_host: 'mail.example.com', oauth_provider: 'microsoft' }],
+  ])('sets oauth_provider when a Microsoft sign-in re-links %s', async (_label, row) => {
+    existingRow = row;
     expect(await callback('microsoft')).toBe('/?oauth_success=microsoft');
 
     const update = statements.find(sql => /UPDATE email_accounts/.test(sql));
     const setList = update?.match(/SET([\s\S]*?)WHERE/)?.[1];
     expect(setList).toMatch(/oauth_provider\s*=\s*'microsoft'/);
+
+    // The connect gets the row as the UPDATE left it, read back after it.
+    const reread = statements.findLastIndex(sql => /SELECT \* FROM email_accounts WHERE id =/.test(sql));
+    expect(reread).toBeGreaterThan(statements.indexOf(update));
+    expect(mocks.imapManager.connectAccount).toHaveBeenCalledWith(existingRow);
   });
 
   // An auth failure backs the account off for up to six hours, and connectAccount returns
@@ -138,7 +152,9 @@ describe('OAuth re-link of an existing account', () => {
     existingRow = row;
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    expect(await callback('microsoft')).toBe('/?oauth_error=Authentication+failed');
+    // The user is told why, rather than that the Microsoft sign-in itself failed.
+    const location = await callback('microsoft');
+    expect(new URLSearchParams(location.slice(2)).get('oauth_error')).toMatch(/non-Microsoft mail server/);
 
     expect(logged).toHaveBeenCalledWith('Microsoft OAuth callback error:',
       expect.objectContaining({ message: expect.stringMatching(/non-Microsoft mail server/) }));
