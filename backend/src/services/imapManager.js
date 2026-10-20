@@ -6193,7 +6193,7 @@ export class ImapManager {
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
-        const uids = await client.search({ header: ['Message-ID', mid] }, { uid: true });
+        const uids = await client.search({ header: { 'Message-ID': mid } }, { uid: true });
         if (!uids?.length) return null;
         return uids[uids.length - 1];
       } finally {

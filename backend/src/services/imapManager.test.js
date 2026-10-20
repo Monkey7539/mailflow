@@ -18,6 +18,7 @@ import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGE
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
+import { searchCompiler } from 'imapflow/lib/search-compiler.js';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -168,6 +169,41 @@ describe('live reply draft lookup', () => {
     await expect(manager._ingestDraftUidWithClient({ id: 'account-a' }, 'Drafts', 1, client))
       .rejects.toThrow('Incomplete reply draft');
     expect(release).toHaveBeenCalledOnce();
+  });
+});
+
+// The Sent copy a server saves itself is found by this search, and the Bcc is written only
+// once it is. The fake server runs the criteria through imapflow's own compiler and matches
+// HEADER keys as RFC 3501 6.4.4 does, so a query imapflow compiles into something no server
+// matches fails here.
+describe('findUidByMessageId', () => {
+  it('finds the Sent copy by its Message-ID', async () => {
+    const account = { ...baseAccount, id: 'sent-copy-search' };
+    const sentFolder = [
+      { uid: 41, headers: { 'message-id': '<older@example.test>' } },
+      { uid: 42, headers: { 'message-id': '<3f9a1c@example.test>' } },
+      { uid: 43, headers: { 'message-id': '<newer@example.test>' } },
+    ];
+    const client = Object.assign(new EventEmitter(), {
+      connect: vi.fn().mockResolvedValue(), close: vi.fn(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      // Without { uid: true } a server answers with sequence numbers.
+      search: vi.fn(async (criteria, options) => {
+        const words = searchCompiler(client, criteria).map(a => a.value);
+        const keys = [];
+        for (let i = 0; i < words.length; i += 3) {
+          if (words[i] !== 'HEADER') throw new Error(`unexpected search key ${words[i]}`);
+          keys.push([words[i + 1].toLowerCase(), words[i + 2].toLowerCase()]);
+        }
+        return sentFolder.flatMap((m, i) => keys.every(([name, text]) => m.headers[name]?.toLowerCase().includes(text))
+          ? [options?.uid ? m.uid : i + 1] : []);
+      }) });
+    ImapFlow.mockImplementation(function () { return client; });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    const manager = Object.create(ImapManager.prototype);
+    expect(await manager.findUidByMessageId(account, 'Sent', '<3f9a1c@example.test>')).toBe(42);
+    expect(client.getMailboxLock).toHaveBeenCalledWith('Sent');
   });
 });
 
