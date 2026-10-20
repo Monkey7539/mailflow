@@ -13,6 +13,11 @@ import DOMPurify from 'dompurify';
 // proxy), data:, blob: and cid: are kept.
 
 const KEPT_SCHEMES = new Set(['data:', 'blob:', 'cid:']);
+// An image a table names as its background by cid: or Content-Location arrives as a data: URI
+// (#640). DOMPurify allows data: only in a media element's src, so it is kept here on the terms
+// emailSanitizer.js keeps it on: a base64 raster image, on a table tag.
+const DATA_BACKGROUND_TAGS = new Set(['table', 'tr', 'td', 'th']);
+const DATA_IMAGE_BACKGROUND_RE = /^data:image\/(?:png|gif|jpe?g|webp|bmp|avif);base64,[A-Za-z0-9+/=]*$/i;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const SVG_IMAGE_ELEMENTS = new Set(['image', 'feimage', 'use']);
 const CSS_URL = /url\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^)\s]*))\s*\)/gi;
@@ -77,13 +82,21 @@ function keepOnlyLocalImages(node) {
   }
 }
 
-// DOMPurify.sanitize with the image rule above. The hook is added for this call only, so other
+// The value checked is the one on the element, which forceKeepAttr leaves as it is.
+function keepDataBackground(node, data) {
+  if (data.attrName === 'background' && DATA_BACKGROUND_TAGS.has(node.localName)
+    && DATA_IMAGE_BACKGROUND_RE.test(node.getAttribute('background'))) data.forceKeepAttr = true;
+}
+
+// DOMPurify.sanitize with the image rules above. The hooks are added for this call only, so other
 // sanitizes (markdown, signatures) are unaffected.
 export function sanitizeEmailForApp(html, config = {}) {
+  DOMPurify.addHook('uponSanitizeAttribute', keepDataBackground);
   DOMPurify.addHook('afterSanitizeAttributes', keepOnlyLocalImages);
   try {
     return DOMPurify.sanitize(html, config);
   } finally {
     DOMPurify.removeHook('afterSanitizeAttributes', keepOnlyLocalImages);
+    DOMPurify.removeHook('uponSanitizeAttribute', keepDataBackground);
   }
 }

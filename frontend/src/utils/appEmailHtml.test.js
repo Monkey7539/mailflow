@@ -42,8 +42,43 @@ describe('sanitizeEmailForApp', () => {
     assert.equal(out.querySelector('#x').style.color, 'red');
   });
 
+  // #640: an image a table names as its background by cid: or Content-Location reaches the page as
+  // a data: URI, and the email frame shows it. The quoted reply or forward and the div renderer
+  // dropped it, since DOMPurify allows data: only in a media element's src.
+  it('keeps a base64 raster image in the background of a table, row or cell, as the email frame does', () => {
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const html = `<table id="t" background="${png}"><tr id="r" background="data:image/JPEG;base64,/9j/"><td id="d" background="${png}">x</td><th id="h" background="${png}">y</th></tr></table>`;
+    // The composer's quote, then the div renderer.
+    for (const config of [{ FORBID_TAGS: ['style'] }, { ADD_ATTR: ['target'], FORBID_TAGS: ['style'] }]) {
+      const out = parse(sanitizeEmailForApp(html, config));
+      assert.equal(out.querySelector('#t').getAttribute('background'), png);
+      assert.equal(out.querySelector('#r').getAttribute('background'), 'data:image/JPEG;base64,/9j/');
+      assert.equal(out.querySelector('#d').getAttribute('background'), png);
+      assert.equal(out.querySelector('#h').getAttribute('background'), png);
+    }
+  });
+
+  it('drops any other data: background, a data: background on another tag, and a remote one', () => {
+    for (const value of [
+      'data:image/svg+xml;base64,PHN2Zz4=',
+      'data:text/html;base64,PHNjcmlwdD4=',
+      'data:image/png,<svg onload=alert(1)>',
+      'data:image/png;base64,AA" onload="alert(1)',
+      ' data:application/javascript;base64,YWxlcnQoMSk=',
+      'https://evil.example/bg.gif',
+    ]) {
+      const out = parse(sanitizeEmailForApp(`<table id="t" background='${value}'><tr><td>x</td></tr></table>`));
+      assert.equal(out.querySelector('#t').hasAttribute('background'), false, value);
+    }
+    const div = parse(sanitizeEmailForApp('<div id="v" background="data:image/png;base64,iVBORw0KGgo=">x</div>'));
+    assert.equal(div.querySelector('#v').hasAttribute('background'), false);
+    const cid = parse(sanitizeEmailForApp('<table id="c" background="cid:bg@x"><tr><td>x</td></tr></table>'));
+    assert.equal(cid.querySelector('#c').getAttribute('background'), 'cid:bg@x');
+  });
+
   it('leaves other sanitizes alone', () => {
     sanitizeEmailForApp('<p>x</p>');
     assert.match(DOMPurify.sanitize('<img src="https://example.com/a.png">'), /https:\/\/example\.com\/a\.png/);
+    assert.doesNotMatch(DOMPurify.sanitize('<table background="data:image/png;base64,iVBORw0KGgo="><tr><td>x</td></tr></table>'), /background/);
   });
 });
