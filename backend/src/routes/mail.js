@@ -7,7 +7,7 @@ import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { extractImapError } from '../services/imapError.js';
-import { isConnectionRefusal } from '../services/imapManager.js';
+import { isConnectionRefusal, checkableMessageId } from '../services/imapManager.js';
 import { stripEmailHead, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs, splitDarkScheme, proxyRemoteImages, remoteImageRefs } from '../services/emailSanitizer.js';
 import { imageProxyPath, proxyWidth, fetchProxiedImage, createUserLimiter } from '../services/imageProxy.js';
 import { imageCache, imageCacheKey } from '../services/imageCache.js';
@@ -1523,6 +1523,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
     // expungeSucceeded: permanently deleted (already in Trash, or no Trash folder on account).
     // trashMoveSucceeded: moved from a non-Trash folder into Trash.
     const expungeSucceeded = [];
+    const expungeRefused = []; // rows whose uid's server copy does not carry their Message-ID
     const trashMoveSucceeded = []; // { msg, trashPath, newUid }
     const accountsById = {};
 
@@ -1551,9 +1552,16 @@ router.post('/messages/bulk-delete', async (req, res) => {
         }
         for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
           const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-          const { succeeded, failed } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder);
+          // As the single delete: a uid is expunged only while its server copy still carries the
+          // row's Message-ID. Rows with no Message-ID to check by are deleted unchecked.
+          const expectMessageIds = new Map(folderMsgs.map(m => [Number(m.uid), m.message_id]));
+          const { succeeded, failed, mismatched } = await imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder, { expectMessageIds });
           for (const uid of succeeded) expungeSucceeded.push(uidToMsg.get(String(uid)));
           for (const uid of failed) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
+          for (const uid of mismatched) {
+            console.warn(`bulk-delete: not expunging uid ${uid} from ${expungeFolder}: the server copy there does not carry its row's Message-ID`);
+            expungeRefused.push(uidToMsg.get(String(uid)));
+          }
         }
       }
 
@@ -1577,6 +1585,26 @@ router.post('/messages/bulk-delete', async (req, res) => {
     // Permanently deleted: remove DB rows immediately.
     if (expungeSucceeded.length) {
       await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [expungeSucceeded.map(m => m.id)]);
+    }
+
+    // Sync never corrects a row whose uid holds another message, or none. Drop the refused rows,
+    // so a sync can file what the server holds at those uids, and pull their folders. They are
+    // left out of `deleted`.
+    if (expungeRefused.length) {
+      await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [expungeRefused.map(m => m.id)]);
+      const refusedBy = {};
+      for (const msg of expungeRefused) {
+        const key = `${msg.account_id}:${msg.folder}`;
+        if (!refusedBy[key]) refusedBy[key] = { account: accountsById[msg.account_id], path: msg.folder, total: 0, unread: 0 };
+        refusedBy[key].total++;
+        if (!msg.is_read) refusedBy[key].unread++;
+      }
+      for (const { account, path, total, unread } of Object.values(refusedBy)) {
+        adjustFolderCounts(account.id, path, -total, -unread);
+        imapManager.syncFolderOnDemand(account, path)
+          .catch(err => console.warn('post-delete folder sync failed:', err.message));
+        imapManager.broadcast({ type: 'folder_updated', folder: path, accountId: account.id }, req.session.userId);
+      }
     }
 
     // Trash moves: same CTE approach as bulk-move — DELETE source rows and
@@ -2447,12 +2475,28 @@ async function deleteMessage(req, res, id) {
     adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
     adjustFolderCounts(message.account_id, trashPath, 1, wasUnread);
   } else {
-    // strategy.action === 'expunge': message is already in Trash — permanently delete.
+    // strategy.action === 'expunge': message is already in Trash — permanently delete. A move
+    // into Trash without UIDPLUS leaves the row under the message's source uid, which in Trash
+    // can name another message, so the server copy must still carry this row's Message-ID. A
+    // row with no Message-ID to check by is deleted as before.
+    let deleted;
     try {
-      await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
+      deleted = await imapManager.permanentDeleteMessage(account, message.uid, message.folder, { expectMessageId: checkableMessageId(message.message_id) });
     } catch (err) {
       console.error('IMAP permanent delete failed:', err.message);
       return res.status(500).json({ error: 'Failed to delete message' });
+    }
+    if (deleted === false) {
+      // Sync never corrects a row whose uid holds another message, or none. Drop the row, so a
+      // sync can file what the server holds at that uid, and pull the folder.
+      console.warn(`Not permanently deleting uid=${message.uid} in ${message.folder}: the server copy there does not carry this row's Message-ID`);
+      await query('DELETE FROM messages WHERE id = $1', [id]);
+      adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+      imapManager.syncFolderOnDemand(account, message.folder)
+        .catch(err => console.warn('post-delete folder sync failed:', err.message));
+      imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id }, req.session.userId);
+      notifyMailMutation([message], req.session.userId);
+      return res.status(409).json({ error: 'This message changed on the server and was not deleted. Refresh and try again.' });
     }
     await query('DELETE FROM messages WHERE id = $1', [id]);
     adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
