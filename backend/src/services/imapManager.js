@@ -2401,12 +2401,6 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
 
 const bareMessageId = id => String(id ?? '').replace(/[<>]/g, '').trim();
 
-// A row's Message-ID to check its server copy against before a permanent delete, or undefined
-// when it has none to check by: a missing one, '<>' and blanks name no message.
-export function checkableMessageId(id) {
-  return bareMessageId(id) ? id : undefined;
-}
-
 // Whether a server copy's Message-ID is the one its row stored. Rows keep the envelope's
 // Message-ID cut at MAX_HEADER_FIELD characters, so a stored one that long matches a live one
 // that starts with it. Angle brackets and outer whitespace are ignored; an empty ID matches
@@ -2416,6 +2410,27 @@ function carriesMessageId(liveId, storedId) {
   const stored = bareMessageId(storedId);
   if (!live || !stored) return false;
   return live === stored || (String(storedId).length >= MAX_HEADER_FIELD - 1 && live.startsWith(stored));
+}
+
+const timeOf = d => (d == null ? NaN : new Date(d).getTime());
+
+// Whether a server copy, FETCHed with its envelope and INTERNALDATE, is the message a row of the
+// messages table describes, before a permanent delete. If either has a Message-ID ('<>' and
+// blanks are none), both must carry the same one. If neither does, the copy's INTERNALDATE must
+// be the row's date, which sync stores from it, and its subject must be the row's, derived as
+// resolveSubject does, when its envelope has one: without one, sync took the row's from the
+// Subject header, which is not fetched here.
+//
+// A Message-ID is not unique. A message filed twice in a folder, or two messages that share an
+// ID, can be taken for each other, so a row whose uid now holds the other copy deletes that one.
+// That is an accepted limit of identifying mail by Message-ID.
+export function isRowsMessage(row, copy) {
+  if (!row || !copy?.envelope) return false;
+  const liveId = copy.envelope.messageId;
+  if (bareMessageId(row.message_id) || bareMessageId(liveId)) return carriesMessageId(liveId, row.message_id);
+  if (timeOf(row.date) !== timeOf(copy.internalDate)) return false; // NaN, for a missing one, equals nothing
+  const subject = copy.envelope.subject ? sanitizeStr(decodeMimeWords(copy.envelope.subject).trim()) : '';
+  return !subject || subject === row.subject;
 }
 
 // client.messageMove without its data loss. On a server without MOVE (RFC 6851) imapflow
@@ -7227,20 +7242,25 @@ export class ImapManager {
     return newUid;
   }
 
-  // With expectMessageId, the uid is deleted only if the server copy still carries that
-  // Message-ID, checked under the same mailbox lock. A uid names a place in the folder, so one
-  // read from a stale row, or looked up in the wrong account, would otherwise expunge whatever
-  // sits there. Resolves false, having deleted nothing, when it does not match.
-  async permanentDeleteMessage(account, uid, folder, { expectMessageId } = {}) {
+  // With expectRow, a row of the messages table, the uid is deleted only if its server copy is
+  // that row's message (see isRowsMessage); with expectMessageId, only if it carries that
+  // Message-ID. Either is checked under the same mailbox lock. A uid names a place in the folder,
+  // so one read from a stale row, or looked up in the wrong account, would otherwise expunge
+  // whatever sits there. Resolves false, having deleted nothing, when it does not match, and true
+  // when nothing holds the uid any more, which is where a delete would have left it.
+  async permanentDeleteMessage(account, uid, folder, { expectMessageId, expectRow } = {}) {
+    const expected = expectRow ?? (expectMessageId === undefined ? undefined : { message_id: expectMessageId });
     return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
-        if (expectMessageId !== undefined) {
-          let found = null;
-          for await (const msg of client.fetch(String(uid), { uid: true, envelope: true }, { uid: true })) {
-            if (msg.uid === Number(uid) && msg.envelope) found = msg.envelope.messageId;
+        if (expected) {
+          let copy = null;
+          // An unsolicited FETCH (a flag change) carries no envelope and must not stand in for the copy.
+          for await (const msg of client.fetch(String(uid), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
+            if (msg.uid === Number(uid) && msg.envelope) copy = msg;
           }
-          if (!carriesMessageId(found, expectMessageId)) return false;
+          if (!copy) return true;
+          if (!isRowsMessage(expected, copy)) return false;
         }
         if (!(await expungeUids(client, String(uid)))) throw new Error('messageDelete returned false — server did not confirm deletion');
         return true;
@@ -7481,28 +7501,31 @@ export class ImapManager {
   // To prevent collateral damage, we temporarily unflag any other \Deleted messages
   // before expunging, then restore them in a finally block.
   //
-  // `expectMessageIds` (uid -> Message-ID) checks each server copy under the same lock, as
-  // permanentDeleteMessage's expectMessageId does: a uid whose copy carries another Message-ID,
-  // or is gone, is not deleted and is returned in `mismatched`. A uid with no Message-ID to check
-  // by (see checkableMessageId) is deleted unchecked.
-  async bulkPermanentDelete(account, uids, folder, { expectMessageIds } = {}) {
+  // `expectRows` (uid -> row) checks each server copy under the same lock, as
+  // permanentDeleteMessage's expectRow does: a uid whose copy is another message is not deleted
+  // and is returned in `mismatched`, and one nothing holds any more is returned in `succeeded`,
+  // as a delete would have left it.
+  async bulkPermanentDelete(account, uids, folder, { expectRows } = {}) {
     if (!uids.length) return { succeeded: [], failed: [], mismatched: [] };
     let toDelete = uids;
+    let gone = [];
     let mismatched = [];
     try {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(folder);
         try {
-          const checked = expectMessageIds ? uids.filter(uid => checkableMessageId(expectMessageIds.get(Number(uid)))) : [];
-          if (checked.length) {
-            const live = new Map();
-            // An unsolicited FETCH (a flag change) carries no envelope and must not blank the answer.
-            for await (const msg of client.fetch(checked.map(String).join(','), { uid: true, envelope: true }, { uid: true })) {
-              if (msg.envelope) live.set(msg.uid, msg.envelope.messageId);
+          if (expectRows) {
+            const copies = new Map();
+            // An unsolicited FETCH (a flag change) carries no envelope and must not stand in for the copy.
+            for await (const msg of client.fetch(uids.map(String).join(','), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
+              if (msg.envelope) copies.set(msg.uid, msg);
             }
-            mismatched = checked.filter(uid => !carriesMessageId(live.get(Number(uid)), expectMessageIds.get(Number(uid))));
-            const refused = new Set(mismatched.map(Number));
-            toDelete = uids.filter(uid => !refused.has(Number(uid)));
+            const sorted = { gone: [], same: [], other: [] };
+            for (const uid of uids) {
+              const copy = copies.get(Number(uid));
+              sorted[!copy ? 'gone' : isRowsMessage(expectRows.get(Number(uid)), copy) ? 'same' : 'other'].push(uid);
+            }
+            ({ gone, same: toDelete, other: mismatched } = sorted);
           }
           if (toDelete.length && !(await expungeUids(client, toDelete.map(String).join(',')))) {
             throw new Error('bulk messageDelete returned false — server did not confirm deletion');
@@ -7511,7 +7534,8 @@ export class ImapManager {
           lock.release();
         }
       });
-      return { succeeded: toDelete, failed: [], mismatched };
+      const refused = new Set(mismatched);
+      return { succeeded: uids.filter(uid => !refused.has(uid)), failed: [], mismatched };
     } catch (err) {
       console.warn(`bulkPermanentDelete ${folder}: batch failed (${err.message}), verifying via UID SEARCH`);
       try {
@@ -7530,15 +7554,16 @@ export class ImapManager {
           throw new Error(`verification SEARCH returned ${remaining}`, { cause: err });
         }
         const remainingSet = new Set(remaining.map(Number));
-        const succeeded = toDelete.filter(uid => !remainingSet.has(Number(uid)));
-        const failed    = toDelete.filter(uid =>  remainingSet.has(Number(uid)));
-        if (succeeded.length) {
-          console.log(`bulkPermanentDelete: ${succeeded.length}/${toDelete.length} messages confirmed deleted via UID SEARCH`);
+        const deleted = toDelete.filter(uid => !remainingSet.has(Number(uid)));
+        const failed  = toDelete.filter(uid =>  remainingSet.has(Number(uid)));
+        if (deleted.length) {
+          console.log(`bulkPermanentDelete: ${deleted.length}/${toDelete.length} messages confirmed deleted via UID SEARCH`);
         }
-        return { succeeded, failed, mismatched };
+        const done = new Set([...gone, ...deleted]);
+        return { succeeded: uids.filter(uid => done.has(uid)), failed, mismatched };
       } catch (searchErr) {
         console.error(`bulkPermanentDelete: UID SEARCH verification failed: ${searchErr.message}`);
-        return { succeeded: [], failed: toDelete, mismatched };
+        return { succeeded: gone, failed: toDelete, mismatched };
       }
     }
   }
