@@ -2414,12 +2414,19 @@ function carriesMessageId(liveId, storedId) {
 
 const timeOf = d => (d == null ? NaN : new Date(d).getTime());
 
+// A server copy's first From address, as parseMessage derives a row's from_email from it.
+function senderOf(copy) {
+  const from = copy.envelope.from?.[0] || {};
+  return sanitizeStr(from.address || (from.mailbox && from.host ? `${from.mailbox}@${from.host}` : ''));
+}
+
 // Whether a server copy, FETCHed with its envelope and INTERNALDATE, is the message a row of the
 // messages table describes, before a permanent delete. If either has a Message-ID ('<>' and
 // blanks are none), both must carry the same one. If neither does, the copy's INTERNALDATE must
-// be the row's date, which sync stores from it, and its subject must be the row's, derived as
-// resolveSubject does, when its envelope has one: without one, sync took the row's from the
-// Subject header, which is not fetched here.
+// be the row's date, which sync stores from it, its sender the row's from_email, in any case, and
+// its subject the row's, derived as resolveSubject does, when its envelope has one: without one,
+// sync took the row's from the Subject header, which is not fetched here. A row matched that way
+// can still be another message's twin (see hasOtherMatch).
 //
 // A Message-ID is not unique. A message filed twice in a folder, or two messages that share an
 // ID, can be taken for each other, so a row whose uid now holds the other copy deletes that one.
@@ -2429,8 +2436,30 @@ export function isRowsMessage(row, copy) {
   const liveId = copy.envelope.messageId;
   if (bareMessageId(row.message_id) || bareMessageId(liveId)) return carriesMessageId(liveId, row.message_id);
   if (timeOf(row.date) !== timeOf(copy.internalDate)) return false; // NaN, for a missing one, equals nothing
+  if (senderOf(copy).toLowerCase() !== String(row.from_email ?? '').toLowerCase()) return false;
   const subject = copy.envelope.subject ? sanitizeStr(decodeMimeWords(copy.envelope.subject).trim()) : '';
   return !subject || subject === row.subject;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Whether a message in the selected mailbox other than the one at `uid` also matches a row with
+// no Message-ID (see isRowsMessage). Without a stored size, nothing such a row holds tells the two
+// apart, so it could be either and must not be deleted. Every match has the row's date as its
+// INTERNALDATE, so only the days around it are searched, wide enough for any server's time zone;
+// a search that fails counts as a match. `searched` keeps each day's copies for the next row.
+async function hasOtherMatch(client, row, uid, searched = new Map()) {
+  const day = Math.floor(timeOf(row.date) / DAY_MS);
+  if (!searched.has(day)) {
+    const found = await client.search({ since: new Date((day - 2) * DAY_MS), before: new Date((day + 3) * DAY_MS) }, { uid: true });
+    if (!Array.isArray(found)) return true;
+    const copies = [];
+    if (found.length) {
+      for await (const msg of client.fetch(found.join(','), { uid: true, envelope: true, internalDate: true }, { uid: true })) copies.push(msg);
+    }
+    searched.set(day, copies);
+  }
+  return searched.get(day).some(copy => copy.uid !== Number(uid) && isRowsMessage(row, copy));
 }
 
 // client.messageMove without its data loss. On a server without MOVE (RFC 6851) imapflow
@@ -7243,8 +7272,9 @@ export class ImapManager {
   }
 
   // With expectRow, a row of the messages table, the uid is deleted only if its server copy is
-  // that row's message (see isRowsMessage); with expectMessageId, only if it carries that
-  // Message-ID. Either is checked under the same mailbox lock. A uid names a place in the folder,
+  // that row's message (see isRowsMessage) and, for a row with no Message-ID, no other message in
+  // the folder matches the row as well (see hasOtherMatch); with expectMessageId, only if the copy
+  // carries that Message-ID. Either is checked under the same mailbox lock. A uid names a place in the folder,
   // so one read from a stale row, or looked up in the wrong account, would otherwise expunge
   // whatever sits there. Resolves false, having deleted nothing, when it does not match, and true
   // when nothing holds the uid any more, which is where a delete would have left it.
@@ -7261,6 +7291,7 @@ export class ImapManager {
           }
           if (!copy) return true;
           if (!isRowsMessage(expected, copy)) return false;
+          if (!bareMessageId(expected.message_id) && await hasOtherMatch(client, expected, uid)) return false;
         }
         if (!(await expungeUids(client, String(uid)))) throw new Error('messageDelete returned false — server did not confirm deletion');
         return true;
@@ -7521,9 +7552,14 @@ export class ImapManager {
               if (msg.envelope) copies.set(msg.uid, msg);
             }
             const sorted = { gone: [], same: [], other: [] };
+            const searched = new Map();
             for (const uid of uids) {
               const copy = copies.get(Number(uid));
-              sorted[!copy ? 'gone' : isRowsMessage(expectRows.get(Number(uid)), copy) ? 'same' : 'other'].push(uid);
+              const row = expectRows.get(Number(uid));
+              if (!copy) sorted.gone.push(uid);
+              else if (!isRowsMessage(row, copy)) sorted.other.push(uid);
+              else if (!bareMessageId(row.message_id) && await hasOtherMatch(client, row, uid, searched)) sorted.other.push(uid);
+              else sorted.same.push(uid);
             }
             ({ gone, same: toDelete, other: mismatched } = sorted);
           }

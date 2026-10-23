@@ -418,7 +418,7 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
   });
 
   const del = (qs) => fetch(`${base}/api/mail/draft/9?accountId=${ACCOUNT_ID}&${qs}`, { method: 'DELETE' });
-  const ROW = { message_id: '<draft@mailflow.sh>', date: '2026-10-21T09:00:00.000Z', subject: 'Hello' };
+  const ROW = { message_id: '<draft@mailflow.sh>', date: '2026-10-21T09:00:00.000Z', from_email: 'matthias@mailflow.sh', subject: 'Hello' };
 
   it('deletes a draft from the Drafts folder', async () => {
     query.mockResolvedValueOnce({ rows: [ACCOUNT_ROW] });          // owner check
@@ -441,7 +441,11 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     query.mockResolvedValueOnce({ rows: [] });                     // DELETE FROM messages
     const res = await del('folder=Drafts');
     expect(res.status).toBe(200);
-    expect(query).toHaveBeenCalledWith(expect.stringContaining('FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3'), [ACCOUNT_ID, 9, 'Drafts']);
+    // The row brings everything the check compares: Message-ID, date, sender and subject.
+    expect(query).toHaveBeenCalledWith(
+      expect.stringMatching(/^SELECT (?=.*\bmessage_id\b)(?=.*\bdate\b)(?=.*\bfrom_email\b)(?=.*\bsubject\b).* FROM messages WHERE account_id = \$1 AND uid = \$2 AND folder = \$3$/),
+      [ACCOUNT_ID, 9, 'Drafts'],
+    );
     expect(imapManager.permanentDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 9, 'Drafts', { expectRow: ROW });
     expect(imapManager.syncFolderOnDemand).not.toHaveBeenCalled();
   });

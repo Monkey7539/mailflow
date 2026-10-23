@@ -517,7 +517,7 @@ router.delete('/draft/:uid', async (req, res) => {
     // As a delete from the message list, the server copy must still be the row's message. A uid
     // with no row is deleted unchecked: the composer has it from its own save.
     const { rows: [row] } = await query(
-      'SELECT message_id, date, subject FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
+      'SELECT message_id, date, from_email, subject FROM messages WHERE account_id = $1 AND uid = $2 AND folder = $3',
       [account.id, uid, folder]
     );
     const deleted = await imapManager.permanentDeleteMessage(account, uid, folder, row ? { expectRow: row } : {});
