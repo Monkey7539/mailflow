@@ -914,6 +914,8 @@ export async function parseMessage(msg) {
 
 // Mirrors walkStructure's classification (imapManager.js) so the paperclip flag
 // agrees with the attachment list: an explicit attachment disposition anywhere,
+// a message/rfc822 part carrying a filename however it is disposed (an attached
+// .eml, which walkStructure lists as one file; nodemailer marks message/* inline),
 // or a text part carrying a filename alongside an unnamed text part serving as
 // the body (an inline .html report or .txt log the sender didn't dispose as an
 // attachment). Exported for tests.
@@ -925,8 +927,10 @@ export function detectAttachments(structure) {
   const visit = (node) => {
     if (!node) return;
     if (node.disposition === 'attachment') { explicit = true; return; }
-    if (node.childNodes?.length) { node.childNodes.forEach(visit); return; }
     const type = (node.type || '').toLowerCase();
+    if (type === 'message/rfc822'
+      && (node.dispositionParameters?.filename || node.parameters?.name)) { explicit = true; return; }
+    if (node.childNodes?.length) { node.childNodes.forEach(visit); return; }
     if (type === 'text/plain' || type === 'text/html' || type === 'application/xhtml+xml') {
       if (node.dispositionParameters?.filename || node.parameters?.name) namedText += 1;
       else unnamedText += 1;

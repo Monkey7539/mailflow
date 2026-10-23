@@ -29,6 +29,44 @@ describe('detectAttachments', () => {
     })).toBe(true);
   });
 
+  // imapflow gives a message/rfc822 part the embedded message's structure as its children.
+  const embeddedMessage = { type: 'multipart/alternative', childNodes: [{ type: 'text/plain' }, { type: 'text/html' }] };
+
+  it('flags a message/rfc822 part with a filename, however it is disposed', () => {
+    const withAttachedMessage = (wrapper) => ({
+      type: 'multipart/mixed',
+      childNodes: [{ type: 'text/plain' }, { type: 'message/rfc822', ...wrapper, childNodes: [embeddedMessage] }],
+    });
+    // nodemailer marks message/* inline unless told otherwise.
+    expect(detectAttachments(withAttachedMessage({
+      disposition: 'inline',
+      dispositionParameters: { filename: 'Original.eml' },
+      parameters: { name: 'Original.eml' },
+    }))).toBe(true);
+    expect(detectAttachments(withAttachedMessage({
+      disposition: 'inline', dispositionParameters: { filename: 'Original.eml' },
+    }))).toBe(true);
+    expect(detectAttachments(withAttachedMessage({ parameters: { name: 'Original.eml' } }))).toBe(true);
+    // Without the embedded structure, walkStructure still lists the part by its name.
+    expect(detectAttachments({
+      type: 'multipart/mixed',
+      childNodes: [{ type: 'text/plain' }, { type: 'message/rfc822', parameters: { name: 'Original.eml' } }],
+    })).toBe(true);
+  });
+
+  it('does not flag an embedded message with no filename, as a bounce report has', () => {
+    const bounce = (wrapper) => ({
+      type: 'multipart/report',
+      childNodes: [
+        { type: 'text/plain' },
+        { type: 'message/delivery-status' },
+        { type: 'message/rfc822', ...wrapper, childNodes: [embeddedMessage] },
+      ],
+    });
+    expect(detectAttachments(bounce({}))).toBe(false);
+    expect(detectAttachments(bounce({ disposition: 'inline' }))).toBe(false);
+  });
+
   it('does not flag an ordinary multipart/alternative body', () => {
     expect(detectAttachments({
       type: 'multipart/alternative',
