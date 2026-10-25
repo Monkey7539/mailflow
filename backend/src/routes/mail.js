@@ -13,10 +13,10 @@ import { imageProxyPath, proxyWidth, fetchProxiedImage, createUserLimiter } from
 import { imageCache, imageCacheKey } from '../services/imageCache.js';
 import { shrinkImage } from '../services/imageShrink.js';
 import { fitInlineImages } from '../services/inlineImageFit.js';
-import { needsCidRefetch, withoutCidMarker } from '../utils/cidRefs.js';
+import { needsCidRefetch, needsImageRefetch, settleCids, settledEarlier, withoutCidMarker } from '../utils/cidRefs.js';
 import { sanitizeDbText, storeFetchedBody } from '../services/messageBodyStore.js';
 import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
-import { draftMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
+import { draftMessageSql, resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings, readCopyTargets, pushSeen } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { listMessages } from '../services/messageService.js';
 import { recordSyncSignal } from '../services/diagnosticsRing.js';
@@ -26,6 +26,7 @@ import { safeFetch } from '../services/safeFetch.js';
 import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
 import { tokenize, extractFlagFeatures } from '../services/spamTokenizer.js';
 import { updateIncrementalForUser } from '../services/spamModelStore.js';
+import { findOwnedAccount, findOwnedMessage, findOwnedMessages, SIBLING_COUNT } from '../services/ownership.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -187,8 +188,8 @@ router.get('/messages/:id', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message ID' });
   try {
-    const result = await query(`
-      SELECT m.id, m.uid, m.folder, m.message_id, m.subject,
+    const message = await findOwnedMessage(req.session.userId, id, {
+      columns: `m.id, m.uid, m.folder, m.message_id, m.subject,
              m.from_name, m.from_email, m.to_addresses, m.cc_addresses,
              m.reply_to, m.in_reply_to, m.thread_references,
              m.date, m.snippet, m.is_read, m.is_starred,
@@ -196,15 +197,11 @@ router.get('/messages/:id', async (req, res) => {
              m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
              m.spam_verdict, m.spam_user_override, m.spam_score_ml,
              a.name AS account_name, a.email_address AS account_email,
-             a.color AS account_color
-      FROM messages m
-      JOIN email_accounts a ON m.account_id = a.id
-      WHERE m.id = $1
-        AND a.user_id = $2
-        AND m.is_deleted = false
-    `, [id, req.session.userId]);
-    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-    res.json(result.rows[0]);
+             a.color AS account_color`,
+      live: true,
+    });
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    res.json(message);
   } catch (err) {
     console.error('GET /messages/:id error:', err.message);
     res.status(500).json({ error: 'Failed to load message' });
@@ -382,8 +379,23 @@ router.get('/unread-counts', async (req, res) => {
   } catch (err) {
     console.warn('Snoozed count failed:', err.message);
   }
+  // Scheduled messages (#543): pending (scheduled, being edited or sent) and those that need the
+  // user (failed, paused, uncertain), for the sidebar's Scheduled view. Secondary like snoozed.
+  const scheduled = { pending: 0, attention: 0 };
+  try {
+    const r = await query(
+      `SELECT COUNT(*) FILTER (WHERE status IN ('scheduled', 'editing', 'sending'))::int AS pending,
+              COUNT(*) FILTER (WHERE status IN ('failed', 'paused', 'uncertain'))::int AS attention
+         FROM scheduled_messages WHERE user_id = $1`,
+      [req.session.userId]
+    );
+    scheduled.pending = r?.rows?.[0]?.pending ?? 0;
+    scheduled.attention = r?.rows?.[0]?.attention ?? 0;
+  } catch (err) {
+    console.warn('Scheduled count failed:', err.message);
+  }
   res.set('Cache-Control', 'no-store');
-  res.json({ total, byAccount, snapshots, complete, snoozed });
+  res.json({ total, byAccount, snapshots, complete, snoozed, scheduled });
 });
 
 // Hard cap on a live IMAP body fetch. Connection acquisition is already bounded at 30s
@@ -408,6 +420,72 @@ function fetchWithTimeout(promise, ms) {
 // The Bcc MailFlow recorded for a message you sent or a draft you saved (#585). Received mail has
 // none stored, so it shows none.
 const bccOf = (message) => (Array.isArray(message.bcc_addresses) ? message.bcc_addresses : []);
+
+// Messages whose cached body a repair fetch (below) lately failed to replace: served as stored for
+// a while, rather than every view waiting on a mail server that is not answering first. Kept in
+// this process only, and emptied past its cap: forgetting one costs a single fetch.
+const BODY_REPAIR_RETRY_MS = 10 * 60_000;
+const BODY_REPAIR_FAILURES_MAX = 10_000;
+const failedBodyRepairs = new Map();
+
+function bodyRepairFailedLately(id) {
+  const at = failedBodyRepairs.get(id);
+  if (at === undefined) return false;
+  if (Date.now() - at < BODY_REPAIR_RETRY_MS) return true;
+  failedBodyRepairs.delete(id);
+  return false;
+}
+
+function noteBodyRepairFailed(id) {
+  if (failedBodyRepairs.size >= BODY_REPAIR_FAILURES_MAX) failedBodyRepairs.clear();
+  failedBodyRepairs.set(id, Date.now());
+}
+
+// A view waits this long on a repair fetch, then gets the stored body: it was readable before,
+// and a mail server that accepts a connection and then says nothing would otherwise hold every
+// such view for the whole fetch timeout. The fetch goes on, and stores its body when it arrives.
+const BODY_REPAIR_TIMEOUT_MS = 8000;
+// Repair fetches under way, by message id: the views of one message while it runs share it.
+const bodyRepairs = new Map();
+
+// The body of `message` fetched again to repair the stored one, and stored, once however many
+// views ask at a time. Resolves to { stored } with what storeFetchedBody stored, or to
+// { keptHtml } when the stored HTML stays because the fetch came back with text alone (marked, so
+// it is not fetched again for that), or to {} when the message is gone from the server or its row
+// changed meanwhile. Either write lands only on the row as the repair found it: one that arrives
+// after the view stopped waiting must not replace a body stored since. A failure is noted, so the
+// views after it get the stored body for a while.
+function repairBody(message) {
+  const { id } = message;
+  const running = bodyRepairs.get(id);
+  if (running) return running;
+  const repair = (async () => {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    imapManager.noteUserActivity(account.id);
+    const body = await imapManager.fetchMessageBody(account, message.uid, message.folder);
+    if (body.html == null && body.text == null) {
+      noteBodyRepairFailed(id);
+      return {};
+    }
+    if (body.html == null) {
+      const keptHtml = settleCids(message.body_html, true);
+      const kept = await query('UPDATE messages SET body_html = $1 WHERE id = $2 AND body_html = $3 AND uid = $4 AND folder = $5',
+        [keptHtml, id, message.body_html, message.uid, message.folder]);
+      return kept?.rowCount ? { keptHtml } : {};
+    }
+    const { sanitized, safeText, stored } = await storeFetchedBody(id, body, { over: message });
+    return stored ? { stored: { sanitized, safeText, attachments: body.attachments } } : {};
+  })().catch((err) => {
+    console.warn('Body repair fetch failed, serving the stored body:', err.message || err);
+    noteBodyRepairFailed(id);
+    throw err;
+  }).finally(() => bodyRepairs.delete(id));
+  // A view that stopped waiting has nothing to do with the failure; it is noted above.
+  repair.catch(() => {});
+  bodyRepairs.set(id, repair);
+  return repair;
+}
 
 // Get full message body + attachments list
 router.get('/messages/:id/body', async (req, res) => {
@@ -438,10 +516,18 @@ router.get('/messages/:id/body', async (req, res) => {
     // CSS url(http://) in inline style attributes or <style> blocks
     /url\(\s*['"]?http:\/\//i.test(message.body_html)
   );
-  if ((message.body_html || message.body_text) && !hasCidRefs && !hasHttpImgs) {
-    const attachments = message.attachments
-      ? (typeof message.attachments === 'string' ? JSON.parse(message.attachments) : message.attachments)
-      : [];
+  const cachedAttachments = message.attachments
+    ? (typeof message.attachments === 'string' ? JSON.parse(message.attachments) : message.attachments)
+    : [];
+  const cached = Boolean(message.body_html || message.body_text);
+  // A body the release before served as stored, fetched again only to repair its images: one
+  // settled under an earlier marker, or one an email's own images may show in now (#640). When
+  // that fetch fails or is slow the stored body is served, as before (repairBody).
+  // A draft's stored body is what its composer saved, so it is never replaced this way.
+  const repairOnly = cached && !hasHttpImgs && (!hasCidRefs || settledEarlier(message.body_html));
+  const staleImages = repairOnly && !(message.flags || []).includes('\\Draft')
+    && needsImageRefetch(message.body_html, cachedAttachments);
+  const serveCached = async () => {
     // Apply head-stripping to already-cached HTML so emails stored before this
     // fix was deployed are cleaned up immediately on first view.
     let html = message.body_html ? stripEmailHead(message.body_html) : null;
@@ -502,22 +588,10 @@ router.get('/messages/:id/body', async (req, res) => {
     const imageStats = {};
     if (remoteImagesProxied && shown) responseHtml = proxyRemoteImages(shown, (raw, width) => imageProxyPath(id, raw, width), imageStats);
     const inline = req.query.original === '1' ? { html: responseHtml, count: 0 } : await fitInlineImages(responseHtml, req.session.userId);
-    return res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: message.body_text, attachments, hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
-  }
-
-  // Fetch from IMAP — signal user activity so background jobs back off during this request.
-  try {
-    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
-    const account = accountResult.rows[0];
-    imapManager.noteUserActivity(account.id);
-
-    const { html, text, attachments, cidsComplete } = await fetchWithTimeout(
-      imapManager.fetchMessageBody(account, message.uid, message.folder),
-      BODY_FETCH_TIMEOUT_MS
-    );
-
-    const { sanitized, safeText } = await storeFetchedBody(id, { html, text, attachments, cidsComplete });
-
+    return res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: message.body_text, attachments: cachedAttachments, hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
+  };
+  // A body fetched from the mail server and stored (storeFetchedBody), as the response gives it.
+  const serveFetched = async ({ sanitized, safeText, attachments }) => {
     // Apply remote-image blocking at response time — safeHtml (unblocked) is what
     // was written to the DB cache above, preserving the canonical body; the response is it
     // without the settled marker.
@@ -536,7 +610,35 @@ router.get('/messages/:id/body', async (req, res) => {
     const imageStats = {};
     if (remoteImagesProxied && sanitized) responseHtml = proxyRemoteImages(sanitized, (raw, width) => imageProxyPath(id, raw, width), imageStats);
     const inline = req.query.original === '1' ? { html: responseHtml, count: 0 } : await fitInlineImages(responseHtml, req.session.userId);
-    res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
+    return res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
+  };
+  if (cached && !hasCidRefs && !hasHttpImgs && !staleImages) return serveCached();
+  if (repairOnly) {
+    if (bodyRepairFailedLately(id)) return serveCached();
+    let repaired;
+    try {
+      repaired = await fetchWithTimeout(repairBody(message), BODY_REPAIR_TIMEOUT_MS);
+    } catch (err) {
+      // Still running, it stores its body when that arrives; until then the stored one is served.
+      if (err.message === 'BODY_FETCH_TIMEOUT') noteBodyRepairFailed(id);
+      return serveCached();
+    }
+    if (repaired.stored) return serveFetched(repaired.stored);
+    if (repaired.keptHtml) message.body_html = repaired.keptHtml;
+    return serveCached();
+  }
+
+  // Fetch from IMAP — signal user activity so background jobs back off during this request.
+  try {
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    imapManager.noteUserActivity(account.id);
+
+    const { html, text, attachments, cidsComplete } = await fetchWithTimeout(
+      imapManager.fetchMessageBody(account, message.uid, message.folder),
+      BODY_FETCH_TIMEOUT_MS
+    );
+    return await serveFetched({ ...await storeFetchedBody(id, { html, text, attachments, cidsComplete }), attachments });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error('Body fetch error:', msg);
@@ -581,14 +683,8 @@ router.get('/messages/:id/headers', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const result = await query(`
-    SELECT m.*, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   try {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
@@ -639,13 +735,10 @@ router.get('/messages/:id/bcc', async (req, res) => {
 
   const unreadable = "Could not read this draft's Bcc recipients from the mail server.";
   try {
-    const result = await query(`
-      SELECT m.account_id, m.uid, m.folder, m.message_id, m.bcc_addresses FROM messages m
-      JOIN email_accounts a ON m.account_id = a.id
-      WHERE m.id = $1 AND a.user_id = $2
-    `, [id, req.session.userId]);
-    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-    const message = result.rows[0];
+    const message = await findOwnedMessage(req.session.userId, id, {
+      columns: 'm.account_id, m.uid, m.folder, m.message_id, m.bcc_addresses',
+    });
+    if (!message) return res.status(404).json({ error: 'Message not found' });
     if (Array.isArray(message.bcc_addresses)) return res.json({ bcc: message.bcc_addresses });
 
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
@@ -681,14 +774,8 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const result = await query(`
-    SELECT m.*, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   const attachments = typeof message.attachments === 'string'
     ? JSON.parse(message.attachments || '[]')
@@ -765,14 +852,8 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
     return res.status(400).json({ error: 'Invalid attachment part identifier' });
   }
 
-  const result = await query(`
-    SELECT m.*, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   // Find attachment metadata
   const attachments = typeof message.attachments === 'string'
@@ -852,12 +933,7 @@ router.get('/messages/:id/image', async (req, res) => {
   const refsKey = `${userId}:${id}`;
   let url = cachedImageRefs(refsKey)?.get(raw);
   if (!url) {
-    const result = await query(`
-      SELECT m.body_html FROM messages m
-      JOIN email_accounts a ON m.account_id = a.id
-      WHERE m.id = $1 AND a.user_id = $2
-    `, [id, userId]);
-    const stored = result.rows[0]?.body_html;
+    const stored = (await findOwnedMessage(userId, id, { columns: 'm.body_html' }))?.body_html;
     if (!stored) return res.status(404).end();
     url = imageRefsFor(refsKey, stored).get(raw);
   }
@@ -896,13 +972,10 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const result = await query(`
-    SELECT m.id, m.uid, m.folder, m.subject, m.account_id, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, {
+    columns: 'm.id, m.uid, m.folder, m.subject, m.account_id, a.user_id',
+  });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   try {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
@@ -921,25 +994,16 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
   }
 });
 
+const WITH_SIBLING_COUNT = `m.*, a.user_id, ${SIBLING_COUNT}`;
+
 // Mark read/unread
 router.patch('/messages/:id/read', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
   const { read } = req.body;
 
-  const result = await query(`
-    SELECT m.*, a.user_id,
-           CASE WHEN m.message_id IS NULL THEN 1
-                ELSE (SELECT COUNT(*) FROM messages s
-                       WHERE s.account_id = m.account_id AND s.message_id = m.message_id)
-           END AS sibling_count
-    FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: WITH_SIBLING_COUNT });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   // Run DB update and account fetch concurrently — no dependency between them.
   // read_changed_at tells the IMAP sync not to overwrite this change for 30 s,
@@ -961,11 +1025,13 @@ router.patch('/messages/:id/read', async (req, res) => {
   // those rows (and their folder unread counts) so label views don't go stale. Gated on
   // gtd_enabled (so a non-GTD account is byte-identical to pre-GTD behaviour) AND on the
   // message actually having siblings — a plain single-folder message keeps the PK-only
-  // fast path. The IMAP \Seen flag is written to the acted folder only (below): Gmail
-  // propagates \Seen message-wide server-side, and per-copy writes to N folders would
-  // multiply round-trips — an asymmetry accepted in the GTD design.
+  // fast path. Gmail propagates Seen message-wide; per-copy servers need a write to
+  // each eligible flipped copy. Added writes do not delay this request's response.
+  const account = accountResult.rows[0];
+  let copies = [];
   if (Number(message.sibling_count) > 1 && await accountMaintainsLabelSiblings(message.account_id)) {
-    await fanOutReadToSiblings(message.account_id, message.message_id, read);
+    const flipped = await fanOutReadToSiblings(message.account_id, message.message_id, read) || [];
+    if (account && !imapManager.isLabelStore(account)) copies = flipped;
   }
 
   try {
@@ -976,6 +1042,14 @@ router.patch('/messages/:id/read', async (req, res) => {
     // Push failed — queue a durable retry so a later flag-sync pull can't silently revert
     // the user's change once the 30s local-wins window lapses.
     imapManager._enqueueFlagPush(message.account_id, id, '\\Seen', read);
+  }
+
+  if (copies.length) {
+    (async () => {
+      const flippedIds = new Set(copies.map(r => r.id));
+      const targets = await readCopyTargets(message.account_id, message.message_id, message);
+      await pushSeen(imapManager, account, message.account_id, targets.filter(r => r.id !== id && flippedIds.has(r.id)), read);
+    })().catch(err => console.warn('Read-copy push failed:', err.message));
   }
 
   // Refresh GTD section data if this message's thread carries a GTD label (its head shows read state).
@@ -990,19 +1064,8 @@ router.patch('/messages/:id/star', async (req, res) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
   const { starred } = req.body;
 
-  const result = await query(`
-    SELECT m.*, a.user_id,
-           CASE WHEN m.message_id IS NULL THEN 1
-                ELSE (SELECT COUNT(*) FROM messages s
-                       WHERE s.account_id = m.account_id AND s.message_id = m.message_id)
-           END AS sibling_count
-    FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: WITH_SIBLING_COUNT });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   // Run DB update and account fetch concurrently — no dependency between them.
   // star_changed_at tells the IMAP sync not to overwrite this change for 30 s.
@@ -1043,11 +1106,8 @@ router.post('/sync', async (req, res) => {
   const { accountId } = req.body; // optional — omit for all accounts
   if (accountId) {
     if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
-    const check = await query(
-      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-      [accountId, req.session.userId]
-    );
-    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+    const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id' });
+    if (!owned) return res.status(404).json({ error: 'Account not found' });
   }
   // Run sync in background so response returns immediately
   imapManager.syncNow(req.session.userId, accountId || null)
@@ -1062,11 +1122,8 @@ router.post('/sync-folders', async (req, res) => {
   const { accountId } = req.body; // optional — omit for all accounts
   if (accountId) {
     if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
-    const check = await query(
-      'SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2',
-      [accountId, req.session.userId]
-    );
-    if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+    const owned = await findOwnedAccount(req.session.userId, accountId, { columns: 'id' });
+    if (!owned) return res.status(404).json({ error: 'Account not found' });
   }
   // Run in background so the response returns immediately; the folders_synced
   // broadcast tells clients when to refetch the folder list.
@@ -1082,14 +1139,11 @@ router.post('/sync-folder', async (req, res) => {
   if (!UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
   if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
 
-  const check = await query(
-    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
-    [accountId, req.session.userId]
-  );
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
 
   // Fire-and-forget — response returns immediately, WebSocket sync_complete notifies frontend
-  imapManager.syncFolderOnDemand(check.rows[0], folder)
+  imapManager.syncFolderOnDemand(account, folder)
     .catch(err => console.error('syncFolderOnDemand error:', err.message));
 
   res.json({ ok: true });
@@ -1100,20 +1154,17 @@ router.post('/mark-all-read', async (req, res) => {
   const { accountId, folder = 'INBOX' } = req.body;
   if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'Invalid account id' });
   if (!isValidFolderName(folder)) return res.status(400).json({ error: 'Invalid folder name' });
-  const check = await query(
-    'SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2',
-    [accountId, req.session.userId]
-  );
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
   await query('UPDATE messages SET is_read = true, read_changed_at = NOW() WHERE account_id = $1 AND folder = $2', [accountId, folder]);
   await query('UPDATE folders SET unread_count = 0 WHERE account_id = $1 AND path = $2', [accountId, folder])
     .catch(err => console.error('Folder count update failed:', err.message));
   // Also update IMAP so the change survives the next sync (non-fatal if it fails)
-  imapManager.markAllReadImap(check.rows[0], folder).catch(err =>
+  imapManager.markAllReadImap(account, folder).catch(err =>
     console.warn('markAllReadImap failed:', err.message)
   );
   imapManager.scheduleCountRefresh?.(accountId);
-  imapManager.broadcast({ type: 'sync_complete', accountId }, check.rows[0].user_id);
+  imapManager.broadcast({ type: 'sync_complete', accountId }, account.user_id);
   res.json({ ok: true });
 });
 
@@ -1123,8 +1174,8 @@ router.post('/folders', async (req, res) => {
   if (!accountId || !name?.trim()) return res.status(400).json({ error: 'accountId and name required' });
   if (!isValidFolderName(name.trim())) return res.status(400).json({ error: 'Invalid folder name' });
   if (parentPath && !isValidFolderName(parentPath)) return res.status(400).json({ error: 'Invalid parent path' });
-  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
 
   // Join parent and leaf with '/' and let ensureFolder translate: it splits on
   // '/' and imapflow joins the segments with the server's real hierarchy
@@ -1137,7 +1188,7 @@ router.post('/folders', async (req, res) => {
   const requested = parentPath ? `${parentPath}/${name.trim()}` : name.trim();
 
   try {
-    const { path } = await imapManager.ensureFolder(check.rows[0], requested, { resolvePath: true });
+    const { path } = await imapManager.ensureFolder(account, requested, { resolvePath: true });
     // Store the account's delimiter too — rows inserted without one (NULL)
     // poison later delimiter lookups for subfolder creation and rename.
     const delimResult = await query(
@@ -1163,11 +1214,11 @@ router.post('/folders/delete', async (req, res) => {
   const { accountId, path } = req.body;
   if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
   if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
-  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
 
   try {
-    await imapManager.deleteFolder(check.rows[0], path);
+    await imapManager.deleteFolder(account, path);
   } catch (err) {
     console.error(`IMAP deleteFolder failed for ${path}:`, err.message);
     return res.status(500).json({ error: 'Failed to delete folder on server' });
@@ -1183,8 +1234,8 @@ router.post('/folders/rename', async (req, res) => {
   if (!accountId || !oldPath || !newName?.trim()) return res.status(400).json({ error: 'Missing required fields' });
   if (!isValidFolderName(newName.trim())) return res.status(400).json({ error: 'Invalid folder name' });
   if (!isValidFolderName(oldPath)) return res.status(400).json({ error: 'Invalid folder path' });
-  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
 
   // Build the new path by replacing only the last path component
   const delimResult = await query('SELECT delimiter FROM folders WHERE account_id = $1 AND path = $2', [accountId, oldPath]);
@@ -1194,7 +1245,7 @@ router.post('/folders/rename', async (req, res) => {
   const newPath = parts.join(delim);
 
   try {
-    await imapManager.renameFolder(check.rows[0], oldPath, newPath);
+    await imapManager.renameFolder(account, oldPath, newPath);
     // IMAP RENAME moves the entire subtree server-side — mirror that in the DB.
     // Updating only the exact path left every child folder (and its messages)
     // under the old path: the next folder sync then upserted the renamed tree
@@ -1268,9 +1319,8 @@ router.post('/folders/empty', async (req, res) => {
   const { accountId, path } = req.body;
   if (!accountId || !path) return res.status(400).json({ error: 'accountId and path required' });
   if (!isValidFolderName(path)) return res.status(400).json({ error: 'Invalid folder path' });
-  const check = await query('SELECT * FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
-  const account = check.rows[0];
+  const account = await findOwnedAccount(req.session.userId, accountId);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
 
   const inflightKey = `${accountId}:${path}`;
   if (emptyInFlight.has(inflightKey)) return res.status(409).json({ error: 'This folder is already being emptied' });
@@ -1314,14 +1364,7 @@ router.post('/messages/bulk-read', async (req, res) => {
   }
 
   try {
-    const result = await query(
-      `SELECT m.id, m.uid, m.folder, m.is_read, m.account_id, m.message_id FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
-    );
-
-    const owned = result.rows;
+    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.id, m.uid, m.folder, m.is_read, m.account_id, m.message_id' });
     if (!owned.length) return res.json({ ok: true, updated: [] });
 
     // Skip messages whose state already matches — avoid spurious DB writes and IMAP round-trips.
@@ -1348,8 +1391,7 @@ router.post('/messages/bulk-read', async (req, res) => {
     // belongs to a gtd_enabled account, adjusting each sibling folder's unread count.
     // Gating on gtd_enabled keeps a non-GTD account byte-identical to pre-GTD (no extra
     // fan-out query); the fan-out itself is also self-limiting for messages without
-    // siblings. IMAP \Seen is still written per acted row only (below); Gmail propagates
-    // it message-wide server-side.
+    // siblings. Gmail propagates Seen; other servers also push eligible flipped copies.
     // gtdUpdatedIds is scoped to toUpdate (rows whose read-state actually changed), so a
     // message already at the target state never triggers sibling fan-out here — unlike the
     // single-message handler above, which fans out unconditionally regardless of whether the
@@ -1362,7 +1404,7 @@ router.post('/messages/bulk-read', async (req, res) => {
       if (await accountMaintainsLabelSiblings(aid)) gtdAccts.add(aid);
     }));
     const gtdUpdatedIds = toUpdate.filter(m => gtdAccts.has(m.account_id)).map(m => m.id);
-    if (gtdUpdatedIds.length) await fanOutBulkReadToSiblings(gtdUpdatedIds, read);
+    const siblings = gtdUpdatedIds.length ? await fanOutBulkReadToSiblings(gtdUpdatedIds, read) || [] : [];
     // Reflect the bulk read/unread change on the user's other sessions in place (no full refetch).
     imapManager.broadcast({ type: 'message_flags', changes: toUpdate.map(m => ({ id: m.id, is_read: read })) }, req.session.userId);
 
@@ -1387,6 +1429,17 @@ router.post('/messages/bulk-read', async (req, res) => {
           imapManager._resolveFlagPush(accountId, msgs[i].id, '\\Seen'); // confirmed
         }
       });
+      if (siblings.length && gtdAccts.has(accountId) && account && !imapManager.isLabelStore(account)) {
+        (async () => {
+          const targets = [];
+          for (const mid of new Set(msgs.map(m => m.message_id))) {
+            targets.push(...await readCopyTargets(accountId, mid, msgs));
+          }
+          const acted = new Set(msgs.map(m => m.id));
+          const flipped = new Set(siblings.filter(r => r.account_id === accountId).map(r => r.id));
+          await pushSeen(imapManager, account, accountId, targets.filter(r => !acted.has(r.id) && flipped.has(r.id)), read);
+        })().catch(err => console.warn('Bulk read-copy push failed:', err.message));
+      }
     }
 
     // Refresh GTD section data for any updated thread that carries a GTD label.
@@ -1418,14 +1471,7 @@ router.post('/messages/bulk-star', async (req, res) => {
   }
 
   try {
-    const result = await query(
-      `SELECT m.id, m.uid, m.folder, m.is_starred, m.account_id, m.message_id FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
-    );
-
-    const owned = result.rows;
+    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.id, m.uid, m.folder, m.is_starred, m.account_id, m.message_id' });
     if (!owned.length) return res.json({ ok: true, updated: [] });
 
     const toUpdate = owned.filter(m => !!m.is_starred !== !!starred);
@@ -1496,14 +1542,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
 
   const moveGuards = [];
   try {
-    const result = await query(
-      `SELECT m.*, a.user_id, a.folder_mappings FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
-    );
-
-    const owned = result.rows;
+    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.*, a.user_id, a.folder_mappings' });
     if (!owned.length) return res.json({ ok: true, deleted: [] });
 
     // Guard source UIDs for the whole operation so reconcileDeletes can't delete a
@@ -1711,11 +1750,11 @@ router.post('/messages/bulk-delete', async (req, res) => {
 router.get('/mailbox-usage', async (req, res) => {
   const { accountId } = req.query;
   if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'valid accountId required' });
-  const acct = await query('SELECT id, folder_mappings FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!acct.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const acct = await findOwnedAccount(req.session.userId, accountId, { columns: 'id, folder_mappings' });
+  if (!acct) return res.status(404).json({ error: 'Account not found' });
   // Whether Archive is a usable cleanup action for this account (#403): the client
   // offers Archive vs Trash and needs to know if an archive folder can be resolved.
-  const archiveFolder = await resolveArchiveFolder(accountId, acct.rows[0].folder_mappings);
+  const archiveFolder = await resolveArchiveFolder(accountId, acct.folder_mappings);
 
   const summary = await query(
     `SELECT count(*)::int AS inbox_total, count(*) FILTER (WHERE is_bulk)::int AS bulk_total
@@ -1766,8 +1805,8 @@ router.get('/cleanup-preview', async (req, res) => {
   const { accountId, fromEmail } = req.query;
   if (!accountId || !UUID_RE.test(accountId)) return res.status(400).json({ error: 'valid accountId required' });
   if (!fromEmail || typeof fromEmail !== 'string' || !fromEmail.trim()) return res.status(400).json({ error: 'fromEmail required' });
-  const acct = await query('SELECT id FROM email_accounts WHERE id = $1 AND user_id = $2', [accountId, req.session.userId]);
-  if (!acct.rows.length) return res.status(404).json({ error: 'Account not found' });
+  const acct = await findOwnedAccount(req.session.userId, accountId, { columns: 'id' });
+  if (!acct) return res.status(404).json({ error: 'Account not found' });
 
   const rows = await query(
     `SELECT id FROM messages
@@ -1795,14 +1834,7 @@ router.post('/messages/bulk-move', async (req, res) => {
 
   const moveGuards = [];
   try {
-    const result = await query(
-      `SELECT m.*, a.user_id FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
-    );
-
-    const owned = result.rows;
+    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.*, a.user_id' });
     if (!owned.length) return res.json({ ok: true, moved: [] });
 
     // Guard every source (account, folder, uid) for the whole bulk move. bulkMoveMessages
@@ -1926,12 +1958,11 @@ router.post('/messages/:id/copy', async (req, res) => {
   if (!areValidUUIDs([id]) || !isValidFolderName(folder)) {
     return res.status(400).json({ error: 'Invalid message or folder' });
   }
-  const source = await query(`
-    SELECT m.id, m.account_id, m.uid, m.folder, a.folder_mappings
-    FROM messages m JOIN email_accounts a ON a.id = m.account_id
-    WHERE m.id = $1 AND a.user_id = $2 AND a.enabled = true AND m.is_deleted = false
-  `, [id, req.session.userId]);
-  const message = source.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, {
+    columns: 'm.id, m.account_id, m.uid, m.folder, a.folder_mappings',
+    enabledAccount: true,
+    live: true,
+  });
   if (!message) return res.status(404).json({ error: 'Message not found' });
   const destination = await query(`
     SELECT path, name, special_use FROM folders
@@ -1971,14 +2002,7 @@ router.post('/messages/bulk-archive', async (req, res) => {
 
   const moveGuards = [];
   try {
-    const result = await query(
-      `SELECT m.*, a.user_id, a.folder_mappings FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
-    );
-
-    const owned = result.rows;
+    const owned = await findOwnedMessages(req.session.userId, ids, { columns: 'm.*, a.user_id, a.folder_mappings' });
     if (!owned.length) return res.json({ ok: true, archived: [], noArchiveFolder: [] });
 
     // Guard source UIDs for the whole operation so reconcileDeletes can't delete a source
@@ -2252,15 +2276,7 @@ async function snoozedTogether(msg, userId) {
 }
 
 // The reader's own message, with its account's user.
-async function ownedMessage(id, userId) {
-  const r = await query(
-    `SELECT m.*, a.user_id FROM messages m
-     JOIN email_accounts a ON a.id = m.account_id
-     WHERE m.id = $1 AND a.user_id = $2`,
-    [id, userId]
-  );
-  return r.rows[0] || null;
-}
+const ownedMessage = (id, userId) => findOwnedMessage(userId, id, { columns: 'm.*, a.user_id' });
 
 // Snooze a message: move it to a Snoozed IMAP folder and record when to restore it
 router.post('/messages/:id/snooze', async (req, res) => {
@@ -2270,15 +2286,8 @@ router.post('/messages/:id/snooze', async (req, res) => {
   const { date: untilDate, error: untilError } = parseSnoozeUntil(req.body?.until);
   if (untilError) return res.status(400).json({ error: untilError });
 
-  // Ownership check
-  const msgResult = await query(
-    `SELECT m.*, a.user_id FROM messages m
-     JOIN email_accounts a ON a.id = m.account_id
-     WHERE m.id = $1 AND a.user_id = $2`,
-    [id, req.session.userId]
-  );
-  if (!msgResult.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const msg = msgResult.rows[0];
+  const msg = await ownedMessage(id, req.session.userId);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
 
   if (!msg.message_id) return res.status(400).json({ error: 'Message has no Message-ID header — cannot snooze' });
 
@@ -2419,14 +2428,8 @@ async function refuseStaleExpunge(req, res, account, message, wasUnread) {
 
 // Delete (move to trash; drafts are permanently deleted)
 async function deleteMessage(req, res, id) {
-  const result = await query(`
-    SELECT m.*, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const message = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, { columns: 'm.*, a.user_id' });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
 
   const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
   const account = accountResult.rows[0];
@@ -2611,14 +2614,8 @@ async function logSpamTraining(userId, message, folder, label, features) {
 // Helper: move a single message to a destination folder, update DB, log to
 // training_log, and broadcast folder_updated. Shared between /spam and /ham.
 async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
-  const result = await query(`
-    SELECT m.*, a.user_id, a.folder_mappings FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [messageId, userId]);
-
-  if (!result.rows.length) return { ok: false, status: 404, error: 'Message not found' };
-  const message = result.rows[0];
+  const message = await findOwnedMessage(userId, messageId, { columns: 'm.*, a.user_id, a.folder_mappings' });
+  if (!message) return { ok: false, status: 404, error: 'Message not found' };
 
   // v0.2: extract token/flag features at mark time (Solution C, migration
   // 0048) and feed the per-user Naive Bayes model incrementally. The stored
@@ -2720,14 +2717,9 @@ router.post('/messages/:id/spam', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const lookup = await query(`
-    SELECT m.account_id, a.folder_mappings FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const spamFolder = await resolveSpamFolder(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
+  const lookup = await findOwnedMessage(req.session.userId, id, { columns: 'm.account_id, a.folder_mappings' });
+  if (!lookup) return res.status(404).json({ error: 'Message not found' });
+  const spamFolder = await resolveSpamFolder(lookup.account_id, lookup.folder_mappings);
   if (!spamFolder) return res.status(422).json({ error: 'No spam folder configured for this account' });
 
   const result = await moveForSpamLabel(id, req.session.userId, spamFolder, 'spam');
@@ -2806,15 +2798,12 @@ router.post('/messages/:id/unsubscribe', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const result = await query(`
-    SELECT m.list_unsubscribe, m.list_unsubscribe_post
-    FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2 AND m.is_deleted = false
-  `, [id, req.session.userId]);
-
-  if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const { list_unsubscribe: rawUnsub, list_unsubscribe_post: rawUnsubPost } = result.rows[0];
+  const message = await findOwnedMessage(req.session.userId, id, {
+    columns: 'm.list_unsubscribe, m.list_unsubscribe_post',
+    live: true,
+  });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  const { list_unsubscribe: rawUnsub, list_unsubscribe_post: rawUnsubPost } = message;
   if (!rawUnsub) return res.status(400).json({ error: 'No unsubscribe header' });
   const list_unsubscribe = decodeMimeWords(rawUnsub);
   const list_unsubscribe_post = rawUnsubPost ? decodeMimeWords(rawUnsubPost) : rawUnsubPost;
@@ -2878,22 +2867,17 @@ router.post('/messages/:id/ham', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const lookup = await query(`
-    SELECT m.account_id, m.folder, a.folder_mappings FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
-
-  if (!lookup.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const allSpam = await resolveAllSpamPaths(lookup.rows[0].account_id, lookup.rows[0].folder_mappings);
-  if (!allSpam.has(lookup.rows[0].folder)) {
+  const lookup = await findOwnedMessage(req.session.userId, id, { columns: 'm.account_id, m.folder, a.folder_mappings' });
+  if (!lookup) return res.status(404).json({ error: 'Message not found' });
+  const allSpam = await resolveAllSpamPaths(lookup.account_id, lookup.folder_mappings);
+  if (!allSpam.has(lookup.folder)) {
     return res.status(400).json({ error: 'Message is not in the spam folder' });
   }
 
   // Resolve inbox folder per account — Gmail, Exchange and others may not use
   // the literal 'INBOX' (e.g. 'Inbox' on Dovecot, 'Posteingang', etc.).
   // Same pattern as folder_mappings.sent / .drafts in send.js and draft.js.
-  const inboxFolder = lookup.rows[0].folder_mappings?.inbox || 'INBOX';
+  const inboxFolder = lookup.folder_mappings?.inbox || 'INBOX';
   const result = await moveForSpamLabel(id, req.session.userId, inboxFolder, 'ham');
   if (!result.ok) return res.status(result.status).json({ error: result.error });
   res.json(result.body);

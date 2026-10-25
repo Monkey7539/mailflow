@@ -16,6 +16,9 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 
 import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, contentLocationFromMimeHeader, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId, noteDraftsChanged } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { ensureFreshToken } from './imapManager.js';
+import { clearRefreshFailure, noteFreshToken, noteRefreshFailure, refreshFailureFor } from './accountErrorCode.js';
+import { refreshMicrosoftToken } from '../routes/oauth.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
@@ -2055,14 +2058,14 @@ describe('inline images the body never shows are listed as attachments', () => {
       expect(body.attachments.map(a => a.filename)).toEqual(['chart.png']);
     });
 
-    it('matches names only inside a multipart/related', async () => {
+    it('matches a Content-Location only inside a multipart/related', async () => {
       const { mgr, account } = serve({
         type: 'multipart/mixed',
-        childNodes: [html(), attachedImage('2', { location: 'photo.png', dispositionParameters: { filename: 'photo.png' } })],
+        childNodes: [html(), attachedImage('2', { location: 'photo.png', dispositionParameters: { filename: 'IMG_1.png' } })],
       }, { '1': '<img src="photo.png">', '2': PNG });
       const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
       expect(body.html).toBe('<img src="photo.png">');
-      expect(body.attachments.map(a => a.filename)).toEqual(['photo.png']);
+      expect(body.attachments.map(a => a.filename)).toEqual(['IMG_1.png']);
     });
 
     it('ignores names written as text, in a comment or in a script', async () => {
@@ -2353,6 +2356,266 @@ describe('inline images the body never shows are listed as attachments', () => {
       expect(atts.map(a => a.filename)).toEqual(['x.png']);
     });
 
+    // Shapes still broken in 4.0.3 (#640): a layout image outside any multipart/related named by
+    // file name, sent as application/octet-stream or with no type, cited as cid: with its file
+    // name, or typed image/x-png or another alias.
+    it('shows an attached image outside a multipart/related that the HTML names by file name, and keeps it listed', async () => {
+      for (const extra of [{ disposition: 'attachment' }, { disposition: 'inline' }, { disposition: undefined }]) {
+        const { mgr, account } = serve({
+          type: 'multipart/mixed',
+          childNodes: [
+            html(),
+            attachedImage('2', { type: 'image/jpeg', ...extra, dispositionParameters: { filename: 'hdr.jpg' } }),
+            { ...report },
+          ],
+        }, { '1': '<table><tr><td background="hdr.jpg"><img src="HDR.JPG"><img src=hdr.jpg></td></tr></table>', '2': '/9j/', '3': 'JVBERi0=' });
+        const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+        // A file name is matched exactly, as a URL: HDR.JPG is another file.
+        expect(body.html).toBe('<table><tr><td background="data:image/jpeg;base64,/9j/"><img src="HDR.JPG"><img src="data:image/jpeg;base64,/9j/"></td></tr></table>');
+        expect(body.attachments).toEqual([
+          expect.objectContaining({ part: '2', filename: 'hdr.jpg', shownInline: true }),
+          expect.objectContaining({ filename: 'invoice.pdf' }),
+        ]);
+        expect(body.attachments[1].shownInline).toBeUndefined();
+        expect(body.inlineParts).toEqual(['2']);
+        expect(body.cidsComplete).toBe(true);
+      }
+    });
+
+    it('leaves an attached image the HTML outside a multipart/related never names listed and unshown', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), attachedImage('2', { type: 'image/jpeg', dispositionParameters: { filename: 'holiday.jpg' } })],
+      }, { '1': '<p>See holiday.jpg</p><img src="https://x.example/holiday.jpg">', '2': '/9j/' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).not.toContain('data:');
+      expect(body.attachments).toEqual([expect.objectContaining({ filename: 'holiday.jpg' })]);
+      expect(body.attachments[0].shownInline).toBeUndefined();
+      expect(body.inlineParts).toEqual([]);
+    });
+
+    it('shows an application/octet-stream or untyped part named like an image, typed by its bytes', async () => {
+      const octet = (part, extra) => ({ part, type: 'application/octet-stream', encoding: 'base64', size: 3000, ...extra });
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'multipart/related', childNodes: [
+            html('1.1'),
+            // Inline, with a Content-ID: an inline image.
+            octet('1.2', { id: '<hdr@x>', disposition: 'inline', dispositionParameters: { filename: 'hdr.JPG' } }),
+            // Marked as an attachment, with a Content-ID.
+            octet('1.3', { id: '<badge@x>', disposition: 'attachment', dispositionParameters: { filename: 'badge.png' } }),
+            // No type at all.
+            octet('1.4', { type: '', id: '<icon@x>', disposition: 'attachment', parameters: { name: 'icon.gif' } }),
+          ] },
+          // A real file sent as application/octet-stream is still a file.
+          octet('2', { id: '<doc@x>', disposition: 'attachment', dispositionParameters: { filename: 'notes.bin' } }),
+          octet('3', { disposition: 'attachment', dispositionParameters: { filename: 'scan.webp' } }),
+        ],
+      }, {
+        '1.1': '<img src="cid:hdr@x"><table background="cid:badge@x"><tr><td style="background:url(cid:icon@x)"><img src="cid:doc@x"></td></tr></table>',
+        '1.2': '/9j/', '1.3': PNG, '1.4': 'R0lGODlh', '2': 'AAAA', '3': 'UklGRgAAAABXRUJQ',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe(`<img src="data:image/jpeg;base64,/9j/"><table background="data:image/png;base64,${PNG}">`
+        + '<tr><td style="background:url(data:image/gif;base64,R0lGODlh)"><img src="cid:doc@x"></td></tr></table>');
+      expect(body.attachments.map(a => a.filename)).toEqual(['notes.bin', 'scan.webp']);
+      expect(body.cidsComplete).toBe(true);
+      const { sanitizeEmail: realSanitize } = await vi.importActual('./emailSanitizer.js');
+      expect(realSanitize(body.html)).toContain(`background="data:image/png;base64,${PNG}"`);
+    });
+
+    it('lists an inline application/octet-stream image the HTML never references', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 3000, id: '<p@x>', disposition: 'inline', dispositionParameters: { filename: 'photo.jpeg' } }],
+      }, { '1': '<p>Hi</p>', '2': '/9j/' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.attachments).toEqual([expect.objectContaining({ part: '2', filename: 'photo.jpeg', type: 'application/octet-stream' })]);
+    });
+
+    it('resolves a cid: that is an image part\'s file name rather than its Content-ID', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'multipart/related', childNodes: [
+            html('1.1'),
+            // M: another Content-ID, inline.
+            { part: '1.2', type: 'image/jpeg', encoding: 'base64', size: 900, id: '<0123@mailer>', disposition: 'inline', dispositionParameters: { filename: 'hdr.jpg' } },
+            // M: another Content-ID, marked as an attachment.
+            attachedImage('1.3', { id: '<4567@mailer>', dispositionParameters: { filename: 'Badge.png' } }),
+            // N: no Content-ID.
+            { part: '1.4', type: 'image/gif', encoding: 'base64', size: 900, disposition: 'inline', dispositionParameters: { filename: 'spacer gif.gif' } },
+          ] },
+          // N, outside a multipart/related: shown and still listed.
+          attachedImage('2', { type: 'image/jpeg', dispositionParameters: { filename: 'photo.jpg' } }),
+        ],
+      }, {
+        // Case, angle brackets and percent-encoding as for a Content-ID.
+        '1.1': '<img src="cid:HDR.jpg"><img src="cid:<badge.png>"><img src="cid:spacer%20gif.gif"><img src="cid:photo.jpg">',
+        '1.2': '/9j/', '1.3': PNG, '1.4': 'R0lG', '2': 'BBBB',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe(`<img src="data:image/jpeg;base64,/9j/"><img src="data:image/png;base64,${PNG}">`
+        + '<img src="data:image/gif;base64,R0lG"><img src="data:image/jpeg;base64,BBBB">');
+      expect(body.attachments).toEqual([expect.objectContaining({ part: '2', filename: 'photo.jpg', shownInline: true })]);
+      expect(body.cidsComplete).toBe(true);
+    });
+
+    it('leaves a cid: file name two image parts share, or one a Content-ID answers, as it is', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [
+          html(),
+          attachedImage('2', { id: '<a@x>', dispositionParameters: { filename: 'logo.png' } }),
+          attachedImage('3', { id: '<b@x>', dispositionParameters: { filename: 'LOGO.png' } }),
+          // Its Content-ID is another image's file name: the Content-ID wins.
+          attachedImage('4', { id: '<pic.png>', dispositionParameters: { filename: 'one.png' } }),
+          attachedImage('5', { id: '<c@x>', dispositionParameters: { filename: 'pic.png' } }),
+        ],
+      }, { '1': '<img src="cid:logo.png"><img src="cid:pic.png">', '2': PNG, '3': 'AAAA', '4': 'BBBB', '5': 'CCCC' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe('<img src="cid:logo.png"><img src="data:image/png;base64,BBBB">');
+      expect(body.attachments.map(a => a.filename)).toEqual(['logo.png', 'LOGO.png', 'pic.png']);
+    });
+
+    it('builds a data: URI the sanitizer keeps from image/jpg, image/x-png and other aliases', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [
+          html(),
+          { part: '2', type: 'IMAGE/JPG', encoding: 'base64', size: 900, id: '<a@x>', disposition: 'inline' },
+          { part: '3', type: 'image/x-png', encoding: 'base64', size: 900, id: '<b@x>' },
+          attachedImage('4', { type: 'image/pjpeg', id: '<c@x>', dispositionParameters: { filename: 'c.jpg' } }),
+          attachedImage('5', { type: 'image/x-ms-bmp', id: '<d@x>', dispositionParameters: { filename: 'd.bmp' } }),
+        ],
+      }, {
+        '1': '<table background="cid:a@x"><tr><td background="cid:b@x"></td><td background="cid:c@x"></td><th background="cid:d@x"></th></tr></table>',
+        '2': '/9j/', '3': PNG, '4': 'AAAA', '5': 'Qk0=',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      const { sanitizeEmail: realSanitize } = await vi.importActual('./emailSanitizer.js');
+      const shown = realSanitize(body.html);
+      for (const uri of ['data:image/jpeg;base64,/9j/', `data:image/png;base64,${PNG}`, 'data:image/jpeg;base64,AAAA', 'data:image/bmp;base64,Qk0=']) {
+        expect(shown).toContain(`background="${uri}"`);
+      }
+      expect(body.attachments).toEqual([]);
+    });
+
+    it('still matches a file name in a synced body outside a multipart/related only once its size is known', () => {
+      const structure = (size) => ({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size, disposition: 'attachment', dispositionParameters: { filename: 'hdr.jpg' } }],
+      });
+      const doc = new Map([['1', Buffer.from('<img src="hdr.jpg">')]]);
+      expect(extractBodyFromMsg({ bodyStructure: structure(900), bodyParts: doc }).html).toMatch(/^<img src="cid:part-2-[0-9a-f]{12}@mailflow\.invalid">$/);
+      expect(extractBodyFromMsg({ bodyStructure: structure(0), bodyParts: doc }).html).toBe('<img src="hdr.jpg">');
+    });
+
+    // An HTML page, an SVG and a PDF, each sent as application/octet-stream (or untyped) and named
+    // like a PNG: what the HTML names them is not shown, and they stay files to download.
+    it('keeps a part named like an image whose bytes are not one a file, in a multipart/related or not', async () => {
+      const notImages = {
+        html: Buffer.from('<html><body>Hi</body></html>').toString('base64'),
+        svg: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>x()</script></svg>').toString('base64'),
+        pdf: Buffer.from('%PDF-1.4\n%x\n').toString('base64'),
+      };
+      const octet = (part, name, extra) => ({ part, type: 'application/octet-stream', encoding: 'base64', size: 900, disposition: 'attachment', dispositionParameters: { filename: name }, ...extra });
+      for (const [kind, bytes] of Object.entries(notImages)) {
+        for (const related of [true, false]) {
+          const parts = [
+            html(related ? '1.1' : '1'),
+            octet(related ? '1.2' : '2', 'scan.png'),
+            octet(related ? '1.3' : '3', 'logo.png', { id: '<logo@x>' }),
+            // Inline with a Content-ID: walked as an inline image, so it is listed again.
+            octet(related ? '1.4' : '4', 'icon.png', { id: '<icon@x>', disposition: 'inline', type: '' }),
+          ];
+          const n = (p) => (related ? `1.${p}` : String(p));
+          const { mgr, account } = serve(related ? { type: 'multipart/related', childNodes: parts } : { type: 'multipart/mixed', childNodes: parts }, {
+            [n(1)]: '<img src="scan.png"><img src="cid:logo@x"><img src="cid:icon@x">',
+            [n(2)]: bytes, [n(3)]: bytes, [n(4)]: bytes,
+          });
+          const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+          const label = `${kind} ${related ? 'related' : 'mixed'}`;
+          expect(body.html, label).not.toContain('data:');
+          expect(body.attachments.map(a => a.filename).sort(), label).toEqual(['icon.png', 'logo.png', 'scan.png']);
+          expect(body.attachments.every(a => !a.shownInline && a.type === 'application/octet-stream'), label).toBe(true);
+          expect(body.inlineParts, label).toEqual([]);
+          // A part that will never be an image is no reason to fetch the body again.
+          expect(body.cidsComplete, label).toBe(true);
+        }
+      }
+    });
+
+    it('drops a related part named like an image from the list only once its bytes are one', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 900, disposition: 'attachment', dispositionParameters: { filename: 'hdr.png' } }, report],
+      }, { '1': '<img src="hdr.png">', '2': 'R0lGODlhAQABAAAAACw=', '3': 'JVBERi0=' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      // Named .png, but a GIF: shown as what it is.
+      expect(body.html).toBe('<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">');
+      expect(body.attachments.map(a => a.filename)).toEqual(['invoice.pdf']);
+    });
+
+    // Quoted-printable image bytes read like QP text (=3D, =D0), which counted the image as missing:
+    // the body was never marked settled and every view fetched it again.
+    it('embeds a quoted-printable image as its decoded bytes, and counts the fetch complete', async () => {
+      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('=\u00d0\u00d1 rest of a picture')]);
+      const qp = [...png].map(b => (b >= 33 && b <= 126 && b !== 61 ? String.fromCharCode(b) : `=${b.toString(16).toUpperCase().padStart(2, '0')}`)).join('');
+      for (const type of ['image/png', 'application/octet-stream']) {
+        const { mgr, account } = serve({
+          type: 'multipart/related',
+          childNodes: [html(), { part: '2', type, encoding: 'quoted-printable', size: 900, id: '<q@x>', disposition: 'inline', dispositionParameters: { filename: 'q.png' } }],
+        }, { '1': '<img src="cid:q@x">', '2': qp });
+        const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+        expect(body.html, type).toBe(`<img src="data:image/png;base64,${png.toString('base64')}">`);
+        expect(body.cidsComplete, type).toBe(true);
+        expect(body.attachments, type).toEqual([]);
+      }
+    });
+
+    it('settles a body whose image part holds text, rather than fetching it again on every view', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [html(), { part: '2', type: 'image/svg+xml', encoding: 'quoted-printable', size: 900, id: '<s@x>', disposition: 'inline' }],
+      }, { '1': '<img src="cid:s@x">', '2': '<svg xmlns=3D"http://www.w3.org/2000/svg"></svg>' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe('<img src="cid:s@x">');
+      expect(body.cidsComplete).toBe(true);
+    });
+
+    it('lists an unreferenced inline part named like an image but holding a PDF once', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 900, id: '<s@x>', disposition: 'inline', dispositionParameters: { filename: 'scan.png' } }],
+      }, { '1': '<p>Scan attached</p>', '2': Buffer.from('%PDF-1.4').toString('base64') });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.attachments.map(a => a.filename)).toEqual(['scan.png']);
+    });
+
+    it('stays fast on cid: file name references', () => {
+      const structure = {
+        type: 'multipart/mixed',
+        childNodes: [html(), ...Array.from({ length: 200 }, (_, i) => attachedImage(String(i + 2), { dispositionParameters: { filename: `${'n'.repeat(2000)}${i}.png` } }))],
+      };
+      const time = (doc) => {
+        const started = performance.now();
+        extractBodyFromMsg({ bodyStructure: structure, bodyParts: new Map([['1', Buffer.from(doc)]]) });
+        return performance.now() - started;
+      };
+      // Against plain image URLs of the same size on the same machine.
+      const plain = time('<img src="https://x.example/a.png">'.repeat(10_000));
+      for (const doc of [
+        '<img src="cid:nnnnnnnnnnnnnnnnnnnnnnnnn.png">'.repeat(10_000),
+        `<img src="cid:${'%41'.repeat(100_000)}">`,
+        Array.from({ length: 10_000 }, (_, i) => `<img src="cid:${i}.png">`).join(''),
+        `<img src="cid:${' '.repeat(300_000)}`,
+      ]) {
+        expect(time(doc)).toBeLessThan(plain * 8 + 100);
+      }
+    });
+
     it('stays fast on hostile HTML and names', () => {
       const names = Array.from({ length: 200 }, (_, i) => `${'a'.repeat(2000)}${i}`);
       const structure = {
@@ -2460,6 +2723,42 @@ describe("connectAccount attaches 'error' before connect (#360)", () => {
     expect(ImapFlow).toHaveBeenCalledTimes(1);
     expect(errorListenersAtConnect).toBeGreaterThanOrEqual(1);
     expect(emitThrew).toBe(false);
+  });
+});
+
+// An OAuth account whose refresh failed for good retries a stale token on every tick. With the
+// refresh failure remembered, the rejection takes the long auth backoff (#674); without it,
+// a rejection right after a new token stays on the short path, as before.
+describe('connectAccount: the auth backoff for an OAuth account with a dead refresh', () => {
+  const setup = () => {
+    resolveForConnection.mockReset().mockRejectedValue(new Error('AUTHENTICATE failed.'));
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: false });
+    query.mockReset().mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr.broadcast = vi.fn();
+    return mgr;
+  };
+  const acct = { id: 'acct-dead-refresh', user_id: 'u1', email_address: 'me@outlook.com', oauth_provider: 'microsoft', imap_host: 'outlook.office365.com', imap_port: 993, imap_tls: true, auth_user: 'me@outlook.com' };
+  afterEach(() => { clearRefreshFailure(acct.id); vi.restoreAllMocks(); });
+
+  it('arms the long auth backoff when the refresh is known to be dead', async () => {
+    const mgr = setup();
+    noteRefreshFailure(acct.id, { code: 'oauth_reauth', detail: 'AADSTS70008: expired' });
+    const before = Date.now();
+    expect(await mgr.connectAccount(acct)).toBe(false);
+    expect(mgr._connectCooldown.get(acct.id)?.until).toBeGreaterThanOrEqual(before + 5 * 60 * 1000);
+  });
+
+  it('does not, for the same rejection with no refresh failure remembered', async () => {
+    const mgr = setup();
+    expect(await mgr.connectAccount(acct)).toBe(false);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
   });
 });
 
@@ -2823,6 +3122,131 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
 
 // ── sync_error recording — every path that gives up records, every success clears ──────────
 
+// What the UI is told to do about a failure (#674): every recording site goes through
+// _recordAccountError, so the code is decided there, next to the text.
+describe('_recordAccountError: sync_error_code', () => {
+  const ctx = () => ({ _syncErrorState: new Map(), _accountErrorStreak: new Map(), broadcast: vi.fn() });
+  const outlook = { id: 'ms-1', user_id: 'u1', email_address: 'maria.lopez@outlook.com', oauth_provider: 'microsoft', oauth_tenant_id: 'consumers' };
+  const work = { id: 'ms-2', user_id: 'u1', email_address: 'maria@contoso.example', oauth_provider: 'microsoft', oauth_tenant_id: 'common' };
+  const pw = { id: 'pw-1', user_id: 'u1', email_address: 'maria@example.com', oauth_provider: null };
+  const written = () => query.mock.calls.find(([sql]) => /SET sync_error = \$1/.test(sql))?.[1];
+
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [] }); });
+  afterEach(() => { for (const a of [outlook, work, pw]) clearRefreshFailure(a.id); });
+
+  it.each([
+    [outlook, 'User is authenticated but not connected.', 'ms_imap_disabled_personal'],
+    [work, 'User is authenticated but not connected.', 'ms_imap_disabled_work'],
+    [outlook, 'AUTHENTICATE failed.', 'oauth_reauth'],
+    [pw, '[AUTHENTICATIONFAILED] Invalid credentials', 'auth_failed'],
+    [pw, 'getaddrinfo ENOTFOUND imap.example.com', 'connection'],
+  ])('records %#: %s as %s, in the row and to the client', async (account, detail, code) => {
+    const self = ctx();
+    await ImapManager.prototype._recordAccountError.call(self, account, detail);
+    expect(written()).toEqual([detail, account.id, code]);
+    expect(self.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: account.id, error: detail, code }, 'u1');
+  });
+
+  it('records a refresh that failed for good instead of the AUTHENTICATE failure it caused', async () => {
+    const self = ctx();
+    noteRefreshFailure(outlook.id, { code: 'oauth_reauth', detail: 'AADSTS700082: The refresh token has expired due to inactivity.' });
+    await ImapManager.prototype._recordAccountError.call(self, outlook, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AADSTS700082: The refresh token has expired due to inactivity.', outlook.id, 'oauth_reauth']);
+  });
+
+  it('rewrites the same text when its code changes', async () => {
+    const self = ctx();
+    const acct = { ...outlook, id: 'ms-dedup' };
+    noteFreshToken(acct.id);
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AUTHENTICATE failed.', acct.id, 'connection']);
+    // The token is no longer fresh: same text, now "sign in again".
+    noteFreshToken(acct.id, Date.now() - 60 * 60 * 1000);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AUTHENTICATE failed.', acct.id, 'oauth_reauth']);
+    // And unchanged, it is not written again.
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toBeUndefined();
+  });
+
+  it('clears the code with the text', async () => {
+    const self = ctx();
+    await ImapManager.prototype._recordAccountError.call(self, outlook, 'User is authenticated but not connected.');
+    await ImapManager.prototype._clearAccountError.call(self, outlook);
+    expect(query).toHaveBeenLastCalledWith('UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', [outlook.id]);
+    expect(self.broadcast).toHaveBeenLastCalledWith({ type: 'account_connected', accountId: outlook.id }, 'u1');
+  });
+});
+
+describe('ensureFreshToken: a refresh that cannot succeed is remembered, not swallowed', () => {
+  const soon = () => new Date(Date.now() + 60 * 1000).toISOString();
+  const account = () => ({ id: 'ms-9', email_address: 'me@outlook.com', oauth_provider: 'microsoft', oauth_token_expiry: soon() });
+
+  beforeEach(() => { vi.spyOn(console, 'error').mockImplementation(() => {}); vi.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => { clearRefreshFailure('ms-9'); vi.restoreAllMocks(); refreshMicrosoftToken.mockReset(); });
+
+  it('notes a terminal failure and goes on with the stored token', async () => {
+    const err = Object.assign(new Error('AADSTS70008: The refresh token has expired due to inactivity.'), { accountErrorCode: 'oauth_reauth' });
+    refreshMicrosoftToken.mockRejectedValueOnce(err);
+    const a = account();
+    await expect(ensureFreshToken(a)).resolves.toBe(a);
+    expect(refreshFailureFor('ms-9')).toEqual({ code: 'oauth_reauth', detail: err.message });
+  });
+
+  it('does not note a failure that may pass by itself', async () => {
+    refreshMicrosoftToken.mockRejectedValueOnce(new Error('fetch failed'));
+    await ensureFreshToken(account());
+    expect(refreshFailureFor('ms-9')).toBeNull();
+  });
+
+  it('forgets the failure once a refresh succeeds', async () => {
+    noteRefreshFailure('ms-9', { code: 'oauth_reauth', detail: 'old' });
+    refreshMicrosoftToken.mockImplementationOnce(async (a) => ({ ...a, oauth_access_token: 'new' }));
+    await ensureFreshToken(account());
+    expect(refreshFailureFor('ms-9')).toBeNull();
+  });
+});
+
+describe('forgetAccountError', () => {
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [] }); });
+
+  it('clears the row and the cache, so the same failure after a retry is written again', async () => {
+    const acct = { id: 'f1', user_id: 'u1', email_address: 'x@example.com' };
+    const self = { _syncErrorState: new Map(), _accountErrorStreak: new Map(), _errorForgets: new Map(), broadcast: vi.fn(), forgetAccountError: ImapManager.prototype.forgetAccountError };
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    await self.forgetAccountError('f1');
+    expect(query).toHaveBeenLastCalledWith('UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', ['f1']);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells open account lists the error is gone', async () => {
+    const self = { _syncErrorState: new Map(), _errorForgets: new Map(), broadcast: vi.fn() };
+    await ImapManager.prototype.forgetAccountError.call(self, 'f2', 'u1');
+    expect(self.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'f2' }, 'u1');
+  });
+
+  it('a record in flight during the forget does not cache its text, so the next identical failure is written', async () => {
+    const acct = { id: 'f3', user_id: 'u1', email_address: 'x@example.com' };
+    const self = { _syncErrorState: new Map(), _accountErrorStreak: new Map(), _errorForgets: new Map(), broadcast: vi.fn() };
+    let release;
+    query.mockImplementationOnce(() => new Promise(r => { release = () => r({ rows: [] }); }));
+    const inFlight = ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    await new Promise(r => setTimeout(r, 0));
+    // The forget's UPDATE lands, then the in-flight record's write completes.
+    await ImapManager.prototype.forgetAccountError.call(self, 'f3', 'u1');
+    release();
+    await inFlight;
+    expect(self._syncErrorState.has('f3')).toBe(false);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('_recordAccountError / _clearAccountError', () => {
   const acct = { id: 'a1', user_id: 'u1', email_address: 'x@example.com' };
 
@@ -2852,11 +3276,11 @@ describe('_recordAccountError / _clearAccountError', () => {
     expect(m.broadcast).not.toHaveBeenCalled();
     await m._recordAccountError(acct, 'IMAP connect timeout (30000ms)');
     expect(query).toHaveBeenCalledWith(
-      'UPDATE email_accounts SET sync_error = $1 WHERE id = $2',
-      ['IMAP connect timeout (30000ms)', 'a1'],
+      'UPDATE email_accounts SET sync_error = $1, sync_error_code = $3 WHERE id = $2',
+      ['IMAP connect timeout (30000ms)', 'a1', 'connection'],
     );
     expect(m.broadcast).toHaveBeenCalledWith(
-      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)' }, 'u1',
+      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)', code: 'connection' }, 'u1',
     );
   });
 
@@ -2880,7 +3304,7 @@ describe('_recordAccountError / _clearAccountError', () => {
     m.broadcast.mockClear();
     await m._clearAccountError(acct);
     expect(query).toHaveBeenLastCalledWith(
-      'UPDATE email_accounts SET sync_error = NULL WHERE id = $1', ['a1'],
+      'UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', ['a1'],
     );
     expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'a1' }, 'u1');
   });
@@ -3680,21 +4104,21 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
     // Two unrelated senders writing to it have it in common, which is not correspondence:
     // forwarded mail, catch-all domains, mailing lists and BCC all produce this.
     const FWD_ACCOUNT = 'acct-forwarded';
-    getAccountAddresses.mockResolvedValue(['simanoom@gmail.com']);
+    getAccountAddresses.mockResolvedValue(['forward@example.com']);
     query.mockResolvedValueOnce({
       rows: [{
         thread_id: 'storage-alert-thread',
         from_email: 'alert-3385@lxisa.zub',
-        to_addresses: [{ email: 'me@aol.com' }],
+        to_addresses: [{ email: 'me@example.com' }],
         cc_addresses: [],
       }],
     });
 
     const id = await computeThreadId(FWD_ACCOUNT, '<second@yxcoi.isj>', ...noHeaders, 'Action required: storage 100% full', {
       fromEmail: 'alert-6476@yxcoi.isj',
-      to: [{ email: 'me@aol.com' }],
+      to: [{ email: 'me@example.com' }],
       cc: [],
-      own: 'simanoom@gmail.com',
+      own: 'forward@example.com',
     });
 
     expect(id).toBe('<second@yxcoi.isj>'); // its own thread, not the first sender's
