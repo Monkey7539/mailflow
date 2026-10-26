@@ -2328,6 +2328,7 @@
     "title": "Dostawcy poczty",
     "description": "Jak MailFlow łączy się ze skrzynkami Microsoft i Google. To coś innego niż logowanie jednokrotne (SSO), za pomocą którego loguje się do samego MailFlow. Każdy dodaje własne konta w sekcji Konta > Dodaj konto.",
     "required": "Najpierw wypełnij wymagane pola.",
+    "redirectRequired": "Google wymaga URI przekierowania: tego zarejestrowanego w kliencie OAuth, kończącego się na /oauth/google/callback.",
     "saved": "Zapisano.",
     "ms": {
       "title": "Microsoft",

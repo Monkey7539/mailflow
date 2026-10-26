@@ -2328,6 +2328,7 @@
     "title": "Poskytovatelé e-mailu",
     "description": "Jak se MailFlow připojuje ke schránkám Microsoft a Google. Je to něco jiného než jednotné přihlašování (SSO), kterým se lidé přihlašují do samotného MailFlow. Každý si přidává vlastní účty v Účty > Přidat účet.",
     "required": "Nejdřív vyplňte povinná pole.",
+    "redirectRequired": "Google potřebuje URI přesměrování: to, které je registrované u klienta OAuth a končí na /oauth/google/callback.",
     "saved": "Uloženo.",
     "ms": {
       "title": "Microsoft",

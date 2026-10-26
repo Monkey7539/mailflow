@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { fetchMessageBodyWithRetry } from '../utils/messageBody.js';
 import { scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
-import { pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
+import { clearReadGuard } from '../utils/pendingReads.js';
 import { markMessageUnread } from '../utils/messageHotkeys.js';
 import { downloadEml } from '../utils/downloadEml.js';
 import { buildPrintDocument, openPrintWindow, printInWindow } from '../utils/printMessage.js';
@@ -166,8 +166,7 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
     markMessageUnread(message, {
       cancel: () => {
         cancelScheduledMarkReadFor(message.id);
-        pendingMarkReadMap.delete(message.id);
-        completedMarkReadMap.delete(message.id);
+        clearReadGuard(message.id);
         markScheduledRef.current = null;
       },
       update: onUpdate, incrementUnread, decrementUnread, adjustCategoryCount,

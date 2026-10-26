@@ -2309,6 +2309,7 @@
     "title": "이메일 제공업체",
     "description": "MailFlow가 Microsoft 및 Google 사서함에 연결하는 방식입니다. MailFlow 자체에 로그인하는 방식인 SSO와는 별개입니다. 각자 계정 > 계정 추가에서 자신의 계정을 추가합니다.",
     "required": "먼저 필수 항목을 채우세요.",
+    "redirectRequired": "Google에는 리디렉션 URI가 필요합니다. OAuth 클라이언트에 등록된, /oauth/google/callback으로 끝나는 URI를 입력하세요.",
     "saved": "저장했습니다.",
     "ms": {
       "title": "Microsoft",

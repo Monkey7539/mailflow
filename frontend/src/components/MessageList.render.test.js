@@ -1049,3 +1049,79 @@ describe('MessageList — a refresh during a load runs when the load finishes (#
     }
   });
 });
+
+// A read still in flight (from opening a message) and a manual read state set over it: its reply
+// or failure must not undo what the user chose, and a refresh in the meantime keeps the row as
+// the user left it.
+const { applyMarkRead } = await import('../utils/markRead.js');
+describe('MessageList: manual read state over a read in flight', () => {
+  const A = { ...MESSAGE, id: 'rf-a', uid: 31, message_id: '<rf-a@example.com>', subject: 'First in flight' };
+  const B = { ...MESSAGE, id: 'rf-b', uid: 32, message_id: '<rf-b@example.com>', subject: 'Second in flight' };
+  const settle = () => React.act(async () => { await new Promise(r => setTimeout(r, 30)); });
+  const row = id => useStore.getState().messages.find(m => m.id === id);
+  // bulk-read requests for exactly `ids` wait until the test answers them.
+  function holdBulkRead(ids) {
+    const realFetch = globalThis.fetch;
+    const held = [];
+    globalThis.fetch = (url, opts = {}) => {
+      const body = typeof opts.body === 'string' ? JSON.parse(opts.body) : null;
+      if (String(url).includes('/mail/messages/bulk-read') && JSON.stringify(body?.ids) === JSON.stringify(ids)) {
+        return new Promise(resolve => held.push(ok => resolve({ ok, status: ok ? 200 : 500, headers: { get: () => 'application/json' }, json: async () => (ok ? {} : { error: 'IMAP down' }), text: async () => '' })));
+      }
+      return realFetch(url, opts);
+    };
+    return { held, restore: () => { globalThis.fetch = realFetch; } };
+  }
+
+  test('bulk Mark as read: the open\'s read failing afterwards does not roll the row back to unread', async (t) => {
+    await mount({ rows: [A, B], threadedView: false });
+    const hold = holdBulkRead([A.id]);
+    t.mock.method(console, 'error', () => {});
+    try {
+      await React.act(async () => { applyMarkRead(row(A.id)); });
+      // Pick both rows, as a modifier-click does, with the open row as the anchor.
+      await React.act(async () => { useStore.getState().setSelectedMessage(A.id); });
+      const target = container.querySelector(`[data-msgid="${B.id}"] [draggable]`);
+      await React.act(async () => { target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })); });
+      const bulk = container.querySelector('[title="messageList.markReadSelected"]');
+      assert.ok(bulk, 'expected the bulk Mark as read button');
+      await React.act(async () => { bulk.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle();
+      assert.equal(row(A.id).is_read, true);
+      assert.equal(row(B.id).is_read, true);
+      await React.act(async () => { hold.held[0](false); });
+      await settle();
+      assert.equal(row(A.id).is_read, true, 'the failed open read is not rolled back over the bulk read');
+    } finally {
+      hold.restore();
+      await React.act(async () => { useStore.getState().setSelectedMessage(null); });
+    }
+  });
+
+  test('a whole conversation marked read stays read, count and all, through a refresh before the server catches up', async () => {
+    const thread = { ...MESSAGE, id: 'rf-t', uid: 33, message_id: '<rf-t@example.com>', thread_id: 'thr-rf', message_count: 3, unread_count: 2 };
+    const older = { ...thread, id: 'rf-t-old', uid: 34, message_id: '<rf-t-old@example.com>', date: new Date(Date.now() - 3_600_000).toISOString() };
+    ROUTES['/mail/thread?id=thr-rf&folder=INBOX'] = [200, { messages: [older, thread].map(m => ({ ...m, is_draft: false })) }];
+    await mount({ rows: [thread], threadedView: true });
+    await React.act(async () => { useStore.setState({ hoverQuickActions: true, hoverActionSet: ['markRead', 'star', 'delete', 'move'] }); });
+    const hold = holdBulkRead([older.id, thread.id].sort());
+    const realHeld = hold.held;
+    try {
+      const header = container.querySelector(`[data-msgid="${thread.id}"] [draggable]`);
+      await React.act(async () => { header.dispatchEvent(new dom.window.MouseEvent('mouseover', { bubbles: true })); });
+      const button = container.querySelector(`[data-msgid="${thread.id}"] button[title="contextMenu.markRead"]`);
+      assert.ok(button, 'expected the row\'s Mark as read');
+      await React.act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle();
+      assert.deepEqual([row(thread.id).is_read, row(thread.id).unread_count], [true, 0]);
+      // A sync's refresh lands before the read has reached the server: it still says 2 unread.
+      await React.act(async () => { window.dispatchEvent(new CustomEvent('mailflow:refresh')); });
+      await settle();
+      assert.deepEqual([row(thread.id).is_read, row(thread.id).unread_count], [true, 0]);
+    } finally {
+      for (const answer of realHeld) answer(true);
+      hold.restore();
+      await settle();
+    }
+  });
+});

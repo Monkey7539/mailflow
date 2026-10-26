@@ -2309,6 +2309,7 @@
     "title": "邮件服务商",
     "description": "MailFlow 连接 Microsoft 和 Google 邮箱的方式。这与单点登录（SSO）不同，后者是登录 MailFlow 本身的方式。每个人在“帐户 > 添加帐户”中添加自己的帐户。",
     "required": "请先填写必填字段。",
+    "redirectRequired": "Google 需要重定向 URI：即在 OAuth 客户端中注册的、以 /oauth/google/callback 结尾的 URI。",
     "saved": "已保存。",
     "ms": {
       "title": "Microsoft",

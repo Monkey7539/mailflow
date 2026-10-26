@@ -2309,6 +2309,7 @@
     "title": "Provedores de e-mail",
     "description": "Como o MailFlow se conecta às caixas da Microsoft e do Google. Isso é diferente do login único (SSO), que é como as pessoas entram no próprio MailFlow. Cada um adiciona as próprias contas em Contas > Adicionar conta.",
     "required": "Preencha primeiro os campos obrigatórios.",
+    "redirectRequired": "O Google precisa de um URI de redirecionamento: o registrado no cliente OAuth, terminado em /oauth/google/callback.",
     "saved": "Salvo.",
     "ms": {
       "title": "Microsoft",

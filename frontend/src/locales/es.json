@@ -2309,6 +2309,7 @@
     "title": "Proveedores de correo",
     "description": "Cómo se conecta MailFlow a los buzones de Microsoft y Google. Es distinto del inicio de sesión único (SSO), que es cómo se inicia sesión en MailFlow. Cada persona añade sus propias cuentas en Cuentas > Añadir cuenta.",
     "required": "Rellena primero los campos obligatorios.",
+    "redirectRequired": "Google necesita un URI de redirección: el registrado en el cliente OAuth, que termina en /oauth/google/callback.",
     "saved": "Guardado.",
     "ms": {
       "title": "Microsoft",

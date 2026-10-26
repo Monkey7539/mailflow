@@ -1,6 +1,6 @@
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
-import { pendingMarkReadMap, completedMarkReadMap, setPending } from './pendingReads.js';
+import { setPending, settleMarkRead, failMarkRead } from './pendingReads.js';
 
 const scheduledByMessage = new Map();
 const scheduledMessageByTimer = new Map();
@@ -45,21 +45,18 @@ export function applyMarkRead(msg) {
   st.adjustCategoryCount(msg.category, -1);
   // The guard stops a concurrent sync from reverting the optimistic flag before
   // the server has committed.
-  setPending(msg.id, msg.account_id);
+  const token = setPending(msg.id, msg.account_id);
   api.bulkRead([msg.id], true)
-    .then(() => {
-      pendingMarkReadMap.delete(msg.id);
-      // Covers the window where the PATCH has committed but a getMessages SELECT
-      // already in flight still returns the old is_read. Expires after 10s.
-      completedMarkReadMap.set(msg.id, msg.account_id);
-      setTimeout(() => completedMarkReadMap.delete(msg.id), 10000);
-    })
+    // Covers the window where the PATCH has committed but a getMessages SELECT
+    // already in flight still returns the old is_read. Expires after 10s.
+    .then(() => settleMarkRead(msg.id, msg.account_id, token))
     .catch(e => {
       console.error('markRead failed:', e.message);
+      // Marked unread (or read again) by hand meanwhile: that state is the user's.
+      if (!failMarkRead(msg.id, token)) return;
       st.updateMessage(msg.id, { is_read: false });
       st.incrementUnread(msg.account_id);
       st.adjustCategoryCount(msg.category, 1);
-      pendingMarkReadMap.delete(msg.id);
     });
 }
 

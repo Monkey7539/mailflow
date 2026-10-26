@@ -2309,6 +2309,7 @@
     "title": "Provider di posta",
     "description": "Come MailFlow si collega alle caselle Microsoft e Google. È diverso dal Single Sign-On (SSO), con cui si accede a MailFlow stesso. Ognuno aggiunge i propri account in Account > Aggiungi account.",
     "required": "Compila prima i campi obbligatori.",
+    "redirectRequired": "Google richiede un URI di reindirizzamento: quello registrato sul client OAuth, che termina con /oauth/google/callback.",
     "saved": "Salvato.",
     "ms": {
       "title": "Microsoft",

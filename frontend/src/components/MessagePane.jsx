@@ -11,7 +11,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
 import { clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete } from '../utils/pendingDeletes.js';
-import { pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
+import { clearReadGuard } from '../utils/pendingReads.js';
 import { applyMarkRead, scheduleMarkRead, cancelScheduledMarkRead, cancelScheduledMarkReadFor } from '../utils/markRead.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
 import { selectListedMessage } from '../utils/conversation.js';
@@ -741,8 +741,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         cancelScheduledMarkRead(autoMarkReadTimerRef.current);
         autoMarkReadTimerRef.current = null;
         cancelScheduledMarkReadFor(message.id);
-        pendingMarkReadMap.delete(message.id);
-        completedMarkReadMap.delete(message.id);
+        clearReadGuard(message.id);
       },
       // The GTD rail shows its own copy of the thread, as the u hotkey keeps it in step.
       update: (id, fields) => {
