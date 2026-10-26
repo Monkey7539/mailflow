@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { query } from '../services/db.js';
+import { findOwnedMessage } from '../services/ownership.js';
 import { requireAuth } from '../middleware/auth.js';
 import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS } from '../services/categorizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
+import { getUserAiAccess } from '../services/aiAccess.js';
 
 const router = Router();
 
@@ -232,15 +234,16 @@ router.post('/categories/ai-classify/:messageId', requireAuth, async (req, res) 
   const { messageId } = req.params;
   if (!UUID_RE_CAT.test(messageId)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const msgResult = await query(`
-    SELECT m.subject, m.from_email, m.snippet
-    FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2 AND m.is_deleted = false
-  `, [messageId, req.session.userId]);
+  // Refused before any provider call when AI is off for the instance or for this user (#644).
+  const { allowed } = await getUserAiAccess(req.session.userId);
+  if (!allowed) return res.status(403).json({ error: 'AI is not available for your account' });
 
-  if (!msgResult.rows.length) return res.status(404).json({ error: 'Message not found' });
-  const { subject, from_email, snippet } = msgResult.rows[0];
+  const message = await findOwnedMessage(req.session.userId, messageId, {
+    columns: 'm.subject, m.from_email, m.snippet',
+    live: true,
+  });
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  const { subject, from_email, snippet } = message;
 
   const category = await aiClassifyMessage(subject, from_email, snippet);
   if (!category) return res.status(503).json({ error: 'AI classification unavailable or failed' });

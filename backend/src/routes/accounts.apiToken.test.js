@@ -19,8 +19,8 @@ const ACCOUNT = {
   id: '11111111-1111-4111-8111-111111111111', name: 'Work', sender_name: 'Maria Silva', email_address: 'maria@example.com',
   color: '#7c6af7', icon: null, protocol: 'imap', imap_host: 'imap.example.com', imap_port: 993, imap_tls: true,
   imap_skip_tls_verify: false, smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS', auth_user: 'maria',
-  smtp_auth_user: 'maria', oauth_provider: null, enabled: true, include_in_unified_inbox: true, last_sync: new Date('2026-10-14T10:00:00Z'),
-  sync_error: null, sort_order: 0, folder_mappings: { archive: 'Archive' }, signature: '<p>Maria</p>', signature_enabled: true,
+  smtp_auth_user: 'maria', oauth_provider: null, oauth_public_client: false, enabled: true, include_in_unified_inbox: true, last_sync: new Date('2026-10-14T10:00:00Z'),
+  sync_error: null, sync_error_code: null, sort_order: 0, folder_mappings: { archive: 'Archive' }, signature: '<p>Maria</p>', signature_enabled: true,
   created_at: new Date('2026-01-01T00:00:00Z'), categorization_enabled: true, antispam_enabled: true, trusted_authserv_id: 'mx.example.com',
   auto_cc_addresses: [], auto_bcc_addresses: ['archive@example.com'],
 };

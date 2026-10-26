@@ -30,6 +30,7 @@ export { notifyOnLabelTouch } from '../services/labelsRead.js';
 // Verify a physical copy's live RFC Message-ID before it authorizes another deletion.
 export const hasMessageCopy = (account, uid, folder, messageId) => getMailEngine().hasMessageCopy(account, uid, folder, messageId);
 export const isLabelStoreAccount = (account) => getMailEngine().isLabelStore(account);
+export const supportsUidPlus = (account) => getMailEngine().supportsUidPlus(account);
 
 // ── Labels (write) ────────────────────────────────────────────────────────────
 // Apply/remove a label (a message copy in a label folder) and mark a thread read. The mail
@@ -38,7 +39,7 @@ export const isLabelStoreAccount = (account) => getMailEngine().isLabelStore(acc
 export const applyLabel = (account, message, labelFolder, options) => labelsWrite.applyLabel(getMailEngine(), account, message, labelFolder, options);
 export const removeLabel = (message, labelFolder) => labelsWrite.removeLabel(getMailEngine(), message, labelFolder);
 export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.removeExactLabelCopy(getMailEngine(), message, labelFolder, uid);
-export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
+export const markThreadRead = (account, message, options) => labelsWrite.markThreadRead(getMailEngine(), account, message, options);
 export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
@@ -54,7 +55,8 @@ export const broadcast = (payload, userId) => getMailEngine().broadcast(payload,
 
 // ── Summarize ─────────────────────────────────────────────────────────────────
 // Condense a message into one line via the configured AI provider (fails closed when the
-// provider is off / the summarize feature is disabled). No access to keys or the provider itself.
+// provider is off / the summarize feature is disabled / the user's AI access is off; both take
+// the user, and summarizeMessage checks it itself). No access to keys or the provider itself.
 export { summarizeMessage, summarizeAvailable } from '../services/summarize.js';
 
 // ── Per-plugin storage ────────────────────────────────────────────────────────
@@ -100,5 +102,6 @@ export {
   getMessageCopyFolders,
   getMessageFields,
   getMessageAnnotations,
+  getLabelMetadata,
   setMessageAnnotation,
 } from '../services/mailAccess.js';

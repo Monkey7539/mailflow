@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
-vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed) }));
+vi.mock('./messageParser.js', () => ({ parseMessage: vi.fn(), parseMailboxList: vi.fn(() => [{ name: 'Hidden', email: 'hidden@example.test' }]), buildSnippetFromHtml: vi.fn(), snippetFromBody: vi.fn(), decodeMimeWords: vi.fn(), detectBulkFromParsedHeaders: vi.fn(), parseRawHeaders: vi.fn(), enrichParsedMetadata: vi.fn((parsed) => parsed), MAX_HEADER_FIELD: 500 }));
 vi.mock('../routes/oauth.js', () => ({ refreshMicrosoftToken: vi.fn(), refreshGoogleToken: vi.fn() }));
 vi.mock('./emailSanitizer.js', () => ({ sanitizeEmail: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
@@ -16,6 +16,9 @@ vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }
 
 import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, contentLocationFromMimeHeader, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId, noteDraftsChanged } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { ensureFreshToken } from './imapManager.js';
+import { clearRefreshFailure, noteFreshToken, noteRefreshFailure, refreshFailureFor } from './accountErrorCode.js';
+import { refreshMicrosoftToken } from '../routes/oauth.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
 import { searchCompiler } from 'imapflow/lib/search-compiler.js';
@@ -23,7 +26,7 @@ import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 import { invalidateGtdConfigCache } from '../plugins/gtd/gtdConfig.js';
-import { parseMessage } from './messageParser.js';
+import { parseMessage, decodeMimeWords } from './messageParser.js';
 import { classifyAndTagMessage } from './spamPipeline.js';
 import { getAccountAddresses } from './mailAccess.js';
 
@@ -2222,14 +2225,14 @@ describe('inline images the body never shows are listed as attachments', () => {
       expect(body.attachments.map(a => a.filename)).toEqual(['chart.png']);
     });
 
-    it('matches names only inside a multipart/related', async () => {
+    it('matches a Content-Location only inside a multipart/related', async () => {
       const { mgr, account } = serve({
         type: 'multipart/mixed',
-        childNodes: [html(), attachedImage('2', { location: 'photo.png', dispositionParameters: { filename: 'photo.png' } })],
+        childNodes: [html(), attachedImage('2', { location: 'photo.png', dispositionParameters: { filename: 'IMG_1.png' } })],
       }, { '1': '<img src="photo.png">', '2': PNG });
       const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
       expect(body.html).toBe('<img src="photo.png">');
-      expect(body.attachments.map(a => a.filename)).toEqual(['photo.png']);
+      expect(body.attachments.map(a => a.filename)).toEqual(['IMG_1.png']);
     });
 
     it('ignores names written as text, in a comment or in a script', async () => {
@@ -2520,6 +2523,266 @@ describe('inline images the body never shows are listed as attachments', () => {
       expect(atts.map(a => a.filename)).toEqual(['x.png']);
     });
 
+    // Shapes still broken in 4.0.3 (#640): a layout image outside any multipart/related named by
+    // file name, sent as application/octet-stream or with no type, cited as cid: with its file
+    // name, or typed image/x-png or another alias.
+    it('shows an attached image outside a multipart/related that the HTML names by file name, and keeps it listed', async () => {
+      for (const extra of [{ disposition: 'attachment' }, { disposition: 'inline' }, { disposition: undefined }]) {
+        const { mgr, account } = serve({
+          type: 'multipart/mixed',
+          childNodes: [
+            html(),
+            attachedImage('2', { type: 'image/jpeg', ...extra, dispositionParameters: { filename: 'hdr.jpg' } }),
+            { ...report },
+          ],
+        }, { '1': '<table><tr><td background="hdr.jpg"><img src="HDR.JPG"><img src=hdr.jpg></td></tr></table>', '2': '/9j/', '3': 'JVBERi0=' });
+        const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+        // A file name is matched exactly, as a URL: HDR.JPG is another file.
+        expect(body.html).toBe('<table><tr><td background="data:image/jpeg;base64,/9j/"><img src="HDR.JPG"><img src="data:image/jpeg;base64,/9j/"></td></tr></table>');
+        expect(body.attachments).toEqual([
+          expect.objectContaining({ part: '2', filename: 'hdr.jpg', shownInline: true }),
+          expect.objectContaining({ filename: 'invoice.pdf' }),
+        ]);
+        expect(body.attachments[1].shownInline).toBeUndefined();
+        expect(body.inlineParts).toEqual(['2']);
+        expect(body.cidsComplete).toBe(true);
+      }
+    });
+
+    it('leaves an attached image the HTML outside a multipart/related never names listed and unshown', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), attachedImage('2', { type: 'image/jpeg', dispositionParameters: { filename: 'holiday.jpg' } })],
+      }, { '1': '<p>See holiday.jpg</p><img src="https://x.example/holiday.jpg">', '2': '/9j/' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).not.toContain('data:');
+      expect(body.attachments).toEqual([expect.objectContaining({ filename: 'holiday.jpg' })]);
+      expect(body.attachments[0].shownInline).toBeUndefined();
+      expect(body.inlineParts).toEqual([]);
+    });
+
+    it('shows an application/octet-stream or untyped part named like an image, typed by its bytes', async () => {
+      const octet = (part, extra) => ({ part, type: 'application/octet-stream', encoding: 'base64', size: 3000, ...extra });
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'multipart/related', childNodes: [
+            html('1.1'),
+            // Inline, with a Content-ID: an inline image.
+            octet('1.2', { id: '<hdr@x>', disposition: 'inline', dispositionParameters: { filename: 'hdr.JPG' } }),
+            // Marked as an attachment, with a Content-ID.
+            octet('1.3', { id: '<badge@x>', disposition: 'attachment', dispositionParameters: { filename: 'badge.png' } }),
+            // No type at all.
+            octet('1.4', { type: '', id: '<icon@x>', disposition: 'attachment', parameters: { name: 'icon.gif' } }),
+          ] },
+          // A real file sent as application/octet-stream is still a file.
+          octet('2', { id: '<doc@x>', disposition: 'attachment', dispositionParameters: { filename: 'notes.bin' } }),
+          octet('3', { disposition: 'attachment', dispositionParameters: { filename: 'scan.webp' } }),
+        ],
+      }, {
+        '1.1': '<img src="cid:hdr@x"><table background="cid:badge@x"><tr><td style="background:url(cid:icon@x)"><img src="cid:doc@x"></td></tr></table>',
+        '1.2': '/9j/', '1.3': PNG, '1.4': 'R0lGODlh', '2': 'AAAA', '3': 'UklGRgAAAABXRUJQ',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe(`<img src="data:image/jpeg;base64,/9j/"><table background="data:image/png;base64,${PNG}">`
+        + '<tr><td style="background:url(data:image/gif;base64,R0lGODlh)"><img src="cid:doc@x"></td></tr></table>');
+      expect(body.attachments.map(a => a.filename)).toEqual(['notes.bin', 'scan.webp']);
+      expect(body.cidsComplete).toBe(true);
+      const { sanitizeEmail: realSanitize } = await vi.importActual('./emailSanitizer.js');
+      expect(realSanitize(body.html)).toContain(`background="data:image/png;base64,${PNG}"`);
+    });
+
+    it('lists an inline application/octet-stream image the HTML never references', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 3000, id: '<p@x>', disposition: 'inline', dispositionParameters: { filename: 'photo.jpeg' } }],
+      }, { '1': '<p>Hi</p>', '2': '/9j/' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.attachments).toEqual([expect.objectContaining({ part: '2', filename: 'photo.jpeg', type: 'application/octet-stream' })]);
+    });
+
+    it('resolves a cid: that is an image part\'s file name rather than its Content-ID', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'multipart/related', childNodes: [
+            html('1.1'),
+            // M: another Content-ID, inline.
+            { part: '1.2', type: 'image/jpeg', encoding: 'base64', size: 900, id: '<0123@mailer>', disposition: 'inline', dispositionParameters: { filename: 'hdr.jpg' } },
+            // M: another Content-ID, marked as an attachment.
+            attachedImage('1.3', { id: '<4567@mailer>', dispositionParameters: { filename: 'Badge.png' } }),
+            // N: no Content-ID.
+            { part: '1.4', type: 'image/gif', encoding: 'base64', size: 900, disposition: 'inline', dispositionParameters: { filename: 'spacer gif.gif' } },
+          ] },
+          // N, outside a multipart/related: shown and still listed.
+          attachedImage('2', { type: 'image/jpeg', dispositionParameters: { filename: 'photo.jpg' } }),
+        ],
+      }, {
+        // Case, angle brackets and percent-encoding as for a Content-ID.
+        '1.1': '<img src="cid:HDR.jpg"><img src="cid:<badge.png>"><img src="cid:spacer%20gif.gif"><img src="cid:photo.jpg">',
+        '1.2': '/9j/', '1.3': PNG, '1.4': 'R0lG', '2': 'BBBB',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe(`<img src="data:image/jpeg;base64,/9j/"><img src="data:image/png;base64,${PNG}">`
+        + '<img src="data:image/gif;base64,R0lG"><img src="data:image/jpeg;base64,BBBB">');
+      expect(body.attachments).toEqual([expect.objectContaining({ part: '2', filename: 'photo.jpg', shownInline: true })]);
+      expect(body.cidsComplete).toBe(true);
+    });
+
+    it('leaves a cid: file name two image parts share, or one a Content-ID answers, as it is', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [
+          html(),
+          attachedImage('2', { id: '<a@x>', dispositionParameters: { filename: 'logo.png' } }),
+          attachedImage('3', { id: '<b@x>', dispositionParameters: { filename: 'LOGO.png' } }),
+          // Its Content-ID is another image's file name: the Content-ID wins.
+          attachedImage('4', { id: '<pic.png>', dispositionParameters: { filename: 'one.png' } }),
+          attachedImage('5', { id: '<c@x>', dispositionParameters: { filename: 'pic.png' } }),
+        ],
+      }, { '1': '<img src="cid:logo.png"><img src="cid:pic.png">', '2': PNG, '3': 'AAAA', '4': 'BBBB', '5': 'CCCC' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe('<img src="cid:logo.png"><img src="data:image/png;base64,BBBB">');
+      expect(body.attachments.map(a => a.filename)).toEqual(['logo.png', 'LOGO.png', 'pic.png']);
+    });
+
+    it('builds a data: URI the sanitizer keeps from image/jpg, image/x-png and other aliases', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [
+          html(),
+          { part: '2', type: 'IMAGE/JPG', encoding: 'base64', size: 900, id: '<a@x>', disposition: 'inline' },
+          { part: '3', type: 'image/x-png', encoding: 'base64', size: 900, id: '<b@x>' },
+          attachedImage('4', { type: 'image/pjpeg', id: '<c@x>', dispositionParameters: { filename: 'c.jpg' } }),
+          attachedImage('5', { type: 'image/x-ms-bmp', id: '<d@x>', dispositionParameters: { filename: 'd.bmp' } }),
+        ],
+      }, {
+        '1': '<table background="cid:a@x"><tr><td background="cid:b@x"></td><td background="cid:c@x"></td><th background="cid:d@x"></th></tr></table>',
+        '2': '/9j/', '3': PNG, '4': 'AAAA', '5': 'Qk0=',
+      });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      const { sanitizeEmail: realSanitize } = await vi.importActual('./emailSanitizer.js');
+      const shown = realSanitize(body.html);
+      for (const uri of ['data:image/jpeg;base64,/9j/', `data:image/png;base64,${PNG}`, 'data:image/jpeg;base64,AAAA', 'data:image/bmp;base64,Qk0=']) {
+        expect(shown).toContain(`background="${uri}"`);
+      }
+      expect(body.attachments).toEqual([]);
+    });
+
+    it('still matches a file name in a synced body outside a multipart/related only once its size is known', () => {
+      const structure = (size) => ({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size, disposition: 'attachment', dispositionParameters: { filename: 'hdr.jpg' } }],
+      });
+      const doc = new Map([['1', Buffer.from('<img src="hdr.jpg">')]]);
+      expect(extractBodyFromMsg({ bodyStructure: structure(900), bodyParts: doc }).html).toMatch(/^<img src="cid:part-2-[0-9a-f]{12}@mailflow\.invalid">$/);
+      expect(extractBodyFromMsg({ bodyStructure: structure(0), bodyParts: doc }).html).toBe('<img src="hdr.jpg">');
+    });
+
+    // An HTML page, an SVG and a PDF, each sent as application/octet-stream (or untyped) and named
+    // like a PNG: what the HTML names them is not shown, and they stay files to download.
+    it('keeps a part named like an image whose bytes are not one a file, in a multipart/related or not', async () => {
+      const notImages = {
+        html: Buffer.from('<html><body>Hi</body></html>').toString('base64'),
+        svg: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>x()</script></svg>').toString('base64'),
+        pdf: Buffer.from('%PDF-1.4\n%x\n').toString('base64'),
+      };
+      const octet = (part, name, extra) => ({ part, type: 'application/octet-stream', encoding: 'base64', size: 900, disposition: 'attachment', dispositionParameters: { filename: name }, ...extra });
+      for (const [kind, bytes] of Object.entries(notImages)) {
+        for (const related of [true, false]) {
+          const parts = [
+            html(related ? '1.1' : '1'),
+            octet(related ? '1.2' : '2', 'scan.png'),
+            octet(related ? '1.3' : '3', 'logo.png', { id: '<logo@x>' }),
+            // Inline with a Content-ID: walked as an inline image, so it is listed again.
+            octet(related ? '1.4' : '4', 'icon.png', { id: '<icon@x>', disposition: 'inline', type: '' }),
+          ];
+          const n = (p) => (related ? `1.${p}` : String(p));
+          const { mgr, account } = serve(related ? { type: 'multipart/related', childNodes: parts } : { type: 'multipart/mixed', childNodes: parts }, {
+            [n(1)]: '<img src="scan.png"><img src="cid:logo@x"><img src="cid:icon@x">',
+            [n(2)]: bytes, [n(3)]: bytes, [n(4)]: bytes,
+          });
+          const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+          const label = `${kind} ${related ? 'related' : 'mixed'}`;
+          expect(body.html, label).not.toContain('data:');
+          expect(body.attachments.map(a => a.filename).sort(), label).toEqual(['icon.png', 'logo.png', 'scan.png']);
+          expect(body.attachments.every(a => !a.shownInline && a.type === 'application/octet-stream'), label).toBe(true);
+          expect(body.inlineParts, label).toEqual([]);
+          // A part that will never be an image is no reason to fetch the body again.
+          expect(body.cidsComplete, label).toBe(true);
+        }
+      }
+    });
+
+    it('drops a related part named like an image from the list only once its bytes are one', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 900, disposition: 'attachment', dispositionParameters: { filename: 'hdr.png' } }, report],
+      }, { '1': '<img src="hdr.png">', '2': 'R0lGODlhAQABAAAAACw=', '3': 'JVBERi0=' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      // Named .png, but a GIF: shown as what it is.
+      expect(body.html).toBe('<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">');
+      expect(body.attachments.map(a => a.filename)).toEqual(['invoice.pdf']);
+    });
+
+    // Quoted-printable image bytes read like QP text (=3D, =D0), which counted the image as missing:
+    // the body was never marked settled and every view fetched it again.
+    it('embeds a quoted-printable image as its decoded bytes, and counts the fetch complete', async () => {
+      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('=\u00d0\u00d1 rest of a picture')]);
+      const qp = [...png].map(b => (b >= 33 && b <= 126 && b !== 61 ? String.fromCharCode(b) : `=${b.toString(16).toUpperCase().padStart(2, '0')}`)).join('');
+      for (const type of ['image/png', 'application/octet-stream']) {
+        const { mgr, account } = serve({
+          type: 'multipart/related',
+          childNodes: [html(), { part: '2', type, encoding: 'quoted-printable', size: 900, id: '<q@x>', disposition: 'inline', dispositionParameters: { filename: 'q.png' } }],
+        }, { '1': '<img src="cid:q@x">', '2': qp });
+        const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+        expect(body.html, type).toBe(`<img src="data:image/png;base64,${png.toString('base64')}">`);
+        expect(body.cidsComplete, type).toBe(true);
+        expect(body.attachments, type).toEqual([]);
+      }
+    });
+
+    it('settles a body whose image part holds text, rather than fetching it again on every view', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/related',
+        childNodes: [html(), { part: '2', type: 'image/svg+xml', encoding: 'quoted-printable', size: 900, id: '<s@x>', disposition: 'inline' }],
+      }, { '1': '<img src="cid:s@x">', '2': '<svg xmlns=3D"http://www.w3.org/2000/svg"></svg>' });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.html).toBe('<img src="cid:s@x">');
+      expect(body.cidsComplete).toBe(true);
+    });
+
+    it('lists an unreferenced inline part named like an image but holding a PDF once', async () => {
+      const { mgr, account } = serve({
+        type: 'multipart/mixed',
+        childNodes: [html(), { part: '2', type: 'application/octet-stream', encoding: 'base64', size: 900, id: '<s@x>', disposition: 'inline', dispositionParameters: { filename: 'scan.png' } }],
+      }, { '1': '<p>Scan attached</p>', '2': Buffer.from('%PDF-1.4').toString('base64') });
+      const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+      expect(body.attachments.map(a => a.filename)).toEqual(['scan.png']);
+    });
+
+    it('stays fast on cid: file name references', () => {
+      const structure = {
+        type: 'multipart/mixed',
+        childNodes: [html(), ...Array.from({ length: 200 }, (_, i) => attachedImage(String(i + 2), { dispositionParameters: { filename: `${'n'.repeat(2000)}${i}.png` } }))],
+      };
+      const time = (doc) => {
+        const started = performance.now();
+        extractBodyFromMsg({ bodyStructure: structure, bodyParts: new Map([['1', Buffer.from(doc)]]) });
+        return performance.now() - started;
+      };
+      // Against plain image URLs of the same size on the same machine.
+      const plain = time('<img src="https://x.example/a.png">'.repeat(10_000));
+      for (const doc of [
+        '<img src="cid:nnnnnnnnnnnnnnnnnnnnnnnnn.png">'.repeat(10_000),
+        `<img src="cid:${'%41'.repeat(100_000)}">`,
+        Array.from({ length: 10_000 }, (_, i) => `<img src="cid:${i}.png">`).join(''),
+        `<img src="cid:${' '.repeat(300_000)}`,
+      ]) {
+        expect(time(doc)).toBeLessThan(plain * 8 + 100);
+      }
+    });
+
     it('stays fast on hostile HTML and names', () => {
       const names = Array.from({ length: 200 }, (_, i) => `${'a'.repeat(2000)}${i}`);
       const structure = {
@@ -2679,6 +2942,42 @@ describe("connectAccount attaches 'error' before connect (#360)", () => {
   });
 });
 
+// An OAuth account whose refresh failed for good retries a stale token on every tick. With the
+// refresh failure remembered, the rejection takes the long auth backoff (#674); without it,
+// a rejection right after a new token stays on the short path, as before.
+describe('connectAccount: the auth backoff for an OAuth account with a dead refresh', () => {
+  const setup = () => {
+    resolveForConnection.mockReset().mockRejectedValue(new Error('AUTHENTICATE failed.'));
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: false });
+    query.mockReset().mockResolvedValue({ rows: [] });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr.broadcast = vi.fn();
+    return mgr;
+  };
+  const acct = { id: 'acct-dead-refresh', user_id: 'u1', email_address: 'me@outlook.com', oauth_provider: 'microsoft', imap_host: 'outlook.office365.com', imap_port: 993, imap_tls: true, auth_user: 'me@outlook.com' };
+  afterEach(() => { clearRefreshFailure(acct.id); vi.restoreAllMocks(); });
+
+  it('arms the long auth backoff when the refresh is known to be dead', async () => {
+    const mgr = setup();
+    noteRefreshFailure(acct.id, { code: 'oauth_reauth', detail: 'AADSTS70008: expired' });
+    const before = Date.now();
+    expect(await mgr.connectAccount(acct)).toBe(false);
+    expect(mgr._connectCooldown.get(acct.id)?.until).toBeGreaterThanOrEqual(before + 5 * 60 * 1000);
+  });
+
+  it('does not, for the same rejection with no refresh failure remembered', async () => {
+    const mgr = setup();
+    expect(await mgr.connectAccount(acct)).toBe(false);
+    expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+  });
+});
+
 // A host the address check refuses (or an OAuth refresh that fails) used to throw before the
 // try that releases the in-progress lock: the account stayed "connecting" until a restart.
 describe('connectAccount when the host is refused', () => {
@@ -2752,8 +3051,8 @@ describe('connectAccount releases its lock when setup throws', () => {
     expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
     expect(result).toBe(false);
     expect(ImapFlow).not.toHaveBeenCalled();
-    expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET sync_error = $1 WHERE id = $2', [detail, acct.id]);
-    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: detail }, acct.user_id);
+    expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET sync_error = $1, sync_error_code = $3 WHERE id = $2', [detail, acct.id, 'connection']);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: detail, code: 'connection' }, acct.user_id);
 
     // The next health-check tick or Reconnect click tries again rather than being skipped.
     fail();
@@ -3116,6 +3415,131 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
 
 // ── sync_error recording — every path that gives up records, every success clears ──────────
 
+// What the UI is told to do about a failure (#674): every recording site goes through
+// _recordAccountError, so the code is decided there, next to the text.
+describe('_recordAccountError: sync_error_code', () => {
+  const ctx = () => ({ _syncErrorState: new Map(), _accountErrorStreak: new Map(), broadcast: vi.fn() });
+  const outlook = { id: 'ms-1', user_id: 'u1', email_address: 'maria.lopez@outlook.com', oauth_provider: 'microsoft', oauth_tenant_id: 'consumers' };
+  const work = { id: 'ms-2', user_id: 'u1', email_address: 'maria@contoso.example', oauth_provider: 'microsoft', oauth_tenant_id: 'common' };
+  const pw = { id: 'pw-1', user_id: 'u1', email_address: 'maria@example.com', oauth_provider: null };
+  const written = () => query.mock.calls.find(([sql]) => /SET sync_error = \$1/.test(sql))?.[1];
+
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [] }); });
+  afterEach(() => { for (const a of [outlook, work, pw]) clearRefreshFailure(a.id); });
+
+  it.each([
+    [outlook, 'User is authenticated but not connected.', 'ms_imap_disabled_personal'],
+    [work, 'User is authenticated but not connected.', 'ms_imap_disabled_work'],
+    [outlook, 'AUTHENTICATE failed.', 'oauth_reauth'],
+    [pw, '[AUTHENTICATIONFAILED] Invalid credentials', 'auth_failed'],
+    [pw, 'getaddrinfo ENOTFOUND imap.example.com', 'connection'],
+  ])('records %#: %s as %s, in the row and to the client', async (account, detail, code) => {
+    const self = ctx();
+    await ImapManager.prototype._recordAccountError.call(self, account, detail);
+    expect(written()).toEqual([detail, account.id, code]);
+    expect(self.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: account.id, error: detail, code }, 'u1');
+  });
+
+  it('records a refresh that failed for good instead of the AUTHENTICATE failure it caused', async () => {
+    const self = ctx();
+    noteRefreshFailure(outlook.id, { code: 'oauth_reauth', detail: 'AADSTS700082: The refresh token has expired due to inactivity.' });
+    await ImapManager.prototype._recordAccountError.call(self, outlook, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AADSTS700082: The refresh token has expired due to inactivity.', outlook.id, 'oauth_reauth']);
+  });
+
+  it('rewrites the same text when its code changes', async () => {
+    const self = ctx();
+    const acct = { ...outlook, id: 'ms-dedup' };
+    noteFreshToken(acct.id);
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AUTHENTICATE failed.', acct.id, 'connection']);
+    // The token is no longer fresh: same text, now "sign in again".
+    noteFreshToken(acct.id, Date.now() - 60 * 60 * 1000);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toEqual(['AUTHENTICATE failed.', acct.id, 'oauth_reauth']);
+    // And unchanged, it is not written again.
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'AUTHENTICATE failed.');
+    expect(written()).toBeUndefined();
+  });
+
+  it('clears the code with the text', async () => {
+    const self = ctx();
+    await ImapManager.prototype._recordAccountError.call(self, outlook, 'User is authenticated but not connected.');
+    await ImapManager.prototype._clearAccountError.call(self, outlook);
+    expect(query).toHaveBeenLastCalledWith('UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', [outlook.id]);
+    expect(self.broadcast).toHaveBeenLastCalledWith({ type: 'account_connected', accountId: outlook.id }, 'u1');
+  });
+});
+
+describe('ensureFreshToken: a refresh that cannot succeed is remembered, not swallowed', () => {
+  const soon = () => new Date(Date.now() + 60 * 1000).toISOString();
+  const account = () => ({ id: 'ms-9', email_address: 'me@outlook.com', oauth_provider: 'microsoft', oauth_token_expiry: soon() });
+
+  beforeEach(() => { vi.spyOn(console, 'error').mockImplementation(() => {}); vi.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => { clearRefreshFailure('ms-9'); vi.restoreAllMocks(); refreshMicrosoftToken.mockReset(); });
+
+  it('notes a terminal failure and goes on with the stored token', async () => {
+    const err = Object.assign(new Error('AADSTS70008: The refresh token has expired due to inactivity.'), { accountErrorCode: 'oauth_reauth' });
+    refreshMicrosoftToken.mockRejectedValueOnce(err);
+    const a = account();
+    await expect(ensureFreshToken(a)).resolves.toBe(a);
+    expect(refreshFailureFor('ms-9')).toEqual({ code: 'oauth_reauth', detail: err.message });
+  });
+
+  it('does not note a failure that may pass by itself', async () => {
+    refreshMicrosoftToken.mockRejectedValueOnce(new Error('fetch failed'));
+    await ensureFreshToken(account());
+    expect(refreshFailureFor('ms-9')).toBeNull();
+  });
+
+  it('forgets the failure once a refresh succeeds', async () => {
+    noteRefreshFailure('ms-9', { code: 'oauth_reauth', detail: 'old' });
+    refreshMicrosoftToken.mockImplementationOnce(async (a) => ({ ...a, oauth_access_token: 'new' }));
+    await ensureFreshToken(account());
+    expect(refreshFailureFor('ms-9')).toBeNull();
+  });
+});
+
+describe('forgetAccountError', () => {
+  beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [] }); });
+
+  it('clears the row and the cache, so the same failure after a retry is written again', async () => {
+    const acct = { id: 'f1', user_id: 'u1', email_address: 'x@example.com' };
+    const self = { _syncErrorState: new Map(), _accountErrorStreak: new Map(), _errorForgets: new Map(), broadcast: vi.fn(), forgetAccountError: ImapManager.prototype.forgetAccountError };
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    await self.forgetAccountError('f1');
+    expect(query).toHaveBeenLastCalledWith('UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', ['f1']);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells open account lists the error is gone', async () => {
+    const self = { _syncErrorState: new Map(), _errorForgets: new Map(), broadcast: vi.fn() };
+    await ImapManager.prototype.forgetAccountError.call(self, 'f2', 'u1');
+    expect(self.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'f2' }, 'u1');
+  });
+
+  it('a record in flight during the forget does not cache its text, so the next identical failure is written', async () => {
+    const acct = { id: 'f3', user_id: 'u1', email_address: 'x@example.com' };
+    const self = { _syncErrorState: new Map(), _accountErrorStreak: new Map(), _errorForgets: new Map(), broadcast: vi.fn() };
+    let release;
+    query.mockImplementationOnce(() => new Promise(r => { release = () => r({ rows: [] }); }));
+    const inFlight = ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    await new Promise(r => setTimeout(r, 0));
+    // The forget's UPDATE lands, then the in-flight record's write completes.
+    await ImapManager.prototype.forgetAccountError.call(self, 'f3', 'u1');
+    release();
+    await inFlight;
+    expect(self._syncErrorState.has('f3')).toBe(false);
+    query.mockClear();
+    await ImapManager.prototype._recordAccountError.call(self, acct, 'Invalid credentials');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('_recordAccountError / _clearAccountError', () => {
   const acct = { id: 'a1', user_id: 'u1', email_address: 'x@example.com' };
 
@@ -3145,11 +3569,11 @@ describe('_recordAccountError / _clearAccountError', () => {
     expect(m.broadcast).not.toHaveBeenCalled();
     await m._recordAccountError(acct, 'IMAP connect timeout (30000ms)');
     expect(query).toHaveBeenCalledWith(
-      'UPDATE email_accounts SET sync_error = $1 WHERE id = $2',
-      ['IMAP connect timeout (30000ms)', 'a1'],
+      'UPDATE email_accounts SET sync_error = $1, sync_error_code = $3 WHERE id = $2',
+      ['IMAP connect timeout (30000ms)', 'a1', 'connection'],
     );
     expect(m.broadcast).toHaveBeenCalledWith(
-      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)' }, 'u1',
+      { type: 'account_error', accountId: 'a1', error: 'IMAP connect timeout (30000ms)', code: 'connection' }, 'u1',
     );
   });
 
@@ -3173,7 +3597,7 @@ describe('_recordAccountError / _clearAccountError', () => {
     m.broadcast.mockClear();
     await m._clearAccountError(acct);
     expect(query).toHaveBeenLastCalledWith(
-      'UPDATE email_accounts SET sync_error = NULL WHERE id = $1', ['a1'],
+      'UPDATE email_accounts SET sync_error = NULL, sync_error_code = NULL WHERE id = $1', ['a1'],
     );
     expect(m.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: 'a1' }, 'u1');
   });
@@ -3890,7 +4314,7 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
       ],
     });
 
-    const id = await computeThreadId(ACCOUNT, '<y@partner.com>', ...noHeaders, 'Status', {
+    const id = await computeThreadId(ACCOUNT, '<y@partner.com>', ...noHeaders, 'Re: Status', {
       fromEmail: 'anna@partner.com',
       to: [{ email: OWNER }],
       cc: [],
@@ -3905,7 +4329,7 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
       rows: [{ thread_id: 't', from_email: 'Anna@Partner.com', to_addresses: [{ email: OWNER }], cc_addresses: [] }],
     });
 
-    const id = await computeThreadId(ACCOUNT, '<z@partner.com>', ...noHeaders, 'Status', {
+    const id = await computeThreadId(ACCOUNT, '<z@partner.com>', ...noHeaders, 'Re: Status', {
       fromEmail: 'anna@PARTNER.COM', to: [], cc: [], own: OWNER.toUpperCase(),
     });
 
@@ -3922,7 +4346,7 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
       }],
     });
 
-    const id = await computeThreadId(ACCOUNT, '<w@partner.com>', ...noHeaders, 'Status', {
+    const id = await computeThreadId(ACCOUNT, '<w@partner.com>', ...noHeaders, 'Re: Status', {
       fromEmail: 'anna@partner.com', to: [], cc: [], own: OWNER,
     });
 
@@ -3973,21 +4397,21 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
     // Two unrelated senders writing to it have it in common, which is not correspondence:
     // forwarded mail, catch-all domains, mailing lists and BCC all produce this.
     const FWD_ACCOUNT = 'acct-forwarded';
-    getAccountAddresses.mockResolvedValue(['simanoom@gmail.com']);
+    getAccountAddresses.mockResolvedValue(['forward@example.com']);
     query.mockResolvedValueOnce({
       rows: [{
         thread_id: 'storage-alert-thread',
         from_email: 'alert-3385@lxisa.zub',
-        to_addresses: [{ email: 'me@aol.com' }],
+        to_addresses: [{ email: 'me@example.com' }],
         cc_addresses: [],
       }],
     });
 
     const id = await computeThreadId(FWD_ACCOUNT, '<second@yxcoi.isj>', ...noHeaders, 'Action required: storage 100% full', {
       fromEmail: 'alert-6476@yxcoi.isj',
-      to: [{ email: 'me@aol.com' }],
+      to: [{ email: 'me@example.com' }],
       cc: [],
-      own: 'simanoom@gmail.com',
+      own: 'forward@example.com',
     });
 
     expect(id).toBe('<second@yxcoi.isj>'); // its own thread, not the first sender's
@@ -4024,6 +4448,280 @@ describe('computeThreadId subject fallback requires a shared correspondent (#468
     });
 
     expect(id).toBe('header-thread');
+  });
+});
+
+describe('computeThreadId subject fallback needs evidence of a reply (#649)', () => {
+  const ACCOUNT = 'acct-649';
+  const OWNER = 'me@example.com';
+  const noHeaders = [null, null];
+  const SUBJECT = 'Order Confirmation for Eldridge from King David';
+
+  beforeEach(() => {
+    query.mockReset();
+    getAccountAddresses.mockReset();
+    getAccountAddresses.mockResolvedValue([OWNER]);
+  });
+
+  it('starts a new thread for the same sender and subject without a reply prefix', async () => {
+    // The report: every receipt for the same restaurant joined the one before it. A sender
+    // that is not obviously no-reply, so this is the same-sender rule on its own.
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'first-receipt', from_email: 'orders@shop.example', to_addresses: [{ email: OWNER }], cc_addresses: [] }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<receipt-2@shop.example>', ...noHeaders, SUBJECT, {
+      fromEmail: 'orders@shop.example', to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('<receipt-2@shop.example>');
+  });
+
+  it('still joins the same sender when the subject carries a reply prefix', async () => {
+    // Someone following up on their own earlier message from a client that drops headers.
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'anna-thread', from_email: 'anna@partner.com', to_addresses: [{ email: OWNER }], cc_addresses: [] }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<again@partner.com>', ...noHeaders, 'AW: Lunch on Friday', {
+      fromEmail: 'anna@partner.com', to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('anna-thread');
+  });
+
+  it('joins an exchange between two parties even without a prefix', async () => {
+    // Bob answers a message he was copied on, keeping the subject as it was.
+    query.mockResolvedValueOnce({
+      rows: [{
+        thread_id: 'numbers-thread',
+        from_email: 'anna@partner.com',
+        to_addresses: [{ email: OWNER }],
+        cc_addresses: [{ email: 'bob@partner.com' }],
+      }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<bob@partner.com>', ...noHeaders, 'Quarterly numbers', {
+      fromEmail: 'bob@partner.com', to: [{ email: 'anna@partner.com' }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('numbers-thread');
+  });
+
+  it('does not count a sender addressing its own mail to itself as an exchange', async () => {
+    // Bulk senders often put their own address in To and BCC everyone. That made each such
+    // message look like an answer to the one before it.
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'digest-1', from_email: 'digest@news.example', to_addresses: [{ email: 'digest@news.example' }], cc_addresses: [] }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<digest-2@news.example>', ...noHeaders, 'Your weekly digest', {
+      fromEmail: 'digest@news.example', to: [{ email: 'digest@news.example' }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('<digest-2@news.example>');
+  });
+
+  it('never uses the fallback for bulk mail, even with a reply prefix', async () => {
+    const id = await computeThreadId(ACCOUNT, '<list-2@lists.example>', ...noHeaders, 'Re: Weekly update', {
+      fromEmail: 'anna@partner.com', to: [{ email: OWNER }], cc: [], own: OWNER, isBulk: true,
+    });
+
+    expect(id).toBe('<list-2@lists.example>');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'no-reply@doordash.com',
+    'noreply@example.com',
+    'NoReply@Example.com',
+    'donotreply@bank.example',
+    'do-not-reply@bank.example',
+    'do_not_reply@bank.example',
+    'no-reply-orders@shop.example',
+    'noreply+alerts@shop.example',
+  ])('never uses the fallback for a no-reply sender (%s)', async (from) => {
+    const id = await computeThreadId(ACCOUNT, '<alert-2@example.com>', ...noHeaders, `Re: ${SUBJECT}`, {
+      fromEmail: from, to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('<alert-2@example.com>');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake an address that merely contains "reply" for a no-reply one', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'reply-thread', from_email: 'replyteam@partner.com', to_addresses: [{ email: OWNER }], cc_addresses: [] }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<r2@partner.com>', ...noHeaders, 'RE: Contract', {
+      fromEmail: 'replyteam@partner.com', to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('reply-thread');
+  });
+
+  it('does not count bulk or no-reply mail sent to a sender as an exchange with that sender', async () => {
+    // Anna writes without a prefix. A newsletter and a no-reply notice were addressed to her,
+    // which would pass for an exchange, but they are not something she answers. The third
+    // candidate, Bob's message to her, is an ordinary exchange.
+    query.mockResolvedValueOnce({
+      rows: [
+        { thread_id: 'bulk', from_email: 'news@shop.example', to_addresses: [{ email: 'anna@partner.com' }], cc_addresses: [], is_bulk: true },
+        { thread_id: 'no-reply', from_email: 'no-reply@shop.example', to_addresses: [{ email: 'anna@partner.com' }], cc_addresses: [], is_bulk: false },
+        { thread_id: 'bob', from_email: 'bob@partner.com', to_addresses: [{ email: 'anna@partner.com' }], cc_addresses: [], is_bulk: null },
+      ],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<anna@partner.com>', ...noHeaders, 'Order question', {
+      fromEmail: 'anna@partner.com', to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('bob');
+    expect(query.mock.calls[0][0]).toContain('is_bulk');
+  });
+
+  it('starts a new thread when the only exchange is bulk mail sent to the sender', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'bulk', from_email: 'news@shop.example', to_addresses: [{ email: 'anna@partner.com' }], cc_addresses: [], is_bulk: true }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, '<anna2@partner.com>', ...noHeaders, 'Order question', {
+      fromEmail: 'anna@partner.com', to: [{ email: OWNER }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('<anna2@partner.com>');
+  });
+
+  it.each([
+    ['bulk', 'team@vendor.example', true],
+    ['no-reply', 'no-reply@vendor.example', false],
+  ])('still threads a header-less reply sent to a %s sender', async (_kind, from, isBulk) => {
+    // Our "RE: Survey" from a client that drops headers, sent to the address the survey came
+    // from. Also the shape of a header-less reply to a mailing-list post.
+    query.mockResolvedValueOnce({
+      rows: [{ thread_id: 'survey', from_email: from, to_addresses: [{ email: OWNER }], cc_addresses: [], is_bulk: isBulk }],
+    });
+
+    const id = await computeThreadId(ACCOUNT, `<re-${_kind}@example.com>`, ...noHeaders, 'RE: Survey', {
+      fromEmail: OWNER, to: [{ email: from }], cc: [], own: OWNER,
+    });
+
+    expect(id).toBe('survey');
+  });
+
+  it('leaves header threading alone, even for bulk mail from a no-reply sender', async () => {
+    query.mockResolvedValueOnce({ rows: [{ message_id: '<order@doordash.com>', thread_id: 'order-thread' }] });
+
+    const id = await computeThreadId(ACCOUNT, '<update@doordash.com>', '<order@doordash.com>', '<order@doordash.com>', SUBJECT, {
+      fromEmail: 'no-reply@doordash.com', to: [{ email: OWNER }], cc: [], own: OWNER, isBulk: true,
+    });
+
+    expect(id).toBe('order-thread');
+  });
+});
+
+// The ingest paths have to hand computeThreadId the parsed bulk flag, or bulk mail without
+// threading headers would still reach the subject fallback (#649). Each path is driven with a
+// header-less message from an ordinary sender, so the only thing that keeps the fallback's
+// candidate query from running is the flag.
+describe('ingest paths pass isBulk to computeThreadId (#649)', () => {
+  const subjectFallbackRan = () => query.mock.calls.some(([sql]) => String(sql).includes('normalized_subject = $3'));
+  const parsedMessage = (isBulk) => ({
+    uid: 5, messageId: `<digest-${isBulk}@news.example>`, subject: 'Weekly digest',
+    fromName: 'News', fromEmail: 'news@news.example', to: [{ email: 'me@example.com' }], cc: [], replyTo: [],
+    inReplyTo: null, references: null, date: new Date('2026-10-01T10:00:00Z'), snippet: 'hi',
+    isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk, parsedHeaders: {},
+  });
+  let seq = 0;
+  const freshAccount = () => ({
+    id: `acct-649-wiring-${++seq}`, user_id: 'user-1', email_address: 'me@example.com', enabled: true,
+    gtd_enabled: false, categorization_enabled: false, imap_host: 'imap.example.com', imap_port: 993,
+    imap_tls: true, auth_user: 'me', auth_pass: 'enc',
+  });
+
+  beforeEach(() => {
+    query.mockReset();
+    parseMessage.mockReset();
+    getAccountAddresses.mockReset();
+    getAccountAddresses.mockResolvedValue(['me@example.com']);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it.each([true, false])('sync (isBulk %s)', async (isBulk) => {
+    const account = freshAccount();
+    invalidateGtdConfigCache(account.id);
+    const client = {
+      noop: vi.fn(async () => true),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      mailbox: { exists: 1, uidValidity: 100, highestModseq: 500n },
+      fetch: vi.fn(async function* () { yield { uid: 5 }; }),
+    };
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return { rows: [{ uid_validity: 100, highest_modseq: '500' }] };
+      if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return { rows: [{ n: 0 }] };
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: 0 }] };
+      if (sql.includes('SELECT gtd_enabled, gtd_folders FROM email_accounts')) return { rows: [{ gtd_enabled: false, gtd_folders: {} }] };
+      if (sql.includes("preferences->>'categorizationEnabled'")) return { rows: [{ val: false }] };
+      if (sql.includes('INSERT INTO messages')) return { rows: [{ id: 'msg-1', is_new: true }] };
+      return { rows: [] };
+    });
+    parseMessage.mockResolvedValue(parsedMessage(isBulk));
+
+    await ImapManager.prototype.syncMessages.call({ maybeClassifyNewMessage: vi.fn() }, account, client, 'Watch', 50, false, true);
+
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO messages'))).toBe(true);
+    expect(subjectFallbackRan()).toBe(!isBulk);
+  });
+
+  it.each([true, false])('backfill (isBulk %s)', async (isBulk) => {
+    const account = freshAccount();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      client.mailbox = { exists: 1, uidValidity: 7 };
+      client.getMailboxLock = vi.fn(async () => ({ release: vi.fn() }));
+      client.search = vi.fn(async () => [5]);
+      client.fetch = vi.fn(async function* () { yield { uid: 5 }; });
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockImplementation(async (sql) => {
+      if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [account] };
+      if (sql.includes('COUNT(*) as count')) return { rows: [{ count: '0', max_uid: 0 }] };
+      if (sql.includes("preferences->>'categorizationEnabled'")) return { rows: [{ val: false }] };
+      if (sql.includes('INSERT INTO messages')) return { rows: [{ id: 'msg-1', is_new: true }] };
+      return { rows: [] };
+    });
+    parseMessage.mockResolvedValue(parsedMessage(isBulk));
+
+    const mgr = new ImapManager({ clients: new Set() });
+    mgr.maybeClassifyNewMessage = vi.fn();
+    await mgr.backfillMessages(account, 'INBOX');
+
+    expect(error).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO messages'))).toBe(true);
+    expect(subjectFallbackRan()).toBe(!isBulk);
+  });
+
+  it.each([true, false])('reply draft ingest (isBulk %s)', async (isBulk) => {
+    const account = freshAccount();
+    parseMessage.mockResolvedValue(parsedMessage(isBulk));
+    query.mockImplementation(async () => ({ rows: [{ id: 'row-1' }] }));
+
+    await Object.create(ImapManager.prototype)._ingestDraftUidWithClient(account, 'Drafts', 5,
+      { mailbox: { uidValidity: 9n } }, { headers: Buffer.from('headers'), bodyStructure: { type: 'text/plain' } });
+
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO messages'))).toBe(true);
+    expect(subjectFallbackRan()).toBe(!isBulk);
   });
 });
 
@@ -5816,8 +6514,9 @@ describe('prefetch on the gate error (#474 round 4)', () => {
 // the copy it means to delete, so a uid read from a stale row, or looked up in the wrong
 // account, deletes nothing. Driven through the real pool so the check is what guards the
 // EXPUNGE.
-describe('permanentDeleteMessage with expectMessageId', () => {
+describe('server copy identity checks', () => {
   let seq = 0;
+  // A server copy is its Message-ID, or { messageId, subject, internalDate, from }.
   function arrange(serverCopies) {
     const account = { id: `acct-pdm-${++seq}`, user_id: 'u1', imap_host: 'imap.example.com', email_address: 'me@example.test', auth_user: 'me', auth_pass: 'enc' };
     const client = Object.assign(new EventEmitter(), {
@@ -5827,11 +6526,21 @@ describe('permanentDeleteMessage with expectMessageId', () => {
       close: vi.fn(),
       noop: vi.fn(async () => true),
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-      fetch: vi.fn(async function* (range) {
+      // As a server does, it answers with only the attributes asked for.
+      fetch: vi.fn(async function* (range, query) {
         for (const uid of String(range).split(',').map(Number)) {
-          if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
+          if (!serverCopies.has(uid)) continue;
+          const copy = serverCopies.get(uid);
+          const { messageId = null, subject, internalDate, from } = copy !== null && typeof copy === 'object' ? copy : { messageId: copy };
+          yield {
+            uid,
+            ...(query?.envelope && { envelope: { messageId, subject, from: from ? [{ address: from }] : [] } }),
+            ...(query?.internalDate && { internalDate }),
+          };
         }
       }),
+      // Every message, whatever the dates asked for: the search only narrows what is compared.
+      search: vi.fn(async () => [...serverCopies.keys()]),
       // A UIDPLUS server, so the delete is a UID EXPUNGE of exactly this uid (see expungeUids).
       capabilities: new Map([['UIDPLUS', true]]),
       messageFlagsAdd: vi.fn().mockResolvedValue(true),
@@ -5842,8 +6551,10 @@ describe('permanentDeleteMessage with expectMessageId', () => {
     resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
     query.mockReset();
     query.mockResolvedValue({ rows: [account] });
+    decodeMimeWords.mockImplementation(s => s);
     return { mgr: new ImapManager({ clients: new Set() }), account, client };
   }
+  afterEach(() => decodeMimeWords.mockReset());
 
   it.each([
     ['<invoice@example.test>', true],
@@ -5886,9 +6597,11 @@ describe('permanentDeleteMessage with expectMessageId', () => {
     expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
-  it('deletes nothing when the uid is no longer on the server', async () => {
+  // Nothing holds the uid any more, which is where a delete would have left it.
+  it('counts a uid no longer on the server as deleted, expunging nothing', async () => {
     const { mgr, account, client } = arrange(new Map());
-    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(false);
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(true);
+    expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
@@ -5903,6 +6616,222 @@ describe('permanentDeleteMessage with expectMessageId', () => {
     expect(await mgr.permanentDeleteMessage(account, 7, 'Drafts')).toBe(true);
     expect(client.fetch).not.toHaveBeenCalled();
     expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  // messageParser stores a Message-ID cut at 500 characters, so the row of a message with a
+  // longer one holds a prefix of what the server copy carries.
+  const LONG_ID = `<${'x'.repeat(600)}@example.test>`;
+
+  it('deletes the uid when the row holds the Message-ID cut at the storage cap', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, LONG_ID]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectMessageId: LONG_ID.slice(0, 500) })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('deletes nothing when a cut Message-ID is not the start of the server copy\'s', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, `<${'y'.repeat(600)}@example.test>`]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectMessageId: LONG_ID.slice(0, 500) })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('does not take a short Message-ID for the start of a longer one', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<old@example.test.other>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectMessageId: '<old@example.test' })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  // A row of the messages table, and the server copy sync filed it from: sync stores the copy's
+  // INTERNALDATE as the row's date and its first From address as from_email.
+  const AT = new Date('2026-10-21T09:00:00Z');
+  const LATER = new Date('2026-10-21T09:00:01Z');
+  const row = (fields) => ({ message_id: null, date: AT, from_email: 'scanner@example.test', subject: 'Scan', ...fields });
+  const scan = (fields) => ({ messageId: null, internalDate: AT, from: 'scanner@example.test', subject: 'Scan', ...fields });
+
+  it.each([
+    ['the row has none and the server copy has one', row(), scan({ messageId: '<second@example.test>' })],
+    ['the row has <> and the server copy has one', row({ message_id: '<>' }), scan({ messageId: '<second@example.test>' })],
+    ['the row has one and the server copy has none', row({ message_id: '<first@example.test>' }), scan()],
+  ])('deletes nothing when only one side has a Message-ID: %s', async (_case, expectRow, copy) => {
+    const { mgr, account, client } = arrange(new Map([[7, copy]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('deletes a server copy with no Message-ID whose INTERNALDATE, sender and subject are the row\'s', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan()]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(true);
+    expect(client.fetch).toHaveBeenCalledWith('7', { uid: true, envelope: true, internalDate: true }, { uid: true });
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it.each([
+    ['another INTERNALDATE', row(), scan({ internalDate: LATER })],
+    ['another subject', row(), scan({ subject: 'Invoice' })],
+    // The two cases from the #666 review: the same subject and time from another sender, and no
+    // subject on either.
+    ['another sender', row(), scan({ from: 'printer@example.test' })],
+    ['no subject and another sender', row({ subject: '(no subject)' }), scan({ subject: '', from: 'printer@example.test' })],
+    ['no date on either side', row({ date: null }), scan({ internalDate: null })],
+  ])('deletes nothing when neither has a Message-ID and they have %s', async (_case, expectRow, copy) => {
+    const { mgr, account, client } = arrange(new Map([[7, copy]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('compares the sender without regard to case', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan({ from: 'Scanner@Example.test' })]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('takes the sender from a mailbox and host, as parseMessage does', async () => {
+    const { mgr, account, client } = arrange(new Map());
+    client.fetch = vi.fn(async function* () {
+      yield { uid: 7, envelope: { messageId: null, subject: 'Scan', from: [{ mailbox: 'scanner', host: 'example.test' }] }, internalDate: AT };
+    });
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('compares the subject as sync stores it, decoded and trimmed', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan({ subject: ' =?UTF-8?Q?Caf=C3=A9?= ' })]]));
+    decodeMimeWords.mockImplementation(s => s.replace('=?UTF-8?Q?Caf=C3=A9?=', 'Café'));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row({ subject: 'Café' }) })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  // Without a subject in the envelope, sync takes the row's from the Subject header, or stores
+  // '(no subject)', and the header is not fetched here.
+  it('compares only INTERNALDATE and sender when the server copy\'s envelope has no subject', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan({ subject: '' })]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row({ subject: 'From the Subject header' }) })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  // Nothing a row with no Message-ID stores tells apart two messages with its INTERNALDATE, sender
+  // and subject, so with two in the folder it could be either.
+  it('deletes nothing when another message in the folder matches the row as well', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan()], [8, scan()]]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(false);
+    // The days around the row's date, wide enough for any server's time zone.
+    expect(client.search).toHaveBeenCalledWith({ since: new Date('2026-10-19T00:00:00Z'), before: new Date('2026-10-24T00:00:00Z') }, { uid: true });
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('deletes the copy when nothing else in the folder matches the row', async () => {
+    const { mgr, account, client } = arrange(new Map([
+      [7, scan()],
+      [8, scan({ internalDate: LATER })],
+      [9, scan({ from: 'printer@example.test' })],
+      [10, scan({ messageId: '<scan@example.test>' })],
+    ]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('deletes nothing when the folder cannot be searched for another match', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan()]]));
+    client.search.mockResolvedValue(false);
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row() })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  // Copies that share a Message-ID can be taken for each other, an accepted limit.
+  it('does not search the folder for a row with a Message-ID', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<a@example.test>']]));
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectRow: row({ message_id: '<a@example.test>' }) })).toBe(true);
+    expect(client.search).not.toHaveBeenCalled();
+  });
+
+  // The bulk delete of rows already in Trash. Rows hold PostgreSQL BIGINT uids as strings.
+  it('bulkPermanentDelete deletes only the uids whose server copy is the row\'s message', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<someone-elses@example.test>']]));
+    const expectRows = new Map([[7, row({ message_id: '<a@example.test>' })], [8, row({ message_id: '<b@example.test>' })]]);
+    expect(await mgr.bulkPermanentDelete(account, ['7', '8'], 'Trash', { expectRows }))
+      .toEqual({ succeeded: ['7'], failed: [], mismatched: ['8'] });
+    expect(client.fetch).toHaveBeenCalledTimes(1);
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.messageDelete).toHaveBeenCalledTimes(1);
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('bulkPermanentDelete counts a uid no longer on the server as deleted, expunging nothing for it', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>']]));
+    const expectRows = new Map([[7, row({ message_id: '<a@example.test>' })], [8, row({ message_id: '<b@example.test>' })]]);
+    expect(await mgr.bulkPermanentDelete(account, [7, 8], 'Trash', { expectRows }))
+      .toEqual({ succeeded: [7, 8], failed: [], mismatched: [] });
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('bulkPermanentDelete expunges nothing when no server copy matches', async () => {
+    const { mgr, account, client } = arrange(new Map([[8, '<someone-elses@example.test>']]));
+    expect(await mgr.bulkPermanentDelete(account, [8], 'Trash', { expectRows: new Map([[8, row({ message_id: '<b@example.test>' })]]) }))
+      .toEqual({ succeeded: [], failed: [], mismatched: [8] });
+    expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('bulkPermanentDelete checks a row with no Message-ID by INTERNALDATE, sender and subject', async () => {
+    const { mgr, account, client } = arrange(new Map([
+      [7, '<a@example.test>'],
+      [8, scan()],
+      [9, scan({ messageId: '<z@example.test>' })],
+      [10, scan({ internalDate: LATER })],
+      [11, scan({ from: 'printer@example.test' })],
+    ]));
+    const expectRows = new Map([[7, row({ message_id: '<a@example.test>' })], [8, row()], [9, row({ message_id: '<>' })], [10, row()], [11, row()]]);
+    expect(await mgr.bulkPermanentDelete(account, [7, 8, 9, 10, 11], 'Trash', { expectRows }))
+      .toEqual({ succeeded: [7, 8], failed: [], mismatched: [9, 10, 11] });
+    expect(client.fetch).toHaveBeenCalledWith('7,8,9,10,11', { uid: true, envelope: true, internalDate: true }, { uid: true });
+    expect(client.messageDelete).toHaveBeenCalledWith('7,8', { uid: true });
+  });
+
+  it('bulkPermanentDelete leaves a row with no Message-ID that another message in the folder also matches', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, scan()], [8, scan()], [9, scan({ subject: 'Invoice' })]]));
+    const expectRows = new Map([[7, row()], [9, row({ subject: 'Invoice' })]]);
+    expect(await mgr.bulkPermanentDelete(account, [7, 9], 'Trash', { expectRows }))
+      .toEqual({ succeeded: [9], failed: [], mismatched: [7] });
+    // Both rows' dates fall on one day, so one search serves them both.
+    expect(client.search).toHaveBeenCalledTimes(1);
+    expect(client.messageDelete).toHaveBeenCalledWith('9', { uid: true });
+  });
+
+  it('bulkPermanentDelete reports the uids it tried, and those already gone, when the expunge fails and is verified', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<someone-elses@example.test>'], [9, '<c@example.test>']]));
+    client.messageDelete.mockRejectedValueOnce(new Error('connection lost'));
+    client.search = vi.fn(async () => [9]); // 7 went, 9 is still there
+    const expectRows = new Map([7, 8, 9, 10].map(uid => [uid, row({ message_id: `<${'abcd'[uid - 7]}@example.test>` })]));
+    expect(await mgr.bulkPermanentDelete(account, [7, 8, 9, 10], 'Trash', { expectRows }))
+      .toEqual({ succeeded: [7, 10], failed: [9], mismatched: [8] });
+    expect(client.search).toHaveBeenCalledWith({ uid: '7,9' }, { uid: true });
+  });
+
+  it('bulkPermanentDelete counts every uid it tried as failed when the expunge fails and cannot be verified', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<someone-elses@example.test>']]));
+    client.messageDelete.mockRejectedValueOnce(new Error('connection lost'));
+    client.search = vi.fn(async () => { throw new Error('connection lost'); });
+    const expectRows = new Map([7, 8, 9].map(uid => [uid, row({ message_id: `<${'abc'[uid - 7]}@example.test>` })]));
+    expect(await mgr.bulkPermanentDelete(account, [7, 8, 9], 'Trash', { expectRows }))
+      .toEqual({ succeeded: [9], failed: [7], mismatched: [8] });
+  });
+
+  it('a FETCH answered with an unsolicited flags-only response for the uid still finds its Message-ID', async () => {
+    const { mgr, account, client } = arrange(new Map());
+    client.fetch = vi.fn(async function* () {
+      yield { uid: 7, envelope: { messageId: '<a@example.test>' } };
+      yield { uid: 7, flags: new Set(['\\Seen']) };
+    });
+    expect(await mgr.permanentDeleteMessage(account, 7, 'Trash', { expectMessageId: '<a@example.test>' })).toBe(true);
+    expect(await mgr.bulkPermanentDelete(account, [7], 'Trash', { expectRows: new Map([[7, row({ message_id: '<a@example.test>' })]]) }))
+      .toEqual({ succeeded: [7], failed: [], mismatched: [] });
+    expect(client.messageDelete).toHaveBeenCalledTimes(2);
+  });
+
+  it('bulkPermanentDelete without expected rows deletes as before, with no FETCH', async () => {
+    const { mgr, account, client } = arrange(new Map([[7, '<a@example.test>'], [8, '<b@example.test>']]));
+    expect(await mgr.bulkPermanentDelete(account, [7, 8], 'Trash')).toEqual({ succeeded: [7, 8], failed: [], mismatched: [] });
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(client.messageDelete).toHaveBeenCalledWith('7,8', { uid: true });
   });
 });
 

@@ -93,6 +93,18 @@ describe('blank lines through Improve and Apply', () => {
     assert.equal(editor.getHTML(), '<p>Hi Bob,</p><p></p><p>Thanks,</p>');
   });
 
+  test('a blank line holding only spaces is still a blank line', () => {
+    const editor = makeEditor();
+    apply(editor, 'One.\n  \nTwo.');
+    assert.equal(editor.getHTML(), '<p>One.</p><p></p><p>Two.</p>');
+  });
+
+  test('stays linear on a long run of spaces before a line break', () => {
+    const started = performance.now();
+    aiTextToDoc(`x${' '.repeat(200_000)}\ny`);
+    assert.ok(performance.now() - started < 1000);
+  });
+
   test('lists are one line per item, not items padded with blank lines', () => {
     const doc = makeEditor(
       '<p>Bring:</p><ul><li><p>Skates</p></li><li><p>Helmet</p><ul><li><p>with cage</p></li></ul></li></ul>'

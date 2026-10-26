@@ -14,13 +14,14 @@ import searchRoutes from '../routes/search.js';
 import apiTokenRoutes from '../routes/apiTokens.js';
 import aiRoutes from '../routes/ai.js';
 import categoriesRoutes from '../routes/categories.js';
+import scheduledRoutes from '../routes/scheduled.js';
 import { loadBundledPlugins } from '../plugins/loadPlugins.js';
 import { API_TOKEN_ROUTES, matchApiTokenRoute } from './apiTokenAllowlist.js';
 
 // The routers index.js mounts where an allowlisted request can reach them, by the names it mounts
 // them under. REVIEWED are those whose routes were reviewed for API tokens; ai and categories sit
 // under /api ahead of the inline routes, so a request walks through them too.
-const ROUTERS = { mailRoutes, sendRoutes, draftRoutes, accountRoutes, accountSpamRouter, searchRoutes, apiTokenRoutes, aiRoutes, categoriesRoutes };
+const ROUTERS = { mailRoutes, sendRoutes, draftRoutes, accountRoutes, accountSpamRouter, searchRoutes, apiTokenRoutes, aiRoutes, categoriesRoutes, scheduledRoutes };
 const REVIEWED = new Set(['mailRoutes', 'sendRoutes', 'draftRoutes', 'accountRoutes', 'accountSpamRouter', 'searchRoutes', 'apiTokenRoutes']);
 // Routes index.js defines itself, reviewed for any valid token.
 const INLINE = ['/api/health', '/api/version'];

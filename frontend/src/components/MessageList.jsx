@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageMid, selectSelectedMessageAccountId } from '../store/index.js';
@@ -15,6 +15,9 @@ import { splitDraftSignature } from '../utils/draftSignature.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
+import UndoBar from './UndoBar.jsx';
+import ScheduledList from './ScheduledList.jsx';
+import { SCHEDULED_VIEW } from '../utils/scheduledCompose.js';
 import GtdTabList from './GtdTabList.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
@@ -25,16 +28,22 @@ import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
 import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
-import { cancelScheduledMarkReadFor } from '../utils/markRead.js';
+import { cancelScheduledMarkRead, cancelScheduledMarkReadFor, scheduleMarkReadTimer } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
-import { folderDisplayName, folderDisplayNameForPath, folderMatchesQuery, folderRole, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
+import {
+  folderDisplayName, folderDisplayNameForPath, folderRole, buildMovePickerSections, movePickerSectionHeading,
+  movePickerFoldersEmpty, runMovePickerAction,
+} from '../utils/folderDisplay.js';
+import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import SpamBadge from './SpamBadge.jsx';
 import ReplyDraftIndicator from './ReplyDraftIndicator.jsx';
+import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
+import { refreshListWindow, createTrailingRefresh } from '../utils/listRefresh.js';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete, threadDeleteGuardKey } from '../utils/pendingDeletes.js';
 import {
@@ -48,7 +57,7 @@ import {
   isCurrentThreadLoad,
   unreadCountsByAccount,
 } from '../utils/threadedArchive.js';
-import { createUndoableCommit, UNDO_COMMIT_DELAY_MS, UNDO_WINDOW_MS } from '../utils/undoableAction.js';
+import { createUndoableCommit, UNDO_COMMIT_DELAY_MS } from '../utils/undoableAction.js';
 import { resolveConversationSelection, selectListedMessage } from '../utils/conversation.js';
 
 // Folder icon for move picker
@@ -115,7 +124,15 @@ function SwipeBackground({ side, actionView, innerRef }) {
   );
 }
 
+// The center column: a mailbox's messages, or the Scheduled view (#543, design 5.2), whose rows are
+// not messages and which has a list of its own. It has no account selected, so its id cannot be a
+// folder's.
 export default function MessageList() {
+  const scheduledView = useStore(s => s.selectedAccountId === null && s.selectedFolder === SCHEDULED_VIEW);
+  return scheduledView ? <ScheduledList /> : <MailboxList />;
+}
+
+function MailboxList() {
   const { t } = useTranslation();
   const uiScale = useUiScale();
   const {
@@ -319,6 +336,8 @@ export default function MessageList() {
   const isSearching = useStore(s => s.isSearching);
   const refreshRequestRef = useRef(null);
   if (refreshRequestRef.current === null) refreshRequestRef.current = createLatestRequest();
+  const trailingRefreshRef = useRef(null);
+  if (trailingRefreshRef.current === null) trailingRefreshRef.current = createTrailingRefresh();
   // Bumped to force the search effect to re-run (e.g. after rules move messages) so an
   // active search snapshot drops messages that no longer match. See #223.
   const [searchReloadToken, setSearchReloadToken] = useState(0);
@@ -494,17 +513,13 @@ export default function MessageList() {
     const run = async () => {
       try {
         const state = useStore.getState();
-        const ps = state.pageSize;
         const sm = state.scrollMode;
-        let params;
-        if (sm === 'paginated') {
-          const pg = currentPageRef.current;
-          params = { limit: ps, offset: (pg - 1) * ps };
-        } else {
-          const currentOffset = state.messagesOffset;
-          // Backend caps limit at 500 — don't request more or the list silently shrinks
-          params = { limit: Math.min(currentOffset || ps, 500), offset: 0 };
-        }
+        const params = refreshListWindow({
+          scrollMode: sm,
+          currentPage: currentPageRef.current,
+          pageSize: state.pageSize,
+          loadedCount: state.messagesOffset,
+        });
         scopeListParams(params, selectedAccountId, selectedFolder);
         if (unreadOnly) params.unreadOnly = 'true';
         if (state.threadedView) params.threaded = 'true';
@@ -534,7 +549,8 @@ export default function MessageList() {
     };
 
     const handler = () => {
-      if (!useStore.getState().loadingMessages && !searchQuery.trim()) {
+      if (searchQuery.trim()) return;
+      if (trailingRefreshRef.current.request(useStore.getState().loadingMessages)) {
         const delayMs = Math.max(0, recentMessageOpenUntilRef.current - Date.now());
         clearTimeout(deferredRefreshTimerRef.current);
         if (delayMs > 0) {
@@ -550,6 +566,14 @@ export default function MessageList() {
       clearTimeout(deferredRefreshTimerRef.current);
     };
   }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, searchQuery, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, setHasMoreMessages, setMessages, setMessagesOffset, setMessagesTotal]);
+
+  // Run the refresh held back while a load was in flight, once that load (and any append it
+  // made) has finished.
+  useEffect(() => {
+    if (!loadingMessages && trailingRefreshRef.current.settle()) {
+      window.dispatchEvent(new CustomEvent('mailflow:refresh'));
+    }
+  }, [loadingMessages]);
 
   // Search
   useEffect(() => {
@@ -850,6 +874,8 @@ export default function MessageList() {
   }, [threadMessages, setThreadMessages, isUnified]);
 
   const setMessagesReadState = useCallback(async (message, read) => {
+    // An explicit read or unread wins over a delayed automatic read still pending for the row.
+    cancelScheduledMarkReadFor(message.id);
     const isThreadRow = isThreadListRow(message);
     const unreadCount = Number.parseInt(message.unread_count, 10);
     // Use the row's own unread_count as the immediate estimate.
@@ -898,6 +924,8 @@ export default function MessageList() {
       else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
       return;
     }
+
+    actionMessages.forEach(msg => cancelScheduledMarkReadFor(msg.id));
 
     // Compute exact delta from sub-message states (before mutating the cache).
     const actualDelta = read
@@ -1887,6 +1915,7 @@ export default function MessageList() {
   ]);
 
   const handleBulkMarkRead = useCallback(async (ids, msgs) => {
+    ids.forEach(id => cancelScheduledMarkReadFor(id));
     const markAsRead = msgs.some(m => !m.is_read);
     // Compute per-account and per-category unread deltas before mutating state
     const deltaByAccount = {};
@@ -1939,7 +1968,7 @@ export default function MessageList() {
   }, [updateMessage]);
 
   const autoMarkReadTimerRef = useRef(null);
-  useEffect(() => () => clearTimeout(autoMarkReadTimerRef.current), []);
+  useEffect(() => () => cancelScheduledMarkRead(autoMarkReadTimerRef.current), []);
 
   // Keep refs to bulk handlers so the shortcut effect (registered once) is never stale
   const contextActionRef = useRef(null);
@@ -1962,7 +1991,7 @@ export default function MessageList() {
       if (msg.is_read) return;
       const { updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, markReadBehavior, markReadDelay } = getState();
       if (markReadBehavior === 'manual') return;
-      clearTimeout(autoMarkReadTimerRef.current);
+      cancelScheduledMarkRead(autoMarkReadTimerRef.current);
       autoMarkReadTimerRef.current = null;
       const doMarkRead = () => {
         updateMessage(msg.id, { is_read: true });
@@ -1984,7 +2013,7 @@ export default function MessageList() {
           });
       };
       if (markReadBehavior === 'delay') {
-        autoMarkReadTimerRef.current = setTimeout(doMarkRead, (markReadDelay || 1) * 1000);
+        autoMarkReadTimerRef.current = scheduleMarkReadTimer(msg.id, doMarkRead, (markReadDelay || 1) * 1000);
       } else {
         doMarkRead();
       }
@@ -2076,6 +2105,7 @@ export default function MessageList() {
       if (!selectedMessageId) return;
       const msg = messages.find(m => m.id === selectedMessageId);
       if (!msg) return;
+      cancelScheduledMarkReadFor(msg.id);
       const newRead = !msg.is_read;
       updateMessage(selectedMessageId, { is_read: newRead });
       if (newRead) {
@@ -2111,7 +2141,7 @@ export default function MessageList() {
             pendingMarkReadMap.delete(message.id);
             completedMarkReadMap.delete(message.id);
           }
-          clearTimeout(autoMarkReadTimerRef.current);
+          cancelScheduledMarkRead(autoMarkReadTimerRef.current);
           autoMarkReadTimerRef.current = null;
         },
         update: (id, fields) => {
@@ -2618,7 +2648,7 @@ export default function MessageList() {
   // Shared by the main-pane selection (handleSelect) and the detached-window open
   // path (#219) so both routes behave identically.
   const markMessageReadOnOpen = (message) => {
-    clearTimeout(autoMarkReadTimerRef.current);
+    cancelScheduledMarkRead(autoMarkReadTimerRef.current);
     autoMarkReadTimerRef.current = null;
     if (message.is_read || markReadBehavior === 'manual') return;
     const prevUnread = message.unread_count;
@@ -2643,7 +2673,7 @@ export default function MessageList() {
         });
     };
     if (markReadBehavior === 'delay') {
-      autoMarkReadTimerRef.current = setTimeout(doMarkRead, markReadDelay * 1000);
+      autoMarkReadTimerRef.current = scheduleMarkReadTimer(message.id, doMarkRead, markReadDelay * 1000);
     } else {
       doMarkRead();
     }
@@ -2732,6 +2762,23 @@ export default function MessageList() {
   const canMove = selectedAccountIds.length === 1;
   const bulkMarkAsRead = selectedMsgs.some(m => !m.is_read);
   const bulkMarkAsStarred = selectedMsgs.some(m => !m.is_starred);
+  const bulkMoveAccount = accounts.find(a => a.id === selectedMsgs[0]?.account_id);
+  // messages are the selected rows as shown: a thread row is its representative message, not
+  // expanded to every member the way handleBulkMove expands it. A plugin that needs every member
+  // resolves them itself.
+  const bulkMovePluginSections = usePluginCollected('move-picker-sections', {
+    account: bulkMoveAccount, messages: selectedMsgs, currentFolder: selectedFolder,
+    onClose: () => setShowFolderPicker(false), t,
+  });
+  // The bulk picker only opens for one account's messages. Built only while it is open, since
+  // the list re-renders far more often than the picker is used.
+  const bulkMoveSections = showFolderPicker ? buildMovePickerSections({
+    folders: pickerFolders, recents: recentFolders, favorites: favoriteFolders,
+    pluginSections: bulkMovePluginSections, accountId: selectedMsgs[0]?.account_id,
+    currentFolder: selectedFolder, query: pickerSearch,
+  }) : [];
+  const bulkMoveFoldersEmpty = movePickerFoldersEmpty(bulkMoveSections, pickerFolders);
+  const closeBulkPickerAfterAction = () => { setShowFolderPicker(false); clearSelection(); };
 
   return (
     <div style={{
@@ -3791,13 +3838,13 @@ export default function MessageList() {
                     <div style={{ padding: '20px 16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                       {t('common.loading')}
                     </div>
-                  ) : pickerFolders.length === 0 ? (
+                  ) : pickerFolders.length === 0 && bulkMoveSections.length === 0 ? (
                     <div style={{ padding: '20px 16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                       {t('contextMenu.folders.empty')}
                     </div>
                   ) : (
                     <>
-                      <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
+                      {pickerFolders.length > 0 && <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
                         <input
                           autoFocus
                           value={pickerSearch}
@@ -3811,62 +3858,62 @@ export default function MessageList() {
                             outline: 'none',
                           }}
                         />
-                      </div>
+                      </div>}
                       <div style={{ maxHeight: 285, overflowY: 'auto' }}>
                       {(() => {
-                        const q = pickerSearch.trim().toLowerCase();
-                        const displayed = pickerFolders
-                          .filter(f => f.path !== selectedFolder && (!q || folderMatchesQuery(f, q)));
-                        // Recent and favorite targets above the full list, as in the single-message
-                        // pickers (#551). The bulk picker only opens for one account's messages.
-                        const target = { accountId: selectedMsgs[0]?.account_id, currentFolder: selectedFolder };
-                        const recent = q ? [] : recentMoveTargets(recentFolders, pickerFolders, target);
-                        const favorites = q ? [] : favoriteMoveTargets(favoriteFolders, pickerFolders, { ...target, exclude: recent });
+                        const q = pickerSearch.trim();
                         const heading = label => (
                           <div style={{ padding: '8px 12px 4px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                             {label}
                           </div>
                         );
                         const divider = <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />;
-                        const item = (f, key) => (
-                          <button
-                            key={key}
-                            onClick={() => handleBulkMove([...selectedIds], selectedMsgs, f.path)}
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 8,
-                              width: '100%', padding: '8px 12px',
-                              background: 'none', border: 'none',
-                              color: 'var(--text-primary)', fontSize: 13,
-                              cursor: 'pointer', textAlign: 'left',
-                              transition: 'background 0.1s',
-                            }}
-                            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-                            onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                          >
-                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                              <FolderIcon specialUse={f.special_use} />
-                            </span>
-                            <FolderPathLabel folder={f} label={f.favoriteLabel} />
-                          </button>
-                        );
-                        return displayed.length === 0 ? (
-                          <div style={{ padding: '12px 12px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
-                            {t('contextMenu.folders.empty')}
-                          </div>
-                        ) : (
+                        const item = row => {
+                          const isAction = row.kind === 'action';
+                          const f = row.folder;
+                          return (
+                            <button
+                              key={isAction ? `action-${row.item.key}` : f.path}
+                              onClick={isAction
+                                ? () => runMovePickerAction(row.item, closeBulkPickerAfterAction)
+                                : () => handleBulkMove([...selectedIds], selectedMsgs, f.path)}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                width: '100%', padding: '8px 12px',
+                                background: 'none', border: 'none',
+                                color: 'var(--text-primary)', fontSize: 13,
+                                cursor: 'pointer', textAlign: 'left',
+                                transition: 'background 0.1s',
+                              }}
+                              onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
+                              onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                            >
+                              <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                {isAction ? row.item.renderIcon(13) : <FolderIcon specialUse={f.special_use} />}
+                              </span>
+                              {isAction ? <FolderPathLabel label={row.item.label} /> : <FolderPathLabel folder={f} label={f.favoriteLabel} />}
+                            </button>
+                          );
+                        };
+                        return (
                           <>
-                            {recent.length > 0 && (<>
-                              {heading(t('contextMenu.folders.recent'))}
-                              {recent.map(f => item(f, `recent-${f.path}`))}
-                              {divider}
-                            </>)}
-                            {favorites.length > 0 && (<>
-                              {heading(t('contextMenu.folders.favorites'))}
-                              {favorites.map(f => item(f, `fav-${f.path}`))}
-                              {divider}
-                            </>)}
-                            {!q && heading(t('messageList.moveToFolder'))}
-                            {displayed.map(f => item(f, f.path))}
+                            {bulkMoveSections.map((section, i) => {
+                              const sectionLabel = section.key === 'all'
+                                ? (q ? null : t('messageList.moveToFolder'))
+                                : movePickerSectionHeading(section, t);
+                              return (
+                                <Fragment key={section.key}>
+                                  {sectionLabel && heading(sectionLabel)}
+                                  {section.rows.map(item)}
+                                  {(i < bulkMoveSections.length - 1 || bulkMoveFoldersEmpty) && divider}
+                                </Fragment>
+                              );
+                            })}
+                            {bulkMoveFoldersEmpty && (
+                              <div style={{ padding: '12px 12px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
+                                {t('contextMenu.folders.empty')}
+                              </div>
+                            )}
                           </>
                         );
                       })()}
@@ -3922,62 +3969,58 @@ export default function MessageList() {
                         <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
                           {t('common.loading')}
                         </div>
-                      ) : pickerFolders.length === 0 ? (
-                        <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                          {t('contextMenu.folders.empty')}
-                        </div>
                       ) : (() => {
-                        const q = pickerSearch.trim().toLowerCase();
-                        const displayed = pickerFolders
-                          .filter(f => f.path !== selectedFolder && (!q || folderMatchesQuery(f, q)));
-                        const target = { accountId: selectedMsgs[0]?.account_id, currentFolder: selectedFolder };
-                        const recent = q ? [] : recentMoveTargets(recentFolders, pickerFolders, target);
-                        const favorites = q ? [] : favoriteMoveTargets(favoriteFolders, pickerFolders, { ...target, exclude: recent });
                         const heading = label => (
                           <div style={{ padding: '12px 20px 6px', fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-subtle)' }}>
                             {label}
                           </div>
                         );
-                        const item = (f, key) => (
-                          <button
-                            key={key}
-                            onClick={() => { handleBulkMove([...selectedIds], selectedMsgs, f.path); setShowFolderPicker(false); }}
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 14,
-                              width: '100%', minHeight: 48,
-                              padding: '0 20px',
-                              background: 'none', border: 'none',
-                              borderBottom: '1px solid var(--border-subtle)',
-                              color: 'var(--text-primary)', fontSize: 15,
-                              cursor: 'pointer', textAlign: 'left',
-                            }}
-                          >
-                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                              <FolderIcon specialUse={f.special_use} />
-                            </span>
-                            <FolderPathLabel folder={f} label={f.favoriteLabel} />
-                          </button>
-                        );
-                        if (displayed.length === 0) {
+                        const item = row => {
+                          const isAction = row.kind === 'action';
+                          const f = row.folder;
                           return (
-                            <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                              {t('contextMenu.folders.empty')}
-                            </div>
+                            <button
+                              key={isAction ? `action-${row.item.key}` : f.path}
+                              onClick={isAction
+                                ? () => runMovePickerAction(row.item, closeBulkPickerAfterAction)
+                                : () => { handleBulkMove([...selectedIds], selectedMsgs, f.path); setShowFolderPicker(false); }}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 14,
+                                width: '100%', minHeight: 48,
+                                padding: '0 20px',
+                                background: 'none', border: 'none',
+                                borderBottom: '1px solid var(--border-subtle)',
+                                color: 'var(--text-primary)', fontSize: 15,
+                                cursor: 'pointer', textAlign: 'left',
+                              }}
+                            >
+                              <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                {isAction ? row.item.renderIcon(13) : <FolderIcon specialUse={f.special_use} />}
+                              </span>
+                              {isAction ? <FolderPathLabel label={row.item.label} /> : <FolderPathLabel folder={f} label={f.favoriteLabel} />}
+                            </button>
                           );
-                        }
-                        const sectioned = recent.length > 0 || favorites.length > 0;
-                        return (<>
-                          {recent.length > 0 && (<>
-                            {heading(t('contextMenu.folders.recent'))}
-                            {recent.map(f => item(f, `recent-${f.path}`))}
-                          </>)}
-                          {favorites.length > 0 && (<>
-                            {heading(t('contextMenu.folders.favorites'))}
-                            {favorites.map(f => item(f, `fav-${f.path}`))}
-                          </>)}
-                          {sectioned && heading(t('messageList.foldersHeading'))}
-                          {displayed.map(f => item(f, f.path))}
-                        </>);
+                        };
+                        return (
+                          <>
+                            {bulkMoveSections.map((section, i) => {
+                              const sectionLabel = section.key === 'all'
+                                ? (i > 0 ? t('messageList.foldersHeading') : null)
+                                : movePickerSectionHeading(section, t);
+                              return (
+                                <Fragment key={section.key}>
+                                  {sectionLabel && heading(sectionLabel)}
+                                  {section.rows.map(item)}
+                                </Fragment>
+                              );
+                            })}
+                            {bulkMoveFoldersEmpty && (
+                              <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
+                                {t('contextMenu.folders.empty')}
+                              </div>
+                            )}
+                          </>
+                        );
                       })()}
                     </div>
                   </div>
@@ -4330,83 +4373,6 @@ export default function MessageList() {
   );
 }
 
-function UndoBar({ notification, onDismiss, showTopBorder }) {
-  const { t } = useTranslation();
-  const [exiting, setExiting] = useState(false);
-
-  const dismiss = () => {
-    setExiting(true);
-    setTimeout(onDismiss, 190);
-  };
-
-  const handleUndo = () => {
-    notification.onUndo();
-    dismiss();
-  };
-
-  // Undo send brings its own window; everything else uses the standard one.
-  const windowMs = notification.undoMs ?? UNDO_WINDOW_MS;
-  useEffect(() => {
-    const timer = setTimeout(dismiss, windowMs);
-    return () => clearTimeout(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <div
-      className={exiting ? 'action-bar-exit' : 'action-bar-enter'}
-      style={{
-        flexShrink: 0,
-        position: 'relative',
-        overflow: 'hidden',
-        borderTop: showTopBorder ? '1px solid var(--border-subtle)' : 'none',
-        padding: '9px 16px',
-        display: 'flex', alignItems: 'center', gap: 10,
-        background: 'var(--bg-primary)',
-      }}
-    >
-      <div style={{
-        position: 'absolute', bottom: 0, left: 0,
-        height: 2, background: 'var(--accent)',
-        animation: `action-bar-progress ${windowMs}ms linear forwards`,
-      }} />
-      <span style={{
-        flex: 1, minWidth: 0,
-        fontSize: 13, color: 'var(--text-secondary)',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }}>
-        {notification.title}
-      </span>
-      <button
-        onClick={handleUndo}
-        style={{
-          background: 'none', border: 'none',
-          color: 'var(--accent)', fontSize: 13, fontWeight: 600,
-          cursor: 'pointer', padding: '2px 4px', flexShrink: 0,
-        }}
-        onMouseEnter={e => { e.currentTarget.style.opacity = '0.75'; }}
-        onMouseLeave={e => { e.currentTarget.style.opacity = '1'; }}
-      >
-        {t('common.undo')}
-      </button>
-      <button
-        onClick={dismiss}
-        aria-label={t('common.dismiss')}
-        style={{
-          background: 'none', border: 'none',
-          color: 'var(--text-tertiary)', cursor: 'pointer',
-          padding: 2, display: 'flex', flexShrink: 0,
-          transition: 'color 0.15s',
-        }}
-        onMouseEnter={e => { e.currentTarget.style.color = 'var(--text-primary)'; }}
-        onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
-    </div>
-  );
-}
 
 // Which list to ask the server for: an account's folder, or with no account All Inboxes, or the
 // Snoozed view across every account (#269).
@@ -4534,6 +4500,15 @@ function EmptyState({ folderSyncing, searchQuery, searching, searchError, unread
         </div>
         <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>{t('messageList.noAccounts')}</div>
         <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('messageList.noAccountsDesc')}</div>
+        <button type="button" onClick={() => {
+          const store = useStore.getState();
+          store.setAccountsIntent({ action: 'add' });
+          store.setAdminTab('accounts');
+          store.setShowAdmin(true);
+        }} style={{
+          marginTop: 16, padding: '8px 16px', background: 'var(--accent)', border: 'none', borderRadius: 8,
+          color: 'var(--accent-text)', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+        }}>{t('admin.accounts.addButton')}</button>
       </div>
     );
   }
@@ -4809,6 +4784,7 @@ function ThreadRow({ message, isExpanded, threadMsgs, isLoadingThread, selectedM
             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {message.subject || t('common.noSubject')}
             </span>
+            <PluginSlot name="message-row-meta" ctx={{ message }} />
             <ReplyDraftIndicator message={message} listRow />
             <SpamBadge message={message} onClick={onExplainSpam} />
           </div>
@@ -5138,6 +5114,7 @@ function MessageRow({ message, selected, lastViewed, isChecked, selectionMode, s
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {message.subject || t('message.noSubject')}
           </span>
+          <PluginSlot name="message-row-meta" ctx={{ message }} />
           <ReplyDraftIndicator message={message} listRow />
           <SpamBadge message={message} onClick={onExplainSpam} />
         </div>

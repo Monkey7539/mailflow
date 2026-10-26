@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import AccountMark from './AccountMark.jsx';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
@@ -24,7 +24,8 @@ import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFr
 import MessageBodyView from './MessageBodyView.jsx';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
-import { folderMatchesQuery, favoriteMoveTargets, recentMoveTargets } from '../utils/folderDisplay.js';
+import { buildMovePickerSections, movePickerSectionHeading, movePickerFoldersEmpty, runMovePickerAction } from '../utils/folderDisplay.js';
+import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import SpamBadge from './SpamBadge.jsx';
 import SpamExplainModal from './SpamExplainModal.jsx';
@@ -240,7 +241,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [aiStatus, setAiStatus] = useState(null);
   // Per-action results for the current message: { [actionKey]: { status, text, label } }.
   // status: 'loading' | 'done' | 'error'. Restored from localStorage on message change.
-  const ai = useAiActions(selectedMessageId, body);
+  const ai = useAiActions(selectedMessageId, body, message?.subject);
   const aiResults = ai.results;
   const [showAiMenu, setShowAiMenu] = useState(false);
   const [aiClassifying, setAiClassifying] = useState(false);
@@ -743,10 +744,34 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         pendingMarkReadMap.delete(message.id);
         completedMarkReadMap.delete(message.id);
       },
-      update: updateMessage, incrementUnread, decrementUnread, adjustCategoryCount,
+      // The GTD rail shows its own copy of the thread, as the u hotkey keeps it in step.
+      update: (id, fields) => {
+        updateMessage(id, fields);
+        useStore.getState().markGtdThreadRead(message.message_id || message.id, fields.is_read);
+      },
+      incrementUnread, decrementUnread, adjustCategoryCount,
       patch: api.bulkRead,
     }) && isMobile) setSelectedMessage(null);
   }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage]);
+
+  // The toolbar's read toggle. It used to render only for a read message, so it vanished the
+  // moment "Mark as unread" worked and the message could not be marked read again from here
+  // (#683). Explicit "mark read" ignores markReadBehavior, as the context menu's does.
+  const handleMarkRead = useCallback(() => {
+    if (!message || message.is_read) return;
+    // A delayed auto-read still pending would mark it read a second time and count it twice.
+    cancelScheduledMarkRead(autoMarkReadTimerRef.current);
+    autoMarkReadTimerRef.current = null;
+    cancelScheduledMarkReadFor(message.id);
+    applyMarkRead(message);
+    useStore.getState().markGtdThreadRead(message.message_id || message.id, true);
+  }, [message]);
+
+  const handleToggleRead = useCallback(() => {
+    if (!message) return;
+    if (message.is_read) handleMarkUnread();
+    else handleMarkRead();
+  }, [message, handleMarkUnread, handleMarkRead]);
 
   const handleEmailClick = useCallback((ev) => {
     const anchor = ev.target.closest('a[href]');
@@ -902,16 +927,19 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     if (!showMovePicker) setMoveSearch('');
   }, [showMovePicker]);
 
-  const recentForMove = message
-    ? recentMoveTargets(recentFolders, movePickerFolders, {
-        accountId: message.account_id, currentFolder: message.folder,
+  const movePluginSections = usePluginCollected('move-picker-sections', {
+    account, messages: message ? [message] : [], currentFolder: message?.folder,
+    onClose: () => setShowMovePicker(false), t,
+  });
+  const moveSections = message
+    ? buildMovePickerSections({
+        folders: movePickerFolders, recents: recentFolders, favorites: favoriteFolders,
+        pluginSections: movePluginSections, accountId: message.account_id,
+        currentFolder: message.folder, query: moveSearch,
       })
     : [];
-  const favoritesForMove = message
-    ? favoriteMoveTargets(favoriteFolders, movePickerFolders, {
-        accountId: message.account_id, currentFolder: message.folder, exclude: recentForMove,
-      })
-    : [];
+  const moveFoldersEmpty = movePickerFoldersEmpty(moveSections, movePickerFolders);
+  const closeMovePicker = () => setShowMovePicker(false);
 
   if (!message) {
     // A detached window with no message is mid-close (see auto-close effect above) —
@@ -1069,7 +1097,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
         break;
       case 'markRead':
         // Explicit "mark read" ignores markReadBehavior: the user just asked for it.
-        applyMarkRead(message);
+        handleMarkRead();
         break;
       case 'markUnread':
         handleMarkUnread();
@@ -1497,13 +1525,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 <div style={{ padding: '20px 16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                   {t('contextMenu.folders.loading')}
                 </div>
-              ) : movePickerFolders.length === 0 ? (
+              ) : movePickerFolders.length === 0 && moveSections.length === 0 ? (
                 <div style={{ padding: '20px 16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                   {t('contextMenu.folders.empty')}
                 </div>
               ) : (
                 <>
-                  <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
+                  {movePickerFolders.length > 0 && <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-subtle)' }}>
                     <input
                       autoFocus
                       value={moveSearch}
@@ -1517,90 +1545,42 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                         outline: 'none',
                       }}
                     />
-                  </div>
+                  </div>}
                   <div style={{ maxHeight: 285, overflowY: 'auto' }}>
-                  {(() => {
-                    const q = moveSearch.trim().toLowerCase();
-                    if (q) {
-                      const filtered = movePickerFolders
-                        .filter(f => f.path !== message.folder && folderMatchesQuery(f, q));
-                      return filtered.length === 0 ? (
-                        <div style={{ padding: '12px 12px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
-                          {t('contextMenu.folders.empty')}
-                        </div>
-                      ) : filtered.map(f => (
-                        <button
-                          key={f.path}
-                          onClick={() => handleMoveToFolder(f.path)}
-                          style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s' }}
-                          onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-                          onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                        >
-                          <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} /></span>
-                          <FolderPathLabel folder={f} />
-                        </button>
-                      ));
-                    }
+                  {moveSections.map((section, i) => {
+                    const heading = movePickerSectionHeading(section, t);
                     return (
-                      <>
-                        {recentForMove.length > 0 && (
-                          <>
-                            <div style={{ padding: '5px 12px 3px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                              {t('contextMenu.folders.recent')}
-                            </div>
-                            {recentForMove.map(f => (
-                              <button
-                                key={`recent-${f.path}`}
-                                onClick={() => handleMoveToFolder(f.path)}
-                                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s' }}
-                                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-                                onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                              >
-                                <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} /></span>
-                                <FolderPathLabel folder={f} />
-                              </button>
-                            ))}
-                            <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />
-                          </>
+                      <Fragment key={section.key}>
+                        {heading && (
+                          <div style={{ padding: '5px 12px 3px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                            {heading}
+                          </div>
                         )}
-                        {favoritesForMove.length > 0 && (
-                          <>
-                            <div style={{ padding: '5px 12px 3px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                              {t('contextMenu.folders.favorites')}
-                            </div>
-                            {favoritesForMove.map(f => (
-                              <button
-                                key={`fav-${f.path}`}
-                                onClick={() => handleMoveToFolder(f.path)}
-                                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s' }}
-                                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-                                onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                              >
-                                <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} /></span>
-                                <FolderPathLabel folder={f} label={f.favoriteLabel} />
-                              </button>
-                            ))}
-                            <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />
-                          </>
-                        )}
-                        {movePickerFolders
-                          .filter(f => f.path !== message.folder)
-                          .map(f => (
+                        {section.rows.map(row => {
+                          const isAction = row.kind === 'action';
+                          const f = row.folder;
+                          return (
                             <button
-                              key={f.path}
-                              onClick={() => handleMoveToFolder(f.path)}
+                              key={isAction ? `action-${row.item.key}` : f.path}
+                              onClick={isAction ? () => runMovePickerAction(row.item, closeMovePicker) : () => handleMoveToFolder(f.path)}
                               style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s' }}
                               onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
                               onMouseLeave={e => e.currentTarget.style.background = 'none'}
                             >
-                              <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} /></span>
-                              <FolderPathLabel folder={f} />
+                              <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{isAction ? row.item.renderIcon(13) : <FolderIcon specialUse={f.special_use} />}</span>
+                              {isAction ? <FolderPathLabel label={row.item.label} /> : <FolderPathLabel folder={f} label={f.favoriteLabel} />}
                             </button>
-                          ))
-                        }
-                      </>
+                          );
+                        })}
+                        {(i < moveSections.length - 1 || moveFoldersEmpty) && <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />}
+                      </Fragment>
                     );
-                  })()}
+                  })}
+                  {moveFoldersEmpty && (
+                    <div style={{ padding: '12px 12px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
+                      {t('contextMenu.folders.empty')}
+                    </div>
+                  )}
                   </div>
                 </>
               )}
@@ -1625,21 +1605,15 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 borderRadius: 8, overflow: 'hidden', zIndex: 100,
                 boxShadow: '0 4px 20px rgba(0,0,0,0.4)', minWidth: 190,
               }}>
-                {message.is_read && (
-                  <div
-                    onClick={() => { setShowMoreMenu(false); handleMarkUnread(); }}
-                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)', borderBottom: '1px solid var(--border-subtle)' }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                  >
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-                      <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
-                      <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
-                      <circle style={{strokeMiterlimit: 10, fill: 'currentColor'}} cx="19.96" cy="6" r="3"/>
-                    </svg>
-                    {t('contextMenu.markUnread')}
-                  </div>
-                )}
+                <div
+                  onClick={() => { setShowMoreMenu(false); handleToggleRead(); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)', borderBottom: '1px solid var(--border-subtle)' }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <ReadStateIcon isRead={message.is_read} />
+                  {message.is_read ? t('contextMenu.markUnread') : t('contextMenu.markRead')}
+                </div>
                 {hasSpamFolder && !inSpamFolder && message && (
                   <div
                     onClick={() => { performSingleSpamLabel('spam'); setShowMoreMenu(false); }}
@@ -1792,15 +1766,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 </svg>
               </PaneBtn>
             )}
-            {message.is_read && (
-              <PaneBtn onClick={handleMarkUnread} title={t('contextMenu.markUnread')}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-                  <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
-                  <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
-                  <circle style={{strokeMiterlimit: 10, fill: 'currentColor'}} cx="19.96" cy="6" r="3"/>
-                </svg>
-              </PaneBtn>
-            )}
+            <PaneBtn onClick={handleToggleRead} title={message.is_read ? t('contextMenu.markUnread') : t('contextMenu.markRead')}>
+              <ReadStateIcon isRead={message.is_read} />
+            </PaneBtn>
             <PaneBtn onClick={() => setShowHeaderModal(true)} title={t('contextMenu.viewHeaders')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
@@ -2461,84 +2429,42 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
                 <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
                   {t('contextMenu.folders.loading')}
                 </div>
-              ) : movePickerFolders.length === 0 ? (
-                <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                  {t('contextMenu.folders.empty')}
-                </div>
-              ) : (() => {
-                const q = moveSearch.trim().toLowerCase();
-                if (q) {
-                  const filtered = movePickerFolders
-                    .filter(f => f.path !== message.folder && folderMatchesQuery(f, q));
-                  return filtered.length === 0 ? (
-                    <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                      {t('contextMenu.folders.empty')}
-                    </div>
-                  ) : filtered.map(f => (
-                    <button
-                      key={f.path}
-                      onClick={() => handleMoveToFolder(f.path)}
-                      style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%', minHeight: 48, padding: '0 20px', background: 'none', border: 'none', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: 15, cursor: 'pointer', textAlign: 'left' }}
-                    >
-                      <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} size={18} /></span>
-                      <FolderPathLabel folder={f} />
-                    </button>
-                  ));
-                }
-                return (
-                  <>
-                    {recentForMove.length > 0 && (
-                      <>
+              ) : (
+                <>
+                {moveSections.map((section, i) => {
+                  const heading = movePickerSectionHeading(section, t);
+                  return (
+                    <Fragment key={section.key}>
+                      {heading && (
                         <div style={{ padding: '8px 20px 4px', fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                          {t('contextMenu.folders.recent')}
+                          {heading}
                         </div>
-                        {recentForMove.map(f => (
+                      )}
+                      {section.rows.map(row => {
+                        const isAction = row.kind === 'action';
+                        const f = row.folder;
+                        return (
                           <button
-                            key={`recent-${f.path}`}
-                            onClick={() => handleMoveToFolder(f.path)}
+                            key={isAction ? `action-${row.item.key}` : f.path}
+                            onClick={isAction ? () => runMovePickerAction(row.item, closeMovePicker) : () => handleMoveToFolder(f.path)}
                             style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%', minHeight: 48, padding: '0 20px', background: 'none', border: 'none', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: 15, cursor: 'pointer', textAlign: 'left' }}
                           >
-                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} size={18} /></span>
-                            <FolderPathLabel folder={f} />
+                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{isAction ? row.item.renderIcon(18) : <FolderIcon specialUse={f.special_use} size={18} />}</span>
+                            {isAction ? <FolderPathLabel label={row.item.label} /> : <FolderPathLabel folder={f} label={f.favoriteLabel} />}
                           </button>
-                        ))}
-                        <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />
-                      </>
-                    )}
-                    {favoritesForMove.length > 0 && (
-                      <>
-                        <div style={{ padding: '8px 20px 4px', fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                          {t('contextMenu.folders.favorites')}
-                        </div>
-                        {favoritesForMove.map(f => (
-                          <button
-                            key={`fav-${f.path}`}
-                            onClick={() => handleMoveToFolder(f.path)}
-                            style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%', minHeight: 48, padding: '0 20px', background: 'none', border: 'none', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: 15, cursor: 'pointer', textAlign: 'left' }}
-                          >
-                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} size={18} /></span>
-                            <FolderPathLabel folder={f} label={f.favoriteLabel} />
-                          </button>
-                        ))}
-                        <div style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />
-                      </>
-                    )}
-                    {movePickerFolders
-                      .filter(f => f.path !== message.folder)
-                      .map(f => (
-                        <button
-                          key={f.path}
-                          onClick={() => handleMoveToFolder(f.path)}
-                          style={{ display: 'flex', alignItems: 'center', gap: 14, width: '100%', minHeight: 48, padding: '0 20px', background: 'none', border: 'none', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: 15, cursor: 'pointer', textAlign: 'left' }}
-                        >
-                          <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}><FolderIcon specialUse={f.special_use} size={18} /></span>
-                          <FolderPathLabel folder={f} />
-                        </button>
-                      ))
-                    }
-                  </>
-                );
-              })()}
+                        );
+                      })}
+                      {i < moveSections.length - 1 && <div style={{ height: 6 }} />}
+                    </Fragment>
+                  );
+                })}
+                {moveFoldersEmpty && (
+                  <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
+                    {t('contextMenu.folders.empty')}
+                  </div>
+                )}
+                </>
+              )}
             </div>
           </div>
         </>
@@ -2694,6 +2620,23 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
 // `disabled` is aria-disabled with the click ignored, not the native attribute, so the title still
 // shows on hover: it is what explains why.
+// The action the read toggle offers: an envelope with an unread dot for "Mark as unread", an
+// open envelope for "Mark as read". Same glyphs as the context menu.
+function ReadStateIcon({ isRead }) {
+  return isRead ? (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <path style={{strokeLinecap: 'round'}} d="M22,10.91v7.09c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2V6c0-1.1.9-2,2-2h11"/>
+      <polyline style={{strokeLinecap: 'round'} } points="16.36 9.95 12 13 2 6"/>
+      <circle style={{strokeMiterlimit: 10, fill: 'currentColor'}} cx="19.96" cy="6" r="3"/>
+    </svg>
+  ) : (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <path style={{strokeLinecap: 'round'}} d="M22,9v9c0,1.1-.9,2-2,2H4c-1.1,0-2-.9-2-2v-9"/>
+      <polyline points="22 9 12 16 2 9"/><polyline points="2 9 12 2 22 9"/>
+    </svg>
+  );
+}
+
 function PaneBtn({ children, onClick, title, danger, style: extraStyle, 'aria-label': ariaLabel, 'aria-pressed': ariaPressed, disabled = false }) {
   const [hov, setHov] = useState(false);
   return (

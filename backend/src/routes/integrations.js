@@ -2,9 +2,37 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
+import { clearRefreshFailure } from '../services/accountErrorCode.js';
+import { msBuiltinAppEnabled, msBuiltinAppShipped, msPersonalAccountsAvailable, msPersonalSignInVia, msWorkAccountsAvailable } from '../services/microsoftOAuthClient.js';
 
 const router = Router();
 router.use(requireAuth);
+
+// After an admin changes a provider's app (a new secret, a removed or replaced app, the shared
+// app switched), that provider's OAuth accounts get a fresh start: remembered refresh failures
+// and connect backoffs are forgotten, and the ones showing an error reconnect now instead of
+// waiting out a backoff that may be hours long. Runs in the background, three at a time.
+export async function recoverProviderAccounts(engine, provider) {
+  const { rows } = await query('SELECT * FROM email_accounts WHERE oauth_provider = $1', [provider]);
+  const broken = [];
+  for (const account of rows) {
+    clearRefreshFailure(account.id);
+    engine?.clearConnectCooldown?.(account.id);
+    if (account.enabled && account.sync_error) broken.push(account);
+  }
+  if (!engine?.connectAccount) return broken.length;
+  const queue = [...broken];
+  const worker = async () => {
+    for (let account = queue.shift(); account; account = queue.shift()) {
+      await engine.connectAccount(account).catch(err => console.error(`Reconnect after ${provider} app change failed:`, err.message));
+    }
+  };
+  Promise.all([worker(), worker(), worker()]).catch(() => {});
+  return broken.length;
+}
+const recoverAfterChange = (req, provider) =>
+  recoverProviderAccounts(req.app?.get?.('imapManager'), provider)
+    .catch(err => console.error(`Could not reset ${provider} accounts after an app change:`, err.message));
 
 // Maps each provider's stored config keys to the process.env vars the OAuth routes
 // read. Config can arrive from this UI or straight from .env; both converge here,
@@ -23,6 +51,11 @@ const PROVIDER_ENV = {
   },
 };
 
+// Whether MailFlow's built-in Microsoft app is offered for personal accounts (#674). The
+// admin's choice in Settings has its own system_settings row, not a place in the microsoft
+// config, so removing the instance's own app does not quietly turn the shared app back on.
+// Once set, it takes precedence over MS_BUILTIN_APP in .env.
+const MS_BUILTIN_APP_KEY = 'ms_builtin_app';
 function applyConfigToEnv(provider, config) {
   const map = PROVIDER_ENV[provider];
   if (!map) return;
@@ -61,15 +94,50 @@ router.get('/', requireAdmin, async (req, res) => {
 // the connect buttons, while the config read/write/delete endpoints stay admin-only.
 // The OAuth connect routes already require only an authenticated session and bind the
 // resulting mailbox to that user, so no privilege is granted here. (#315)
+//
+// configured is the instance's own app. builtinApp is whether MailFlow's built-in app may be
+// offered: this build ships one (builtinAppShipped) and the admin has not opted out. Without
+// an own app, personal accounts connect through the built-in one over the device-code flow.
+// personalAccounts says whether a personal account can sign in at all right now. (#674)
 router.get('/status', async (req, res) => {
   res.json({
     microsoft: {
       configured: !!process.env.MS_CLIENT_ID,
+      builtinApp: msBuiltinAppEnabled(),
+      builtinAppShipped: msBuiltinAppShipped(),
+      personalAccounts: msPersonalAccountsAvailable(),
+      // Which app signs personal accounts in: 'own', 'shared' (MailFlow's), or null.
+      personalVia: msPersonalSignInVia(),
+      // Work and school accounts need the instance's own app on a tenant that admits them;
+      // with a secret and redirect URI it can also sign in through Microsoft's page (redirect).
+      workAccounts: msWorkAccountsAvailable(),
+      workRedirect: msWorkAccountsAvailable() && !!process.env.MS_CLIENT_SECRET && !!process.env.MS_REDIRECT_URI,
+      // The same for personal accounts when the own app signs them in: its page is then the
+      // main path, as in v4.0.4, since such an app may not allow public client flows.
+      personalRedirect: msPersonalSignInVia() === 'own' && !!process.env.MS_CLIENT_SECRET && !!process.env.MS_REDIRECT_URI,
     },
     google: {
       configured: !!process.env.GOOGLE_CLIENT_ID,
+      // Everything the sign-in on Google's page needs: Add account offers it only then.
+      signIn: !!process.env.GOOGLE_CLIENT_ID && !!process.env.GOOGLE_CLIENT_SECRET && !!process.env.GOOGLE_REDIRECT_URI,
     },
   });
+});
+
+// Offer MailFlow's built-in Microsoft app for personal accounts, or stop offering it (#674).
+// Turning it off stops new sign-ins through it; accounts already connected keep refreshing
+// through the client they were connected with. Admin only.
+router.put('/microsoft/builtin-app', requireAdmin, async (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  await query(
+    `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+    [MS_BUILTIN_APP_KEY, String(enabled)],
+  );
+  process.env.MS_BUILTIN_APP = String(enabled);
+  await recoverAfterChange(req, 'microsoft');
+  res.json({ ok: true });
 });
 
 // Save/update integration config — admin only (writes affect global OAuth env vars)
@@ -106,6 +174,7 @@ router.post('/:provider', requireAdmin, async (req, res) => {
 
   // Write plaintext values to process.env so oauth routes pick them up immediately
   applyConfigToEnv(provider, config);
+  await recoverAfterChange(req, provider);
 
   res.json({ ok: true });
 });
@@ -117,6 +186,7 @@ router.delete('/:provider', requireAdmin, async (req, res) => {
     [req.params.provider]
   );
   clearConfigFromEnv(req.params.provider);
+  if (PROVIDER_ENV[req.params.provider]) await recoverAfterChange(req, req.params.provider);
   res.json({ ok: true });
 });
 
@@ -128,6 +198,8 @@ export async function loadIntegrationConfigs() {
       // decrypt() returns the value unchanged for plaintext (migration fallback)
       applyConfigToEnv(row.provider, row.config);
     }
+    const builtin = await query('SELECT value FROM system_settings WHERE key = $1', [MS_BUILTIN_APP_KEY]);
+    if (builtin.rows.length) process.env.MS_BUILTIN_APP = builtin.rows[0].value;
     console.log('Integration configs loaded');
   } catch (err) {
     console.error('Failed to load integration configs:', err.message);

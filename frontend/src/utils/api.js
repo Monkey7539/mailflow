@@ -28,23 +28,36 @@ async function request(method, path, body, extraHeaders) {
       window.dispatchEvent(new CustomEvent('mailflow:session_expired'));
     }
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
-    // The status rides along so a caller can tell a refusal (409) from a failure.
-    throw Object.assign(new Error(err.error || 'Request failed'), { status: res.status });
+    // The status rides along so a caller can tell a refusal (409) from a failure, and the code
+    // (and the server's clock, for a scheduled time it refused) which refusal it was.
+    throw Object.assign(new Error(err.error || 'Request failed'), {
+      status: res.status,
+      ...(typeof err.code === 'string' ? { code: err.code } : {}),
+      ...(typeof err.serverNow === 'string' ? { serverNow: err.serverNow } : {}),
+      // What a scheduled message is doing when the server refused to change it (sending, sent...).
+      ...(typeof err.status === 'string' ? { state: err.status } : {}),
+    });
   }
+  // No Content (a DELETE): there is no body to read.
+  if (res.status === 204) return null;
   return res.json();
 }
 
-export async function streamAiChat(messages, { signal, onDelta } = {}) {
+// purpose is 'compose' (writing assistant) or 'summarize' (summaries and AI actions): the server
+// checks it against the admin's switch for that feature (#644).
+export async function streamAiChat(messages, { purpose, signal, onDelta } = {}) {
   const response = await fetch(`${BASE}/ai/chat`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, purpose }),
     signal,
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'AI request failed' }));
-    throw new Error(error.error || 'AI request failed');
+    // The status and code ride along so a caller can tell a refusal from a failure, and which
+    // refusal it is: 'ai_user_disabled' or 'ai_feature_disabled'.
+    throw Object.assign(new Error(error.error || 'AI request failed'), { status: response.status, code: error.code });
   }
   if (!response.body) throw new Error('AI response body is unavailable');
 
@@ -309,7 +322,8 @@ export const api = {
   addAccount: (data) => request('POST', '/accounts', data),
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
-  reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
+  // { wait: true } answers with how the attempt went: { connection, code, error }.
+  reconnectAccount: (id, { wait = false } = {}) => request('POST', `/accounts/${id}/reconnect${wait ? '?wait=1' : ''}`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
   getFolders: (accountId) => request('GET', `/accounts/${accountId}/folders`),
   getAliases: (accountId) => request('GET', `/accounts/${accountId}/aliases`),
@@ -374,11 +388,24 @@ export const api = {
 
   // Integrations
   getIntegrations: () => request('GET', '/integrations'),
+  // How the last redirect sign-in ended (kept in the session, not the URL), read once.
+  oauthResult: async () => {
+    const res = await fetch('/oauth/result', { credentials: 'include' });
+    return res.ok ? (await res.json()).result : null;
+  },
   getIntegrationsStatus: () => request('GET', '/integrations/status'),
   saveIntegration: (provider, config) => request('POST', `/integrations/${provider}`, config),
   deleteIntegration: (provider) => request('DELETE', `/integrations/${provider}`),
-  startMsDeviceFlow: async () => {
-    const res = await fetch('/oauth/microsoft/device', { method: 'POST', credentials: 'include' });
+  setMsBuiltinApp: (enabled) => request('PUT', '/integrations/microsoft/builtin-app', { enabled }),
+  // accountId signs in again to repair that account: the server then refuses a different
+  // address instead of adding a second account (poll status 'wrong_account').
+  // kind ('personal' | 'work') picks the app a new account signs in through.
+  startMsDeviceFlow: async (accountId, kind) => {
+    const res = await fetch('/oauth/microsoft/device', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...(accountId ? { accountId } : {}), ...(kind ? { kind } : {}) }),
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to start device code flow');
     return data;
@@ -454,6 +481,46 @@ export const api = {
   getSendStatus: (id) => request('GET',  `/mail/send/${encodeURIComponent(id)}`),
   cancelSend:    (id) => request('POST', `/mail/send/${encodeURIComponent(id)}/cancel`),
 
+  // Scheduled send (#543): backend/src/routes/scheduled.js
+  scheduled: {
+    list:    ()                => request('GET',  '/mail/scheduled'),
+    get:     (id)              => request('GET',  `/mail/scheduled/${encodeURIComponent(id)}`),
+    // How many unsent scheduled messages deleting the account would delete with it.
+    count:   (accountId)       => request('GET',  `/mail/scheduled/count?accountId=${encodeURIComponent(accountId)}`),
+    create:  (data)            => request('POST', '/mail/scheduled', data),
+    update:  (id, data)        => request('PUT',  `/mail/scheduled/${encodeURIComponent(id)}`, data),
+    // takeover: edit it here although another window holds it (that one then has lost it).
+    hold:    (id, editToken, { takeover = false } = {}) =>
+      request('POST', `/mail/scheduled/${encodeURIComponent(id)}/hold`, editToken ? { editToken } : takeover ? { takeover: true } : {}),
+    // keepPaused: a message that fell due while open is paused (by the user) instead of going out.
+    release: (id, editToken, { keepPaused = false } = {}) =>
+      request('POST', `/mail/scheduled/${encodeURIComponent(id)}/release`, { editToken, ...(keepPaused ? { keepPaused: true } : {}) }),
+    cancel:  (id)              => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/cancel`),
+    // editToken: send a message this composer holds for editing, in the same request.
+    sendNow: (id, confirm, editToken) => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/send-now`,
+      { ...(confirm ? { confirm: true } : {}), ...(editToken ? { editToken } : {}) }),
+    undoSendNow: (id, undoToken) => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/send-now/undo`, { undoToken }),
+    // confirm: the user's yes to the server's question (confirm_uncertain, confirm_restored).
+    reschedule: (id, { sendAt, timeZone }, confirm) => request('PATCH', `/mail/scheduled/${encodeURIComponent(id)}`,
+      { sendAt, ...(timeZone ? { timeZone } : {}), ...(confirm ? { confirm: true } : {}) }),
+    resume:  (id, confirm)     => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/resume`, confirm ? { confirm: true } : {}),
+    sendAnyway: (id)           => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/send-anyway`, { confirm: true }),
+    markSent: (id)             => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/mark-sent`),
+    restore: (id)              => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/restore`),
+    remove:  (id)              => request('DELETE', `/mail/scheduled/${encodeURIComponent(id)}`),
+    // For a page that is going away: keepalive lets the request outlive it, which a beacon
+    // could too, but a beacon cannot carry the CSRF header.
+    releaseOnUnload: (id, editToken, { keepPaused = false } = {}) => {
+      try {
+        fetch(`${BASE}/mail/scheduled/${encodeURIComponent(id)}/release`, {
+          method: 'POST', credentials: 'include', keepalive: true,
+          headers: { [CSRF_HEADER]: CSRF_VALUE, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ editToken, ...(keepPaused ? { keepPaused: true } : {}) }),
+        }).catch(() => {});
+      } catch { /* the lease lapses on its own */ }
+    },
+  },
+
   // Drafts
   getReplyDraftIndicators: (ids, scope = {}) => request('POST', '/mail/reply-drafts/indicators', { ids, ...scope }),
   getReplyDraft: (id, options = {}) => {
@@ -519,6 +586,7 @@ export const api = {
     const qs = p.toString();
     return request('GET', `/gtd/sections${qs ? '?' + qs : ''}`);
   },
+  gtdMetadata: (accountId, messageIds) => request('POST', '/gtd/metadata', { accountId, messageIds }),
   gtdClassify: (messageId, state) => request('POST', '/gtd/classify', { messageId, state }),
   gtdUndoClassify: (undoToken) => request('POST', '/gtd/classify/undo', undoToken),
   gtdUnclassify: (messageId, state) => request('DELETE', '/gtd/classify', { messageId, state }),
