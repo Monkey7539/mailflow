@@ -95,13 +95,34 @@ export class FolderStatusMonitor {
     this.running = new Map();
     this.nextCheck = new Map();
     this.failures = new Map();
+    this.forceAgain = new Set();
+    this.heldForce = new Map();
   }
   refresh(account, { force = false } = {}) {
-    if (this.running.has(account.id)) return this.running.get(account.id);
+    if (this.running.has(account.id)) {
+      // The cycle in flight may have read STATUS before the change this refresh was asked for.
+      if (force) this.forceAgain.add(account.id);
+      return this.running.get(account.id);
+    }
     if (!force && Date.now() < (this.nextCheck.get(account.id) || 0)) return Promise.resolve();
     // Even mutation-driven refreshes have a minimum interval; no connection storm on bulk reads.
-    if (force && Date.now() < (this.nextCheck.get(account.id) || 0) - STATUS_INTERVAL_MS + 5000) return Promise.resolve();
-    const task = this._refresh(account).finally(() => this.running.delete(account.id));
+    // One asked for inside it is held until the interval is over rather than dropped: dropped,
+    // the change it was for went unobserved until the next periodic cycle, up to a minute, and
+    // the badge showed the count from before it (#701). A failing account keeps its backoff.
+    const earliest = (this.nextCheck.get(account.id) || 0) - STATUS_INTERVAL_MS + 5000;
+    if (force && Date.now() < earliest) {
+      if (!this.failures.get(account.id) && !this.heldForce.has(account.id)) {
+        this.heldForce.set(account.id, setTimeout(() => {
+          this.heldForce.delete(account.id);
+          this.refresh(account, { force: true }).catch(() => {});
+        }, earliest - Date.now()));
+      }
+      return Promise.resolve();
+    }
+    const task = this._refresh(account).finally(() => {
+      this.running.delete(account.id);
+      if (this.forceAgain.delete(account.id)) this.refresh(account, { force: true }).catch(() => {});
+    });
     this.running.set(account.id, task);
     return task;
   }
