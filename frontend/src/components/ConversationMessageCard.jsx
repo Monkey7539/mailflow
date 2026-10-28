@@ -23,7 +23,7 @@ import MessageHeaderModal from './MessageHeaderModal.jsx';
 import TodoistTaskModal from './TodoistTaskModal.jsx';
 import {
   ActionBtn, MessageTools, ReplySplitButton, RemoteImagesNotice, UnsubscribeNotice,
-  ForwardIcon, TodoistIcon, ReadStateIcon, HeadersIcon, DownloadIcon, PrintIcon, DarkToggleIcon, StarIcon,
+  AiReplyIcon, ForwardIcon, TodoistIcon, ReadStateIcon, HeadersIcon, DownloadIcon, PrintIcon, DarkToggleIcon, StarIcon,
 } from './MessageActions.jsx';
 
 // One message inside a conversation.
@@ -37,7 +37,7 @@ import {
 // Design from #317 by YunQue0912.
 // `onUpdate(id, patch)` applies a flag change to the conversation's own copy of the message and to
 // the list's, since the pane holds the thread apart from the list.
-export default function ConversationMessageCard({ message, expanded, onToggle, onUpdate, aiEnabled = false, selected = false }) {
+export default function ConversationMessageCard({ message, expanded, onToggle, onUpdate, aiEnabled = false, aiReplyEnabled = false, selected = false }) {
   const { t } = useTranslation();
   const accounts = useStore(s => s.accounts);
   const openCompose = useStore(s => s.openCompose);
@@ -286,7 +286,10 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
   // The message's tools, the reading pane's minus what the conversation does for all of it
   // (spam, archive, move, delete: ConversationPane).
   const darkLabel = darkRefused ? t('message.cannotShowDark') : shownDark ? t('message.showOriginal') : t('message.showDark');
+  // By Reply, or in More on a phone, as in the reading pane.
+  const aiReply = () => openReplyFromMessage(message, { accounts, openCompose, getMessageBody: loadedBody, replyAll: replyDefault === 'replyAll', aiReply: true });
   const toolItems = [
+    aiReplyEnabled && isMobile && { key: 'aiReply', label: t('compose.toolbar.aiReply'), icon: <AiReplyIcon />, onClick: aiReply },
     todoistConnected && { key: 'todoist', label: t('todoist.title'), icon: <TodoistIcon />, onClick: () => setShowTodoistModal(true) },
     { key: 'read', label: message.is_read ? t('contextMenu.markUnread') : t('contextMenu.markRead'), icon: <ReadStateIcon isRead={message.is_read} />, onClick: handleToggleRead },
     { key: 'headers', label: t('contextMenu.viewHeaders'), icon: <HeadersIcon />, onClick: () => setShowHeaderModal(true) },
@@ -349,6 +352,11 @@ export default function ConversationMessageCard({ message, expanded, onToggle, o
               onReply={replyAll => openReplyFromMessage(message, { accounts, openCompose, getMessageBody: loadedBody, replyAll })}
               touch={isMobile}
             />
+            {aiReplyEnabled && !isMobile && (
+              <ActionBtn onClick={aiReply} label={t('compose.toolbar.aiReply')}>
+                <AiReplyIcon />
+              </ActionBtn>
+            )}
             <ActionBtn onClick={() => openForwardFromMessage(message, { openCompose, getMessageBody: loadedBody })} label={t('message.forward')} touch={isMobile}>
               <ForwardIcon />
             </ActionBtn>

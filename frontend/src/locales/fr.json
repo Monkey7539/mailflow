@@ -190,6 +190,13 @@
       "aiDismiss": "Ignorer",
       "aiGenerating": "Génération en cours…",
       "aiError": "Erreur IA : {{message}}",
+      "aiReply": "Répondre avec l'IA",
+      "aiReplyPlaceholder": "Que doit dire la réponse ? Ex. : approuver la maquette",
+      "aiReplyInstruction": "Instruction pour la réponse de l'IA",
+      "aiReplyGenerate": "Générer",
+      "aiReplyReading": "Lecture de la conversation…",
+      "aiReplyPartial": "Basée sur la partie la plus récente de la conversation : le reste était trop long pour être envoyé à l'IA.",
+      "aiReplyLeftOut": "Basée sur les {{count}} messages les plus récents de la conversation : les plus anciens ont été laissés de côté.",
       "aiTooLong": "ce brouillon contient {{count}} caractères, plus que les {{max}} que l'IA peut traiter. Raccourcissez-le ou supprimez le texte cité, puis réessayez.",
       "aiNotAllowed": "votre administrateur a désactivé l'IA pour votre compte.",
       "aiFeatureOff": "votre administrateur a désactivé l'aide à la rédaction par IA."

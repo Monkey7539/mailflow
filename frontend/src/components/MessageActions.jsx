@@ -67,6 +67,12 @@ export const AiIcon = () => (
     <path d="M5 3v4M19 17v4M3 5h4M17 19h4"/>
   </svg>
 );
+// Reply with AI: the AI menu's sparkle, alone, so the two buttons side by side tell apart.
+export const AiReplyIcon = () => (
+  <svg {...svg} strokeLinecap="round" strokeLinejoin="round">
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+  </svg>
+);
 export const MoreIcon = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
     <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
@@ -357,8 +363,8 @@ function AiMenuButton({ ai, touch }) {
 }
 
 // The phone More menu's order, the reading pane's since before the views shared these buttons: the
-// read toggle first, as the action reached for most.
-export const MORE_MENU_ORDER = ['read', 'spam', 'ham', 'todoist', 'headers', 'print', 'dark', 'eml'];
+// read toggle first, as the action reached for most. Reply with AI is a toolbar button on a desktop.
+export const MORE_MENU_ORDER = ['read', 'aiReply', 'spam', 'ham', 'todoist', 'headers', 'print', 'dark', 'eml'];
 
 // The message's tools: buttons on a desktop, a More menu on a phone, where the toolbar has no room.
 //

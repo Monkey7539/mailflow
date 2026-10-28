@@ -20,6 +20,7 @@ import { isDarkTheme, canShowDark, showDark } from '../utils/darkScheme.js';
 import { markMessageUnread } from '../utils/messageHotkeys.js';
 import { BUILTIN_SUMMARIZE } from '../aiActions.js';
 import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
+import { aiReplyAvailable } from '../utils/aiReply.js';
 import MessageBodyView from './MessageBodyView.jsx';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
@@ -35,7 +36,7 @@ import { useAiActions } from '../hooks/useAiActions.js';
 import AttachmentStrip from './AttachmentStrip.jsx';
 import {
   ActionBtn, MessageTools, ReplySplitButton, RemoteImagesNotice, UnsubscribeNotice, TOUCH_MIN,
-  ForwardIcon, ArchiveIcon, MoveIcon, SpamIcon, HamIcon, TodoistIcon, ReadStateIcon, HeadersIcon,
+  AiReplyIcon, ForwardIcon, ArchiveIcon, MoveIcon, SpamIcon, HamIcon, TodoistIcon, ReadStateIcon, HeadersIcon,
   DownloadIcon, PrintIcon, DarkToggleIcon, StarIcon, TrashIcon, useShortcutTitle,
 } from './MessageActions.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
@@ -80,7 +81,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     imageWhitelist, addToImageWhitelist, blockRemoteImages, threadMessages,
     replyDefault, recentFolders, favoriteFolders, todoistConnected,
     categorizationEnabled, setCategoryCounts, adjustCategoryCount,
-    aiActions, setShowAdmin, setAdminTab,
+    aiActions, setShowAdmin, setAdminTab, plaintextEmail,
   } = useStore();
 
   // Detached-window mode (#219): when a message id is passed in, this pane renders that
@@ -588,9 +589,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // The body is already loaded here, so it is handed over rather than refetched.
   const loadedBody = async () => body;
 
-  const handleReply = (replyAll = false) => {
+  const handleReply = (replyAll = false, { aiReply = false } = {}) => {
     if (!message) return;
-    openReplyFromMessage(message, { accounts, openCompose, getMessageBody: loadedBody, replyAll });
+    openReplyFromMessage(message, { accounts, openCompose, getMessageBody: loadedBody, replyAll, aiReply });
   };
 
   const handleForward = () => {
@@ -1292,7 +1293,12 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const darkToggleLabel = darkRefused ? t('message.cannotShowDark') : shownDark ? t('message.showOriginal') : t('message.showDark');
 
   // The toolbar's tools, in order: buttons on a desktop, the More menu on a phone (MessageTools).
+  // Reply with AI sits by Reply. A phone's toolbar only just fits its buttons at large font sizes,
+  // so there it is in More.
+  const aiReplyShown = aiReplyAvailable(aiStatus, plaintextEmail);
+  const handleAiReply = () => handleReply(defaultReplyAll, { aiReply: true });
   const toolItems = message ? [
+    aiReplyShown && isMobile && { key: 'aiReply', label: t('compose.toolbar.aiReply'), icon: <AiReplyIcon />, onClick: handleAiReply },
     hasSpamFolder && !inSpamFolder && { key: 'spam', label: t('contextMenu.markAsSpam'), icon: <SpamIcon />, onClick: () => performSingleSpamLabel('spam') },
     inSpamFolder && { key: 'ham', label: t('contextMenu.markAsHam'), icon: <HamIcon />, onClick: () => performSingleSpamLabel('ham') },
     todoistConnected && { key: 'todoist', label: t('todoist.title'), icon: <TodoistIcon />, onClick: () => setShowTodoistModal(true) },
@@ -1408,6 +1414,12 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
           title={withShortcut(defaultReplyAll ? t('message.replyAll') : t('message.reply'), defaultReplyAll ? 'replyAll' : 'reply')}
           touch={isMobile}
         />
+
+        {aiReplyShown && !isMobile && (
+          <ActionBtn onClick={handleAiReply} label={t('compose.toolbar.aiReply')}>
+            <AiReplyIcon />
+          </ActionBtn>
+        )}
 
         <ActionBtn onClick={handleForward} label={t('message.forward')} title={withShortcut(t('message.forward'), 'forward')} touch={isMobile}>
           <ForwardIcon />
