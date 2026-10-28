@@ -174,7 +174,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     advanceSelectionAfterRemoval(message.id);
     removeMessage(message.id);
     closeWindowIfWindowed();
-    if (wasUnread) decrementUnread(message.account_id);
+    if (wasUnread) decrementUnread(message.account_id, 1, { undoable: true });
     let settled = false;
     const undo = () => {
       settled = true;
@@ -844,7 +844,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     advanceSelectionAfterRemoval(moved.id);
     removeMessage(moved.id);
     closeWindowIfWindowed();
-    if (!moved.is_read) decrementUnread(moved.account_id);
+    if (!moved.is_read) decrementUnread(moved.account_id, 1, { undoable: true });
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
@@ -962,7 +962,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     advanceSelectionAfterRemoval(deleted.id);
     removeMessage(deleted.id);
     closeWindowIfWindowed();
-    if (!deleted.is_read) decrementUnread(deleted.account_id);
+    if (!deleted.is_read) decrementUnread(deleted.account_id, 1, { undoable: true });
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
@@ -994,7 +994,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     advanceSelectionAfterRemoval(archived.id);
     removeMessage(archived.id);
     closeWindowIfWindowed();
-    if (!archived.is_read) decrementUnread(archived.account_id);
+    if (!archived.is_read) decrementUnread(archived.account_id, 1, { undoable: true });
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;

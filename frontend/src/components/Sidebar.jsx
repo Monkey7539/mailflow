@@ -362,7 +362,7 @@ export default function Sidebar() {
     if (!msgs.length) return;
     msgs.forEach(msg => {
       state.removeMessage(msg.id);
-      if (!msg.is_read) state.decrementUnread(msg.account_id);
+      if (!msg.is_read) state.decrementUnread(msg.account_id, 1, { undoable: true });
     });
     let undone = false;
     const timer = setTimeout(async () => {

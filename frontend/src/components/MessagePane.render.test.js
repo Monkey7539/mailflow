@@ -921,6 +921,36 @@ describe('the next message opens after the pane removes the open one', () => {
   });
 });
 
+// #701: the pane's Delete reaches the server only when its undo window closes, so a count the
+// server reports in the meantime still includes the message. It must not put it back on the badge.
+describe('the badge after the pane deletes the last unread message', () => {
+  const paneButton = title => [...document.querySelectorAll('button')].find(b => (b.getAttribute('title') || '').split(' (')[0] === title);
+  const counts = (n, revision) => ({ byAccount: { acct: n }, snapshots: { acct: { revision, known: true, stale: false, observedAt: new Date().toISOString() } } });
+
+  test('a count observed before the delete was sent does not bring the badge back to 1', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => {
+      // Cancel the delete still waiting out its undo window, and leave the toasts as they were.
+      const toast = useStore.getState().notifications.find(n => n.title === 'messageList.deleted.title');
+      toast?.onUndo();
+      if (toast) useStore.getState().removeNotification(toast.id);
+      useStore.setState({ afterRemove: 'next' });
+    });
+    const unread = { ...MSG_A, id: 'u701', uid: 701, subject: 'Last unread', is_read: false };
+    useStore.setState({ afterRemove: 'list', searchQuery: '' });
+    useStore.getState().setMessages([unread]);
+    useStore.getState().setUnreadCounts(counts(1, '7010'));
+    await React.act(async () => { useStore.getState().setSelectedMessage(unread.id); });
+    await React.act(async () => { root.render(React.createElement(MessagePane)); });
+    await React.act(async () => { paneButton('message.delete').dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(useStore.getState().unreadCounts.byAccount.acct, 0);
+    // Past the settle floor of a change sent at the click, before this one is even sent.
+    t.mock.timers.tick(8000);
+    useStore.getState().setUnreadCounts(counts(1, '7011'));
+    assert.equal(useStore.getState().unreadCounts.byAccount.acct, 0);
+  });
+});
+
 // #585: a message you sent shows its Bcc under To and Cc; mail without one shows none.
 describe('the Bcc line', () => {
   const realFetch = globalThis.fetch;

@@ -1147,3 +1147,28 @@ test('mobile sent swipe replies to external To using the delivery alias without 
     await React.act(async () => { root.unmount(); root = null; useStore.setState({ composing: false, composeData: null, openCompose, swipeActions: { left: 'archive', right: 'markRead' } }); });
   }
 });
+
+// #701: a delete reaches the server only when its undo window closes, so a count the server
+// reports in the meantime still includes the message. It must not put it back on the badge.
+describe('MessageList — the badge after deleting the last unread message (#701)', () => {
+  const counts = (n, revision) => ({ byAccount: { 'acct-1': n }, snapshots: { 'acct-1': { revision, known: true, stale: false, observedAt: new Date().toISOString() } } });
+
+  test('a count observed before the delete was sent does not bring the badge back to 1', async (t) => {
+    const row = { ...MESSAGE, id: 'last-unread-701', uid: 701, message_id: '<last-701@example.com>' };
+    await mount({ rows: [row], threadedView: false });
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(async () => {
+      // Cancel the delete still waiting out its undo window rather than send it.
+      useStore.getState().notifications.find(n => typeof n.onUndo === 'function')?.onUndo();
+      await React.act(async () => { useStore.setState({ notifications: [], selectedMessageId: null }); });
+    });
+    useStore.getState().setUnreadCounts(counts(1, '7010'));
+    await React.act(async () => { useStore.getState().setSelectedMessage(row.id); });
+    await React.act(async () => { shortcutBus.emit('delete'); await new Promise(r => setTimeout(r, 30)); });
+    assert.equal(useStore.getState().unreadCounts.byAccount['acct-1'], 0);
+    // Past the settle floor of a change sent at the keypress, before this one is even sent.
+    t.mock.timers.tick(8000);
+    useStore.getState().setUnreadCounts(counts(1, '7011'));
+    assert.equal(useStore.getState().unreadCounts.byAccount['acct-1'], 0);
+  });
+});
