@@ -15,6 +15,8 @@ import {
   FOLDER_ORDER_DRAG_TYPE,
   folderDropPosition,
   hasRenderedInbox,
+  existingHiddenPaths,
+  moveHiddenPaths,
   resolveFolderOrderDrop,
 } from '../utils/sidebar.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -361,7 +363,7 @@ export default function Sidebar() {
     if (!msgs.length) return;
     msgs.forEach(msg => {
       state.removeMessage(msg.id);
-      if (!msg.is_read) state.decrementUnread(msg.account_id);
+      if (!msg.is_read) state.decrementUnread(msg.account_id, 1, { undoable: true });
     });
     let undone = false;
     const timer = setTimeout(async () => {
@@ -479,6 +481,18 @@ export default function Sidebar() {
     setHiddenFolders(updated);
   }, [hiddenFolders, setHiddenFolders]);
 
+  // Keep a hidden folder hidden under the name MailFlow renamed it to, and forget one MailFlow
+  // deleted, so a new folder made later with the same name is not born hidden (#694).
+  const moveHiddenFolder = useCallback((accountId, oldPath, newPath) => {
+    const all = useStore.getState().hiddenFolders;
+    const current = all[accountId] || [];
+    const next = moveHiddenPaths(current, oldPath, newPath, folders[accountId]);
+    if (next.length === current.length && next.every((p, i) => p === current[i])) return;
+    const updated = { ...all };
+    if (next.length === 0) delete updated[accountId]; else updated[accountId] = next;
+    setHiddenFolders(updated);
+  }, [folders, setHiddenFolders]);
+
   // Loading state for folder ops
   const [folderOpLoading, setFolderOpLoading] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null); // { message, onConfirm }
@@ -581,6 +595,7 @@ export default function Sidebar() {
     setFolderOpLoading(true);
     try {
       const { newPath } = await api.renameFolder(renamingFolder.accountId, renamingFolder.path, renamingFolder.value.trim());
+      if (newPath) moveHiddenFolder(renamingFolder.accountId, renamingFolder.path, newPath);
       const updated = await api.getFolders(renamingFolder.accountId);
       setFolders(renamingFolder.accountId, updated);
       // If we were viewing the renamed folder, navigate to it
@@ -605,6 +620,7 @@ export default function Sidebar() {
       onConfirm: async () => {
         try {
           await api.deleteFolder(accountId, folderPath);
+          moveHiddenFolder(accountId, folderPath, null);
           const updated = await api.getFolders(accountId);
           setFolders(accountId, updated);
           if (selectedAccountId === accountId && selectedFolder === folderPath) {
@@ -1196,7 +1212,8 @@ export default function Sidebar() {
           const expanded = expandedAccounts[account.id];
           const isSelected = selectedAccountId === account.id;
           const accountFolders = folders[account.id] || [];
-          const accountHiddenPaths = hiddenFolders[account.id] || [];
+          // Only hidden folders that still exist: a deleted one must not keep the toggle (#694).
+          const accountHiddenPaths = existingHiddenPaths(hiddenFolders[account.id], accountFolders);
           const showingHidden = showHiddenFor.has(account.id);
 
           const selectInbox = () => setSelectedAccount(account.id, 'INBOX');

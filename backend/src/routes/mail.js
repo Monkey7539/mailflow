@@ -624,9 +624,19 @@ router.get('/messages/:id/body', async (req, res) => {
     const inline = req.query.original === '1' ? { html: responseHtml, count: 0 } : await fitInlineImages(responseHtml, req.session.userId);
     return res.json({ ...splitDarkScheme(inline.html), inlineImagesFitted: inline.count > 0, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, remoteImagesBlocked, remoteImagesProxied, trackersBlocked: imageStats.trackers ?? 0, senderEmail: message.sender_email, senderName: message.sender_name, forwardedFromEmail: message.forwarded_from_email, forwardedFromName: message.forwarded_from_name, forwardedVia: message.forwarded_via, bccAddresses: bccOf(message) });
   };
+  // A prefetch (?prefetch=1): the client loading a row the pointer rests on, ahead of a click that
+  // may never come (#677). It gets a stored body as any view does, and fetches from the mail server
+  // only when imapManager.prefetchBodyVerdict says 'yes'. Otherwise it is answered 204, with
+  // nothing fetched or stored, and an X-Prefetch header saying why: 'later' (the provider is being
+  // backed off), 'never' (prefetches are not for this account), or 'repair' (the stored body is due
+  // a repair fetch, which the click does as it always has; serving it unrepaired would leave the
+  // client a cached copy the click then shows instead).
+  const prefetch = req.query.prefetch === '1';
+  const declinePrefetch = why => res.status(204).set('X-Prefetch', why).end();
   if (cached && !hasCidRefs && !hasHttpImgs && !staleImages) return serveCached();
   if (repairOnly) {
     if (bodyRepairFailedLately(id)) return serveCached();
+    if (prefetch) return declinePrefetch('repair');
     let repaired;
     try {
       repaired = await fetchWithTimeout(repairBody(message), BODY_REPAIR_TIMEOUT_MS);
@@ -640,14 +650,20 @@ router.get('/messages/:id/body', async (req, res) => {
     return serveCached();
   }
 
-  // Fetch from IMAP — signal user activity so background jobs back off during this request.
+  // Fetch from IMAP: a view the user asked for signals user activity so background jobs back off.
   try {
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
     const account = accountResult.rows[0];
-    imapManager.noteUserActivity(account.id);
+    if (prefetch) {
+      const verdict = imapManager.prefetchBodyVerdict(account);
+      if (verdict !== 'yes') return declinePrefetch(verdict);
+    } else {
+      // Only a view the user asked for holds background work back; a prefetch is not one.
+      imapManager.noteUserActivity(account.id);
+    }
 
     const { html, text, attachments, cidsComplete } = await fetchWithTimeout(
-      imapManager.fetchMessageBody(account, message.uid, message.folder),
+      imapManager.fetchMessageBody(account, message.uid, message.folder, { background: Boolean(prefetch) }),
       BODY_FETCH_TIMEOUT_MS
     );
     return await serveFetched({ ...await storeFetchedBody(id, { html, text, attachments, cidsComplete }), attachments });
@@ -1171,11 +1187,12 @@ router.post('/mark-all-read', async (req, res) => {
   await query('UPDATE messages SET is_read = true, read_changed_at = NOW() WHERE account_id = $1 AND folder = $2', [accountId, folder]);
   await query('UPDATE folders SET unread_count = 0 WHERE account_id = $1 AND path = $2', [accountId, folder])
     .catch(err => console.error('Folder count update failed:', err.message));
-  // Also update IMAP so the change survives the next sync (non-fatal if it fails)
-  imapManager.markAllReadImap(account, folder).catch(err =>
-    console.warn('markAllReadImap failed:', err.message)
-  );
-  imapManager.scheduleCountRefresh?.(accountId);
+  // Also update IMAP so the change survives the next sync (non-fatal if it fails). Not awaited: a
+  // large folder is written in chunks. The count refresh waits for it, though, because it asks
+  // the server for UNSEEN, and one started beside the write found the folder still unread.
+  imapManager.markAllReadImap(account, folder)
+    .catch(err => console.warn('markAllReadImap failed:', err.message))
+    .finally(() => imapManager.scheduleCountRefresh?.(accountId));
   imapManager.broadcast({ type: 'sync_complete', accountId }, account.user_id);
   res.json({ ok: true });
 });
@@ -2358,9 +2375,12 @@ router.post('/messages/:id/snooze', async (req, res) => {
       if (snoozedUid != null) {
         await query('UPDATE messages SET folder = $1, uid = $2 WHERE id = $3', [snoozedFolder, snoozedUid, tm.id]);
       } else {
-        imapManager._guardMoveUid(tm.account_id, snoozedFolder, tm.uid);
-        await query('UPDATE messages SET folder = $1 WHERE id = $2', [snoozedFolder, tm.id]);
-        setTimeout(() => imapManager._unguardMoveUid(tm.account_id, snoozedFolder, tm.uid), 10_000);
+        // The new uid is not known (see moveMessage), and the source uid can belong to another
+        // message in Snoozed. Drop the row and let a sync of Snoozed file the message, which
+        // the snooze below still finds by its Message-ID.
+        await query('DELETE FROM messages WHERE id = $1', [tm.id]);
+        imapManager.syncFolderOnDemand(account, snoozedFolder)
+          .catch(err => console.warn(`Sync of ${snoozedFolder} after a snooze without a new uid failed: ${err.message}`));
       }
 
       await query(
@@ -2370,7 +2390,7 @@ router.post('/messages/:id/snooze', async (req, res) => {
       );
 
       adjustFolderCounts(tm.account_id, tm.folder, -1, tm.is_read ? 0 : -1);
-      adjustFolderCounts(tm.account_id, snoozedFolder, 1, tm.is_read ? 0 : 1);
+      if (snoozedUid != null) adjustFolderCounts(tm.account_id, snoozedFolder, 1, tm.is_read ? 0 : 1);
     } finally {
       imapManager._unguardMoveUid(tm.account_id, tm.folder, tm.uid);
     }
@@ -2494,17 +2514,18 @@ async function deleteMessage(req, res, id) {
           [message.account_id, newUid, trashPath, id]);
         await query('UPDATE messages SET folder = $1, uid = $2, id = gen_random_uuid() WHERE id = $3', [trashPath, newUid, id]);
       } else {
-        // Non-UIDPLUS: DB holds the stale source UID at the destination. Guard it so
-        // reconcileDeletes does not treat it as an orphan before the next sync corrects it.
-        imapManager._guardMoveUid(message.account_id, trashPath, message.uid);
-        await query('UPDATE messages SET folder = $1, id = gen_random_uuid() WHERE id = $2', [trashPath, id]);
-        setTimeout(() => imapManager._unguardMoveUid(message.account_id, trashPath, message.uid), 10_000);
+        // The new uid is not known (see moveMessage). The source uid can belong to another
+        // message in Trash, so the row is dropped rather than kept on it, and a sync of Trash
+        // files the message under its real uid; Trash's counts come from that sync.
+        await query('DELETE FROM messages WHERE id = $1', [id]);
+        imapManager.syncFolderOnDemand(account, trashPath)
+          .catch(err => console.warn(`Sync of ${trashPath} after a delete without a new uid failed: ${err.message}`));
       }
     } finally {
       imapManager._unguardMoveUid(message.account_id, message.folder, message.uid);
     }
     adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
-    adjustFolderCounts(message.account_id, trashPath, 1, wasUnread);
+    if (newUid != null) adjustFolderCounts(message.account_id, trashPath, 1, wasUnread);
   } else {
     // strategy.action === 'expunge': message is already in Trash — permanently delete. A move
     // into Trash without UIDPLUS leaves the row under the message's source uid, which in Trash
@@ -2670,15 +2691,12 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
         [destinationFolder, newUid, label, messageId]
       );
     } else {
-      // Non-UIDPLUS server: DB holds the stale source UID at the destination.
-      imapManager._guardMoveUid(account.id, destinationFolder, message.uid);
-      await query(
-        `UPDATE messages SET folder = $1,
-            spam_user_override = $2, spam_verdict = $2, spam_analyzed_at = NOW()
-         WHERE id = $3`,
-        [destinationFolder, label, messageId]
-      );
-      setTimeout(() => imapManager._unguardMoveUid(account.id, destinationFolder, message.uid), 10_000);
+      // The new uid is not known (see moveMessage). The source uid can belong to another
+      // message in the destination, so the row is dropped rather than kept on it, and a sync of
+      // the destination files the message under its real uid; its counts come from that sync.
+      await query('DELETE FROM messages WHERE id = $1', [messageId]);
+      imapManager.syncFolderOnDemand(account, destinationFolder)
+        .catch(err => console.warn(`Sync of ${destinationFolder} after a move without a new uid failed: ${err.message}`));
     }
   } finally {
     imapManager._unguardMoveUid(account.id, message.folder, message.uid);
@@ -2687,12 +2705,12 @@ async function moveForSpamLabel(messageId, userId, destinationFolder, label) {
   // Adjust cached folder counts.
   const wasUnread = !message.is_read ? 1 : 0;
   adjustFolderCounts(account.id, message.folder, -1, -wasUnread);
-  adjustFolderCounts(account.id, destinationFolder, 1, wasUnread);
+  if (newUid != null) adjustFolderCounts(account.id, destinationFolder, 1, wasUnread);
 
   // Training log: capture the decision for future model training. Record the UID that now
-  // lives in the destination folder: on a UIDPLUS move the row was re-keyed to newUid above,
-  // so message.uid (the pre-move source UID) would no longer match the messages row. Non-UIDPLUS
-  // servers keep the source UID at the destination, so newUid is null there and we fall back to it.
+  // lives in the destination folder: the row was re-keyed to newUid above, so message.uid (the
+  // pre-move source UID) would no longer match the messages row. Without a new uid there is no
+  // row to match, and the source uid is recorded as before.
   await logSpamTraining(
     userId,
     { ...message, uid: newUid ?? message.uid, account_id: account.id },

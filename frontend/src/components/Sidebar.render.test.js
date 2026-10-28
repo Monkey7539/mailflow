@@ -162,3 +162,37 @@ describe('Sidebar: the Scheduled entry', () => {
     assert.ok(entry().className.includes('nav-item-active'));
   });
 });
+
+// #694: hiding a folder and then deleting it at the provider left the "hidden folders" toggle in
+// the sidebar for good, and clicking it revealed nothing. The toggle counts only hidden folders
+// that still exist.
+describe('Sidebar: the hidden folders toggle (#694)', () => {
+  const toggle = () => [...dom.window.document.querySelectorAll('button')]
+    .find(b => b.textContent === 'sidebar.hiddenFolders' || b.textContent === 'sidebar.hideHidden');
+  const row = name => [...dom.window.document.querySelectorAll('span')].find(s => s.textContent === name);
+
+  test('no toggle when the only hidden folder is gone from the account', async () => {
+    await mount({ hidden: ['Deleted at provider'] });
+    assert.equal(Boolean(toggle()), false, 'no hidden-folders toggle');
+  });
+
+  test('with one hidden folder gone and one still there, the toggle reveals the one that exists', async () => {
+    await mount({ hidden: ['Deleted at provider', 'Banking'] });
+    assert.equal(Boolean(toggle()), true, 'hidden-folders toggle shown');
+    assert.equal(Boolean(row('Banking')), false, 'Banking row is hidden');
+    await React.act(async () => { toggle().click(); });
+    assert.equal(Boolean(row('Banking')), true, 'Banking row revealed');
+    assert.equal(toggle().textContent, 'sidebar.hideHidden');
+  });
+
+  test('a folder back at its hidden path is hidden again, with the toggle', async () => {
+    await mount({ hidden: ['Banking'] });
+    assert.equal(Boolean(toggle()), true, 'hidden-folders toggle shown');
+    assert.equal(Boolean(row('Banking')), false, 'Banking row is hidden');
+  });
+
+  test('the stale path is kept in the preferences, not wiped by rendering', async () => {
+    await mount({ hidden: ['Deleted at provider', 'Banking'] });
+    assert.deepEqual(useStore.getState().hiddenFolders['acct-1'], ['Deleted at provider', 'Banking']);
+  });
+});

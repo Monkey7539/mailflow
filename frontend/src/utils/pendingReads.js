@@ -22,6 +22,19 @@ const _graceTimers = new Map();
 // had marked it unread, and the row's menu went back to offering "Mark as unread".
 const _owners = new Map();
 
+// Message id: callbacks to run if the read in flight for it fails (onReadRollback).
+const _rollbackListeners = new Map();
+
+// Runs `fn` if the read now in flight for the message fails and is rolled back, for a caller that
+// keeps its own copy of the message and leaned on that read instead of sending its own (markRead.js).
+// Nothing in flight, nothing to hear: returns false.
+export function onReadRollback(messageId, fn) {
+  if (!pendingMarkReadMap.has(messageId)) return false;
+  if (!_rollbackListeners.has(messageId)) _rollbackListeners.set(messageId, new Set());
+  _rollbackListeners.get(messageId).add(fn);
+  return true;
+}
+
 // Set a pending entry with a 30-second safety timeout, and return the token that settles it.
 // The timeout is a fallback so a hung or abandoned request never leaves a permanent entry.
 export function setPending(messageId, accountId) {
@@ -30,6 +43,7 @@ export function setPending(messageId, accountId) {
   const timer = setTimeout(() => {
     pendingMarkReadMap.delete(messageId);
     _pendingTimers.delete(messageId);
+    _rollbackListeners.delete(messageId);
   }, 30000);
   _pendingTimers.set(messageId, timer);
   pendingMarkReadMap.set(messageId, accountId);
@@ -50,6 +64,7 @@ export function settleMarkRead(messageId, accountId, token) {
   if (_owners.get(messageId) !== token) return false;
   _owners.delete(messageId);
   releasePending(messageId);
+  _rollbackListeners.delete(messageId);
   completedMarkReadMap.set(messageId, accountId);
   clearTimeout(_graceTimers.get(messageId));
   _graceTimers.set(messageId, setTimeout(() => {
@@ -65,6 +80,9 @@ export function failMarkRead(messageId, token) {
   if (_owners.get(messageId) !== token) return false;
   _owners.delete(messageId);
   releasePending(messageId);
+  const listeners = _rollbackListeners.get(messageId);
+  _rollbackListeners.delete(messageId);
+  for (const fn of listeners || []) fn();
   return true;
 }
 
@@ -72,6 +90,7 @@ export function failMarkRead(messageId, token) {
 // its grace period no longer speaks for it.
 export function clearReadGuard(messageId) {
   _owners.delete(messageId);
+  _rollbackListeners.delete(messageId);
   releasePending(messageId);
   completedMarkReadMap.delete(messageId);
   clearTimeout(_graceTimers.get(messageId));

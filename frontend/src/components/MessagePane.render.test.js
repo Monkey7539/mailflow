@@ -806,6 +806,86 @@ describe('move picker favorites', () => {
   });
 });
 
+describe('Reply with AI in the toolbar', () => {
+  const button = () => document.querySelector('[title="compose.toolbar.aiReply"]');
+  let realStatus;
+  async function show({ compose, summarize = true }) {
+    api.ai.status = async () => ({ enabled: true, features: { compose, summarize } });
+    // A fresh mount: the pane asks for the AI status when it mounts.
+    await React.act(async () => { root.render(null); });
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  }
+  before(() => { realStatus = api.ai.status; });
+  after(() => {
+    api.ai.status = realStatus;
+    useStore.setState({ plaintextEmail: false });
+    useStore.getState().closeCompose();
+  });
+
+  test('opens the reply with the AI panel waiting for the instruction', async () => {
+    await show({ compose: true });
+    assert.ok(button(), 'offered when the AI can write replies');
+    await React.act(async () => { button().dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const data = useStore.getState().composeData;
+    assert.equal(data?.isReply, true);
+    assert.equal(data.aiReply, true);
+    assert.equal(data.subject, 'Re: First');
+  });
+
+  // A phone's toolbar only just fits its buttons (#650), so there it is in More.
+  test('is in More on a phone', async () => {
+    // A phone's pane pages with SwipePager, which waits a frame, and jsdom has none.
+    globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
+    globalThis.cancelAnimationFrame ??= id => clearTimeout(id);
+    dom.window.requestAnimationFrame ??= globalThis.requestAnimationFrame;
+    dom.window.cancelAnimationFrame ??= globalThis.cancelAnimationFrame;
+    api.ai.status = async () => ({ enabled: true, features: { compose: true, summarize: true } });
+    await React.act(async () => { root.render(null); });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    dom.window.innerWidth = 375;
+    const phone = createRoot(container);
+    const click = async el => {
+      await React.act(async () => { el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    };
+    try {
+      await React.act(async () => {
+        useStore.getState().setSelectedMessage('a1');
+        phone.render(React.createElement(MessagePane));
+      });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+      assert.ok(!container.querySelector('button[aria-label="compose.toolbar.aiReply"]'), 'not a toolbar button');
+      await click(container.querySelector('button[aria-label="message.more"]'));
+      const items = [...container.querySelectorAll('[role="menuitem"]')];
+      assert.equal(items[1]?.textContent, 'compose.toolbar.aiReply', 'after the read toggle');
+      await click(items[1]);
+      assert.equal(useStore.getState().composeData?.aiReply, true);
+      assert.equal(useStore.getState().composeData.subject, 'Re: First');
+    } finally {
+      await React.act(async () => { useStore.getState().closeCompose(); });
+      await React.act(async () => phone.unmount());
+      container.remove();
+      dom.window.innerWidth = 1024;
+    }
+  });
+
+  test('is not offered when the AI does not write emails, or the user writes in plain text', async () => {
+    await show({ compose: false });
+    assert.equal(button(), null);
+    await show({ compose: true, summarize: false });
+    assert.equal(button(), null, 'nor without summaries: the reply is written from received mail');
+    useStore.setState({ plaintextEmail: true });
+    await show({ compose: true });
+    assert.equal(button(), null);
+  });
+});
+
 // #572: the reading pane's own Delete and Archive open what takes the message's place, by the
 // afterRemove setting, instead of leaving "Select a message to read".
 describe('the next message opens after the pane removes the open one', () => {
@@ -838,6 +918,36 @@ describe('the next message opens after the pane removes the open one', () => {
     await click(paneButton('message.delete'));
     assert.equal(useStore.getState().selectedMessageId, null);
     useStore.setState({ afterRemove: 'next' });
+  });
+});
+
+// #701: the pane's Delete reaches the server only when its undo window closes, so a count the
+// server reports in the meantime still includes the message. It must not put it back on the badge.
+describe('the badge after the pane deletes the last unread message', () => {
+  const paneButton = title => [...document.querySelectorAll('button')].find(b => (b.getAttribute('title') || '').split(' (')[0] === title);
+  const counts = (n, revision) => ({ byAccount: { acct: n }, snapshots: { acct: { revision, known: true, stale: false, observedAt: new Date().toISOString() } } });
+
+  test('a count observed before the delete was sent does not bring the badge back to 1', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => {
+      // Cancel the delete still waiting out its undo window, and leave the toasts as they were.
+      const toast = useStore.getState().notifications.find(n => n.title === 'messageList.deleted.title');
+      toast?.onUndo();
+      if (toast) useStore.getState().removeNotification(toast.id);
+      useStore.setState({ afterRemove: 'next' });
+    });
+    const unread = { ...MSG_A, id: 'u701', uid: 701, subject: 'Last unread', is_read: false };
+    useStore.setState({ afterRemove: 'list', searchQuery: '' });
+    useStore.getState().setMessages([unread]);
+    useStore.getState().setUnreadCounts(counts(1, '7010'));
+    await React.act(async () => { useStore.getState().setSelectedMessage(unread.id); });
+    await React.act(async () => { root.render(React.createElement(MessagePane)); });
+    await React.act(async () => { paneButton('message.delete').dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
+    assert.equal(useStore.getState().unreadCounts.byAccount.acct, 0);
+    // Past the settle floor of a change sent at the click, before this one is even sent.
+    t.mock.timers.tick(8000);
+    useStore.getState().setUnreadCounts(counts(1, '7011'));
+    assert.equal(useStore.getState().unreadCounts.byAccount.acct, 0);
   });
 });
 

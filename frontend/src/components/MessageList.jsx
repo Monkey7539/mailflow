@@ -13,6 +13,7 @@ import { keepDraftsApart } from '../utils/conversationActions.js';
 import { unreadDeltaByAccount } from '../utils/countSnapshots.js';
 import { splitDraftSignature } from '../utils/draftSignature.js';
 import { useSwipeRow } from '../hooks/useSwipeRow.js';
+import { useHoverPrefetch } from '../hooks/useHoverPrefetch.js';
 import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import UndoBar from './UndoBar.jsx';
@@ -26,7 +27,7 @@ import {
 import { formatDate, formatDateTime, formatSnoozeUntil } from '../utils/formatDate.js';
 import { SNOOZED_FOLDER, unsnooze, changeSnooze, refreshCounts } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, registerRowOpener } from '../utils/listSelection.js';
-import { openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
+import { pickMessageReplyAlias, resolveReplyRecipients, openReplyFromMessage, openForwardFromMessage, openForwardAsAttachmentFromMessage } from '../utils/composeFromMessage.js';
 import { selectedMessage, markMessageUnread } from '../utils/messageHotkeys.js';
 import { cancelScheduledMarkRead, cancelScheduledMarkReadFor, scheduleMarkReadTimer } from '../utils/markRead.js';
 import { saveSenderCategory } from '../utils/senderCategory.js';
@@ -1052,7 +1053,7 @@ function MailboxList() {
     const unreadDelta = Number.isFinite(unreadCount)
       ? unreadCount
       : deleteMessages.filter(msg => !msg.is_read).length;
-    if (unreadDelta > 0) decrementUnread(message.account_id, unreadDelta);
+    if (unreadDelta > 0) decrementUnread(message.account_id, unreadDelta, { undoable: true });
 
     const timer = setTimeout(async () => {
       pendingDeleteTimers.current.delete(key);
@@ -1131,7 +1132,7 @@ function MailboxList() {
     const unreadCount = messages.reduce((sum, m) => sum + (m.is_read ? 0 : 1), 0);
     const accountId = messages[0].account_id;
     messages.forEach(m => removeMessage(m.id));
-    if (unreadCount > 0) decrementUnread(accountId, unreadCount);
+    if (unreadCount > 0) decrementUnread(accountId, unreadCount, { undoable: true });
 
     // Sidebar folder badges are not adjusted here. They render the counts the IMAP server
     // reported for each folder, so a local guess would be overwritten by the next observation
@@ -1286,7 +1287,7 @@ function MailboxList() {
     const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
       ? aggregateUnread
       : (message.is_read ? 0 : 1);
-    if (optimisticUnread > 0) decrementUnread(message.account_id, optimisticUnread);
+    if (optimisticUnread > 0) decrementUnread(message.account_id, optimisticUnread, { undoable: true });
     const archiveAction = createUndoableCommit({
       delayMs: UNDO_COMMIT_DELAY_MS,
       commit: async () => {
@@ -1315,54 +1316,9 @@ function MailboxList() {
   }, [setMessagesStarredState]);
 
   const handleSwipeReply = useCallback((message, replyAll = false) => {
-    const replyToArr = Array.isArray(message.reply_to)
-      ? message.reply_to
-      : (() => { try { return JSON.parse(message.reply_to || '[]'); } catch { return []; } })();
-    const replyTarget = (replyToArr.length && replyToArr[0].email)
-      ? replyToArr[0]
-      : { name: message.from_name || '', email: message.from_email || '' };
-    const sender = replyTarget.email ? [replyTarget] : [];
-
     const myAccount = accounts.find(a => a.id === message.account_id);
-    const myEmail = myAccount?.email_address || '';
-    const myAddresses = new Set([
-      myEmail.toLowerCase(),
-      ...(myAccount?.aliases || []).map(al => al.email.toLowerCase()),
-    ]);
-
-    const replyAliasId = (() => {
-      const aliases = myAccount?.aliases || [];
-      if (!aliases.length) return null;
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        const allEmails = [...toArr, ...ccArr].map(t => t.email?.toLowerCase()).filter(Boolean);
-        const fromEmail = (message.from_email || '').toLowerCase();
-        const match = aliases.find(al => {
-          const aliasEmail = al.email.toLowerCase();
-          return allEmails.includes(aliasEmail) || fromEmail === aliasEmail;
-        });
-        return match ? match.id : null;
-      } catch { return null; }
-    })();
-
-    const allRecipients = (() => {
-      try {
-        const toArr = Array.isArray(message.to_addresses)
-          ? message.to_addresses
-          : JSON.parse(message.to_addresses || '[]');
-        const ccArr = Array.isArray(message.cc_addresses)
-          ? message.cc_addresses
-          : JSON.parse(message.cc_addresses || '[]');
-        return [...toArr, ...ccArr].filter(
-          t => t.email && !myAddresses.has(t.email.toLowerCase()) && t.email !== replyTarget.email
-        );
-      } catch { return []; }
-    })();
+    const { to: sender, allRecipients } = resolveReplyRecipients(message, myAccount);
+    const replyAliasId = pickMessageReplyAlias(message, myAccount);
 
     const referencesChain = [message.in_reply_to, message.message_id]
       .filter(Boolean).join(' ').trim() || null;
@@ -1382,6 +1338,7 @@ function MailboxList() {
       isReplyAll: replyAll,
       originalFrom: sender,
       allRecipients,
+      threadId: message.thread_id,
     });
   }, [accounts, openCompose]);
   
@@ -1557,7 +1514,7 @@ function MailboxList() {
     }
     msgs.forEach(msg => {
       const delta = parseInt(msg.unread_count) || (msg.is_read ? 0 : 1);
-      if (delta > 0) decrementUnread(msg.account_id, delta);
+      if (delta > 0) decrementUnread(msg.account_id, delta, { undoable: true });
     });
     setSelectedIds(new Set());
     setSelectionModeActive(false);
@@ -1626,7 +1583,7 @@ function MailboxList() {
       console.error('Failed to load thread for bulk move:', err.message);
     }
     ids.forEach(id => removeMessage(id));
-    msgs.forEach(msg => { if (!msg.is_read) decrementUnread(msg.account_id); });
+    msgs.forEach(msg => { if (!msg.is_read) decrementUnread(msg.account_id, 1, { undoable: true }); });
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     setShowFolderPicker(false);
@@ -1712,7 +1669,7 @@ function MailboxList() {
         ? aggregateUnread
         : (message.is_read ? 0 : 1);
       if (count <= 0) return;
-      decrementUnread(message.account_id, count);
+      decrementUnread(message.account_id, count, { undoable: true });
       unreadByAccount.set(message.account_id, (unreadByAccount.get(message.account_id) || 0) + count);
     });
     setSelectedIds(new Set());
@@ -2307,7 +2264,7 @@ function MailboxList() {
         const optimisticUnread = threadRow && Number.isFinite(aggregateUnread)
           ? aggregateUnread
           : (archived.is_read ? 0 : 1);
-        if (optimisticUnread > 0) decrementUnread(archived.account_id, optimisticUnread);
+        if (optimisticUnread > 0) decrementUnread(archived.account_id, optimisticUnread, { undoable: true });
         const archiveAction = createUndoableCommit({
           delayMs: UNDO_COMMIT_DELAY_MS,
           commit: async () => {
@@ -2355,7 +2312,7 @@ function MailboxList() {
         const moveIds = [...new Set(moveMessages.map(msg => msg.id).filter(Boolean))];
         if (!moveIds.length) moveIds.push(moved.id);
         removeMessage(moved.id);
-        if (!moved.is_read) decrementUnread(moved.account_id);
+        if (!moved.is_read) decrementUnread(moved.account_id, 1, { undoable: true });
         // Remove the moved message from the selection so the action bar doesn't
         // stay around claiming "X selected" for messages that are no longer here.
         if (selectedIds.has(moved.id)) {
@@ -2728,6 +2685,8 @@ function MailboxList() {
 
   // Derived bulk-selection values (computed fresh each render, no stale closure risk)
   const selectionMode = selectedIds.size > 0 || selectionModeActive;
+  // A row's body loads while the mouse rests on it, so the click shows it at once (#677).
+  const hoverPrefetch = useHoverPrefetch({ enabled: !isMobile && !selectionMode });
   const selectedMsgs = displayMessages.filter(m => selectedIds.has(m.id));
   const selectedCount = selectedIds.size;
   const allSelected = displayMessages.length > 0 && selectedIds.size === displayMessages.length;
@@ -3533,8 +3492,10 @@ function MailboxList() {
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         <div
           ref={listRef}
-          onScroll={handleScroll}
+          onScroll={(e) => { hoverPrefetch.onScroll(); handleScroll(e); }}
           onKeyDown={handleListKeyDown}
+          onPointerMove={hoverPrefetch.onPointerMove}
+          onPointerLeave={hoverPrefetch.onPointerLeave}
           tabIndex={0}
           style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden', outline: 'none', overscrollBehavior: 'contain' }}
         >

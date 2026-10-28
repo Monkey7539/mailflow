@@ -14,7 +14,7 @@ vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./spamPipeline.js', () => ({ classifyAndTagMessage: vi.fn() }));
 vi.mock('./mailAccess.js', () => ({ getAccountAddresses: vi.fn(async () => []) }));
 
-import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, contentLocationFromMimeHeader, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, computeThreadId, noteDraftsChanged } from './imapManager.js';
+import { ImapManager, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, hasIdlePooledClient, shouldPrewarmPool, acquirePooledClient, releasePooledClient, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, extractBodyFromMsg, attachmentsFromStructure, contentLocationFromMimeHeader, bodyFallbackApplies, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, pairMovedCopies, computeThreadId, noteDraftsChanged } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { ensureFreshToken } from './imapManager.js';
 import { clearRefreshFailure, noteFreshToken, noteRefreshFailure, refreshFailureFor } from './accountErrorCode.js';
@@ -3366,16 +3366,14 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
       expect(r.succeeded).toEqual([]);
       expect(r.failed).toEqual([4, 5, 6]);
       expect(r.staleCount).toBeNull();
-      expect(r.mappable).toBe(false);
     }
   });
 
-  it('clean move: all left source, all arrived -> succeeded + mappable', () => {
+  it('clean move: all left source, all arrived -> succeeded', () => {
     const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [], /*destArrived*/ 3);
     expect(r.succeeded).toEqual([4, 5, 6]);
     expect(r.failed).toEqual([]);
     expect(r.staleCount).toBe(0);
-    expect(r.mappable).toBe(true);
   });
 
   it('stale UID in batch: fewer arrived than left -> ALL failed, no wrong-deletion', () => {
@@ -3385,7 +3383,6 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
     expect(r.succeeded).toEqual([]);
     expect(r.failed).toEqual([2, 3, 4, 5, 6]);
     expect(r.staleCount).toBe(2);
-    expect(r.mappable).toBe(false);
   });
 
   it('partial move failure: some still in source -> those are failed, the rest succeeded', () => {
@@ -3394,7 +3391,6 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
     expect(r.succeeded).toEqual([4]);
     expect(r.failed).toEqual([5, 6]);
     expect(r.staleCount).toBe(0);
-    expect(r.mappable).toBe(true);
   });
 
   it('nothing left the source -> all failed (move did not happen)', () => {
@@ -3404,12 +3400,68 @@ describe('classifyMoveBySearch (#407 empty-uidMap reconciliation)', () => {
     expect(r.staleCount).toBe(0);
   });
 
-  it('destination not verifiable (null) -> trust source-absence, not mappable, stale unknown', () => {
+  it('destination not verifiable (null) -> trust source-absence, stale unknown', () => {
     const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [], /*destArrived*/ null);
     expect(r.succeeded).toEqual([4, 5, 6]);
     expect(r.failed).toEqual([]);
     expect(r.staleCount).toBeNull();
-    expect(r.mappable).toBe(false);
+  });
+
+  // What else reaches the destination meanwhile arrives in the same UID range, so the count can
+  // make up for a stale UID. The source as a FETCH found it before the move says which one it was.
+  it('with the source as it was before the move: a UID that was not there is stale, whatever arrived', () => {
+    const r = classifyMoveBySearch([5, 9], /*remaining*/ [], /*destArrived*/ 2, /*presentBefore*/ new Set([5]));
+    expect(r.succeeded).toEqual([5]);
+    expect(r.failed).toEqual([9]);
+    expect(r.staleCount).toBe(1);
+  });
+
+  it('with the source as it was before the move: one still there failed, one that left moved', () => {
+    const r = classifyMoveBySearch([4, 5, 6], /*remaining*/ [6], /*destArrived*/ null, new Set([4, 5, 6]));
+    expect(r.succeeded).toEqual([4, 5]);
+    expect(r.failed).toEqual([6]);
+    expect(r.staleCount).toBe(0);
+  });
+});
+
+// pairMovedCopies finds a moved message among the destination's arrivals by its content: the
+// Message-ID, sender, subject, Date header and size together. Each case below differs in one part
+// only, so it fails when that part is left out of the match.
+describe('pairMovedCopies', () => {
+  const copy = (uid, { size = 100, ...envelope } = {}) => ({
+    uid, size,
+    envelope: { messageId: '<a@example.com>', subject: 'Subject', from: [{ address: 'sender@example.com' }], date: new Date('2026-10-01T10:00:00Z'), ...envelope },
+  });
+  const pairs = (moved, arrivals) => [...pairMovedCopies(moved, arrivals)];
+
+  it.each([
+    ['size', { size: 200 }],
+    ['Date header', { date: new Date('2026-10-01T10:00:01Z') }],
+    ['subject', { subject: 'Re: Subject' }],
+    ['sender', { from: [{ address: 'other@example.com' }] }],
+    ['Message-ID', { messageId: '<b@example.com>' }],
+  ])('tells apart an arrival that differs only in its %s', (_part, other) => {
+    expect(pairs([copy(5)], [copy(40, other), copy(41)])).toEqual([[5, 41]]);
+  });
+
+  it('pairs a message with no Message-ID by the rest of its content', () => {
+    const none = { messageId: undefined };
+    expect(pairs([copy(5, none)], [copy(40), copy(41, none)])).toEqual([[5, 41]]);
+    expect(pairs([copy(5, { messageId: '<>' })], [copy(40), copy(41, none)])).toEqual([[5, 41]]);
+  });
+
+  it('pairs nothing when two arrivals carry the same content', () => {
+    expect(pairs([copy(5)], [copy(40), copy(41)])).toEqual([]);
+  });
+
+  it('pairs nothing for several identical moved messages, even when only one copy arrived', () => {
+    expect(pairs([copy(5), copy(6)], [copy(40)])).toEqual([]);
+    expect(pairs([copy(5), copy(6)], [copy(40), copy(41)])).toEqual([]);
+  });
+
+  it('pairs each of several different messages with its own arrival, whatever the order', () => {
+    expect(pairs([copy(5, { subject: 'A' }), copy(6, { subject: 'B' })], [copy(40, { subject: 'B' }), copy(41), copy(42, { subject: 'A' })]))
+      .toEqual([[5, 42], [6, 40]]);
   });
 });
 
@@ -5013,6 +5065,20 @@ describe('prefetchFolderBodies — stops instead of hammering a refusing provide
     return mgr;
   }
   afterEach(() => { vi.restoreAllMocks(); });
+
+  // A prefetch leaves the pool's last idle session to the user's click (acquirePooledClient).
+  it('fetches each body as background work', async () => {
+    const mgr = arrange(() => new Error('Command failed'));
+    await mgr.prefetchFolderBodies('acc-1', UIDS.map(u => `m-${u}`));
+    expect(mgr.fetchMessageBody).toHaveBeenNthCalledWith(1, YAHOO, 101, 'INBOX', { background: true });
+  });
+
+  it('prefetches newly arrived bodies as background work too', async () => {
+    const mgr = arrange(() => new Error('Command failed'));
+    mgr.fetchMessageBody = vi.fn(async () => ({}));
+    await mgr.prefetchNewMessageBodies(YAHOO, [{ id: 'm-101', uid: 101, folder: 'INBOX' }]);
+    expect(mgr.fetchMessageBody).toHaveBeenCalledWith(YAHOO, 101, 'INBOX', { background: true });
+  });
 
   it('stops after the FIRST refusal rather than trying every remaining message', async () => {
     const mgr = arrange(() => Object.assign(new Error('Command failed'), {
@@ -7011,5 +7077,209 @@ describe('syncMessages — tells the client when a Drafts folder gained rows', (
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// #677: every command of a body fetch is a round trip to the mail server, and on Gmail they
+// are what opening a message waits for. Text parts are fetched one at a time (some servers
+// garble a batched one), so batching them as well was a command for nothing.
+describe('the commands a body fetch sends', () => {
+  let seq = 900;
+  const alternative = {
+    type: 'multipart/alternative',
+    childNodes: [
+      { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+      { part: '2', type: 'text/html', encoding: '7bit', parameters: { charset: 'utf-8' } },
+    ],
+  };
+  // A fake server holding one message. answersAlone: the parts a fetch of that part alone
+  // returns (others come back empty), so a server that only answers batched requests can be
+  // played too.
+  // fails(command, client): true makes that command throw on that client (0 is the first one
+  // made); drops: a throw drops that client's connection, so every command after it throws too.
+  function serve(host, structure, parts, { answersAlone = Object.keys(parts), batched = {}, fails = () => false, drops = false } = {}) {
+    const account = { id: `acct-cmds-${++seq}`, user_id: 'u1', imap_host: host, email_address: 'p@example.test', auth_user: 'p', auth_pass: 'enc' };
+    const commands = [];
+    let made = 0;
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      const index = made++;
+      let dropped = false;
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.getMailboxLock = vi.fn(async () => ({ release() {} }));
+      client.fetch = vi.fn(async function* (range, fetchQuery) {
+        const wanted = fetchQuery.bodyParts || [];
+        const command = [fetchQuery.bodyStructure ? 'BODYSTRUCTURE' : null, ...wanted].filter(Boolean).join(' ');
+        commands.push(command);
+        if (dropped || fails(command, index)) {
+          if (drops) dropped = true;
+          throw new Error('ECONNRESET');
+        }
+        const alone = wanted.length === 1;
+        yield {
+          uid: 42,
+          bodyStructure: fetchQuery.bodyStructure ? structure : undefined,
+          bodyParts: fetchQuery.bodyParts
+            ? new Map(wanted.filter(p => p in parts).map(p => [p, Buffer.from(alone ? (answersAlone.includes(p) ? parts[p] : '') : (batched[p] ?? parts[p]))]))
+            : undefined,
+        };
+      });
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    return { mgr: new ImapManager({ clients: new Set() }), account, commands, clientsMade: () => made };
+  }
+
+  it('fetches a two-step provider\'s text parts once each, with no batch of them first', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2']);
+  });
+
+  it('fetches a single-part message in two commands', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } }, { '1': 'just text' });
+    expect((await mgr.fetchMessageBody(account, 42, 'INBOX')).text).toBe('just text');
+    expect(commands).toEqual(['BODYSTRUCTURE', '1']);
+  });
+
+  it('still batches inline images, and fetches the text parts alone', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', {
+      type: 'multipart/related',
+      childNodes: [
+        { part: '1', type: 'text/html', encoding: '7bit', parameters: { charset: 'utf-8' } },
+        { part: '2', type: 'image/png', encoding: 'base64', id: '<logo@x>', size: 12, disposition: 'inline', dispositionParameters: { filename: 'logo.png' } },
+      ],
+    }, { '1': '<img src="cid:logo@x">', '2': 'iVBORw0KGgo=' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<img src="data:image/png;base64,iVBORw0KGgo=">');
+    expect(commands).toEqual(['BODYSTRUCTURE', '2', '1']);
+  });
+
+  it('falls back to the batched value of a text part the server answers alone with nothing', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' }, { answersAlone: ['1'] });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2', '1 2']);
+  });
+
+  it('keeps the value a text part\'s own fetch brought over the batched one', async () => {
+    // The batch answers part 1 garbled, as the servers the per-part fetch is there for do.
+    const { mgr, account } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' }, { answersAlone: ['1'], batched: { '1': '--boundary=_x hello=3D' } });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+  });
+
+  it('leaves a speculative provider\'s single round trip as it was', async () => {
+    const { mgr, account, commands } = serve('imap.example.test', alternative, { '1': 'hello', '2': '<p>hello</p>' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands[0].startsWith('BODYSTRUCTURE 1 1.1')).toBe(true);
+    expect(commands.slice(1)).toEqual(['1', '2']);
+  });
+
+  it('never returns a body with a text part missing: a drop after part 1 retries the whole body', async () => {
+    const { mgr, account, commands, clientsMade } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' },
+      { fails: (command, client) => client === 0 && command === '2', drops: true });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    // Not the plain text alone, which the route would store and show for good.
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2', '1 2', 'BODYSTRUCTURE', '1', '2']);
+    expect(clientsMade()).toBe(2);
+  });
+
+  it('fails rather than return a partial body when the retry drops too', async () => {
+    const { mgr, account } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' },
+      { fails: command => command === '2', drops: true });
+    await expect(mgr.fetchMessageBody(account, 42, 'INBOX')).rejects.toThrow(/ECONNRESET/);
+  });
+
+  it('fails over to a fresh login when no text part arrived and the fallback throws', async () => {
+    const { mgr, account, commands, clientsMade } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' },
+      { fails: (command, client) => client === 0 && command === '1', drops: true });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(clientsMade()).toBe(2);
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2', '1 2', 'BODYSTRUCTURE', '1', '2']);
+  });
+
+  it('takes the batched value of a text part whose own fetch threw', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', alternative, { '1': 'hello', '2': '<p>hello</p>' },
+      { fails: command => command === '2' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2', '1 2']);
+  });
+
+  it('falls back to two steps when a speculative fetch is refused, with no batch of text parts', async () => {
+    const { mgr, account, commands } = serve('imap.example.test', alternative, { '1': 'hello', '2': '<p>hello</p>' },
+      { fails: command => command.startsWith('BODYSTRUCTURE ') });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(commands.slice(1)).toEqual(['BODYSTRUCTURE', '1', '2']);
+  });
+
+  it('fetches nested text parts on their own', async () => {
+    const { mgr, account, commands } = serve('imap.gmail.com', {
+      type: 'multipart/mixed',
+      childNodes: [
+        { type: 'multipart/alternative', part: '1', childNodes: [
+          { part: '1.1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+          { part: '1.2', type: 'text/html', encoding: '7bit', parameters: { charset: 'utf-8' } },
+        ] },
+        { part: '2', type: 'application/pdf', encoding: 'base64', size: 900, disposition: 'attachment', dispositionParameters: { filename: 'a.pdf' } },
+      ],
+    }, { '1.1': 'hello', '1.2': '<p>hello</p>' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body).toMatchObject({ text: 'hello', html: '<p>hello</p>' });
+    expect(body.attachments.map(a => a.filename)).toEqual(['a.pdf']);
+    expect(commands).toEqual(['BODYSTRUCTURE', '1.1', '1.2']);
+  });
+
+  it('does not fetch again a text part the structure says is empty', async () => {
+    const empty = { ...alternative, childNodes: [{ ...alternative.childNodes[0], size: 0 }, { ...alternative.childNodes[1], size: 12 }] };
+    const { mgr, account, commands } = serve('imap.gmail.com', empty, { '1': '', '2': '<p>hello</p>' });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBe('<p>hello</p>');
+    expect(commands).toEqual(['BODYSTRUCTURE', '1', '2']);
+  });
+});
+
+// #677: a body prefetch fetches from the mail server only when that cannot add to a provider's
+// trouble or stand in a click's way.
+describe('prefetchBodyVerdict', () => {
+  let seq = 0;
+  const manager = () => Object.assign(Object.create(ImapManager.prototype), { _connectCooldown: new Map(), _secondaryCooldown: new Map() });
+  const acct = host => ({ ...baseAccount, id: `prefetch-gate-${++seq}`, user_id: 'u1', email_address: 'p@example.test', imap_host: host });
+
+  it('allows Gmail and an ordinary server', () => {
+    const m = manager();
+    expect(m.prefetchBodyVerdict(acct('imap.gmail.com'))).toBe('yes');
+    expect(m.prefetchBodyVerdict(acct('mail.example.test'))).toBe('yes');
+  });
+
+  it('says later while the secondary backoff or the connect cooldown is armed', () => {
+    const m = manager();
+    const a = acct('imap.gmail.com');
+    m._secondaryCooldown.set(a.id, { until: Date.now() + 60_000, failures: 1 });
+    expect(m.prefetchBodyVerdict(a)).toBe('later');
+    const b = acct('imap.gmail.com');
+    m._connectCooldown.set(b.id, { until: Date.now() + 60_000 });
+    expect(m.prefetchBodyVerdict(b)).toBe('later');
+    m._secondaryCooldown.set(a.id, { until: Date.now() - 1, failures: 1 });
+    expect(m.prefetchBodyVerdict(a)).toBe('yes');
+  });
+
+  it('says never for a provider whose body fetches open a login of their own (PurelyMail)', () => {
+    expect(manager().prefetchBodyVerdict(acct('imap.purelymail.com'))).toBe('never');
+  });
+
+  it('says never for a one-connection pool (Yahoo), even with that connection free', () => {
+    const m = manager();
+    expect(m.prefetchBodyVerdict(acct('imap.mail.yahoo.com'))).toBe('never');
   });
 });

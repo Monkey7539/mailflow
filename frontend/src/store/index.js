@@ -5,6 +5,7 @@ import { api } from '../utils/api.js';
 import { signOut as signOutAndLeave } from '../utils/signOut.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
+import { UNDO_COMMIT_DELAY_MS } from '../utils/undoableAction.js';
 import { aiRuns } from '../utils/aiRunRegistry.js';
 import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT } from '../fonts.js';
@@ -439,19 +440,21 @@ export const useStore = create((set, get) => ({
         scheduledCount: counts.scheduled.pending, scheduledAttention: Number(counts.scheduled.attention) || 0,
       } : {}) };
   }),
-  adjustUnread: (accountId, delta) => {
+  // { undoable: true } marks a change the server only hears about once its undo window closes.
+  adjustUnread: (accountId, delta, { undoable = false } = {}) => {
     set(state => {
       if (state.isLocked) return {};
       const displayed = displayCountSnapshot(state.serverUnreadCounts, state.pendingCounts, state.accounts);
-      const pending = adjustCountPending(state.pendingCounts, displayed, accountId, delta);
+      const pending = adjustCountPending(state.pendingCounts, displayed, accountId, delta, Date.now(),
+        { commitDelayMs: undoable ? UNDO_COMMIT_DELAY_MS : 0 });
       return { pendingCounts: pending,
         unreadCounts: displayCountSnapshot(state.serverUnreadCounts, pending, state.accounts) };
     });
-    // Do not reset this timer on subsequent clicks: continuous activity cannot freeze counts.
+    // Not reset per click: when it fires, it re-arms for a window a later change extended.
     if (!pendingCountTimer) expirePendingCounts();
   },
-  decrementUnread: (accountId, count = 1) => get().adjustUnread(accountId, -count),
-  incrementUnread: (accountId, count = 1) => get().adjustUnread(accountId, count),
+  decrementUnread: (accountId, count = 1, options) => get().adjustUnread(accountId, -count, options),
+  incrementUnread: (accountId, count = 1, options) => get().adjustUnread(accountId, count, options),
 
   // Folder badges always show observed server values. Row-level read/move optimism
   // remains immediate; aggregate thread estimates must not overwrite these snapshots.

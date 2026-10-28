@@ -221,13 +221,26 @@ describe('DELETE /api/mail/messages/:id', () => {
     expect(rows.size).toBe(0);
   });
 
-  // Without UIDPLUS the trashed row keeps its INBOX uid until sync corrects it, and in Trash that
-  // uid can belong to another message. Sync never corrects a row whose uid is taken that way.
-  it('without UIDPLUS, deleting the trashed row from Trash does not expunge the message holding its stale uid', async () => {
+  // Without UIDPLUS, and with the moved message not found in Trash afterwards, the row is dropped:
+  // its INBOX uid can belong to another message in Trash (#665).
+  it('without UIDPLUS, a delete whose new uid is not known drops the row and pulls Trash, rather than keep its source uid', async () => {
     reset({ trash: { 42: 'MAIL-OLD' }, withUidplus: false });
     expect(await del()).toBe(200);
-    const trashed = trashRow();
-    expect(trashed).toMatchObject({ uid: 42 });
+    expect(rows.size).toBe(0);
+    expect(server.Trash.get(900)).toBe('MAIL-A');
+    expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 'Trash');
+    expect(countDeltas('INBOX')).toEqual([-1]);
+    expect(countDeltas('Trash')).toEqual([]);
+  });
+
+  // Before that, such a row kept its INBOX uid, and in Trash that uid can belong to another
+  // message. Sync never corrects a row whose uid is taken that way, so rows left like this remain.
+  const staleTrashRow = (name, uid) => ({ id: randomUUID(), account_id: ACCOUNT_ID, uid, folder: 'Trash', is_read: true, ...synced(name) });
+
+  it('deleting a Trash row left on a stale uid does not expunge the message holding that uid', async () => {
+    reset({ trash: { 42: 'MAIL-OLD', 900: 'MAIL-A' } });
+    const trashed = staleTrashRow('MAIL-A', 42);
+    rows = new Map([[trashed.id, trashed]]);
 
     expect(await del(trashed.id)).toBe(409);
     expect(server.Trash.get(42)).toBe('MAIL-OLD');
@@ -245,19 +258,13 @@ describe('DELETE /api/mail/messages/:id', () => {
     ['neither carries one, and only their senders differ', 'MAIL-FIRST-SAME', 'MAIL-SECOND-SAME'],
     ['neither carries one nor a subject, and their senders differ', 'MAIL-FIRST-BLANK', 'MAIL-SECOND-BLANK'],
     ['neither carries one, and nothing else differs', 'MAIL-TWIN-1', 'MAIL-TWIN-2'],
-  ])('without UIDPLUS, two deletes that swap their stale uids do not make Delete forever expunge the other message: %s', async (_case, firstMail, secondMail) => {
-    reset({ withUidplus: false });
-    rows = new Map([
-      [MSG_ID, { id: MSG_ID, account_id: ACCOUNT_ID, uid: 11, folder: 'INBOX', is_read: true, ...synced(firstMail) }],
-      [OTHER_ID, { id: OTHER_ID, account_id: ACCOUNT_ID, uid: 10, folder: 'INBOX', is_read: true, ...synced(secondMail) }],
-    ]);
-    server.INBOX = new Map([[11, firstMail], [10, secondMail]]);
-    nextTrashUid = 10;
-    expect(await del(MSG_ID)).toBe(200);
-    expect(await del(OTHER_ID)).toBe(200);
-    // On the server Trash is {10: First, 11: Second}; the rows say {10: Second, 11: First}.
-    const first = [...rows.values()].find(r => r.folder === 'Trash' && r.uid === 11);
-    expect(first).toMatchObject(synced(firstMail));
+  ])('two Trash rows left on swapped stale uids do not make Delete forever expunge the other message: %s', async (_case, firstMail, secondMail) => {
+    // As two deletes without UIDPLUS left them: on the server Trash is {10: First, 11: Second};
+    // the rows say {10: Second, 11: First}.
+    reset({ trash: { 10: firstMail, 11: secondMail } });
+    const first = staleTrashRow(firstMail, 11);
+    const second = staleTrashRow(secondMail, 10);
+    rows = new Map([[first.id, first], [second.id, second]]);
 
     expect(await del(first.id)).toBe(409);
     expect([...server.Trash]).toEqual([[10, firstMail], [11, secondMail]]);
@@ -277,10 +284,9 @@ describe('DELETE /api/mail/messages/:id', () => {
   });
 
   it('bulk delete from Trash expunges only the rows whose server copy is their message', async () => {
-    reset({ trash: { 42: 'MAIL-OLD', 7: 'MAIL-Y', 8: 'MAIL-NOID' }, withUidplus: false });
-    expect(await del()).toBe(200);
-    const trashed = trashRow();
-    expect(trashed).toMatchObject({ uid: 42 });
+    reset({ trash: { 42: 'MAIL-OLD', 900: 'MAIL-A', 7: 'MAIL-Y', 8: 'MAIL-NOID' } });
+    const trashed = staleTrashRow('MAIL-A', 42);
+    rows = new Map([[trashed.id, trashed]]);
     rows.set(OTHER_ID, { id: OTHER_ID, account_id: ACCOUNT_ID, uid: 7, folder: 'Trash', is_read: true, ...synced('MAIL-Y') });
     const NOID_ID = randomUUID();
     rows.set(NOID_ID, { id: NOID_ID, account_id: ACCOUNT_ID, uid: 8, folder: 'Trash', is_read: true, ...synced('MAIL-NOID') });
@@ -297,12 +303,10 @@ describe('DELETE /api/mail/messages/:id', () => {
   });
 
   it('bulk delete from Trash leaves a row with no Message-ID whose stale uid holds a message that has one', async () => {
-    reset({ trash: { 42: 'MAIL-OLD' }, withUidplus: false });
-    Object.assign(rows.get(MSG_ID), synced('MAIL-NOID'));
-    server.INBOX.set(42, 'MAIL-NOID');
-    expect(await del()).toBe(200);
-    const trashed = trashRow();
-    expect(trashed).toMatchObject({ uid: 42, message_id: null });
+    reset({ trash: { 42: 'MAIL-OLD', 900: 'MAIL-NOID' } });
+    const trashed = staleTrashRow('MAIL-NOID', 42);
+    rows = new Map([[trashed.id, trashed]]);
+    expect(trashed).toMatchObject({ message_id: null });
 
     const res = await bulkDelete([trashed.id]);
     expect(res.status).toBe(200);
@@ -334,7 +338,6 @@ describe('DELETE /api/mail/messages/:id', () => {
   it('without UIDPLUS, a repeated DELETE does not expunge whatever holds the stale uid in Trash', async () => {
     reset({ trash: { 42: 'MAIL-OLD' }, withUidplus: false });
     expect(await del()).toBe(200);
-    expect(trashRow()).toMatchObject({ uid: 42 }); // stale until the next Trash sync
     expect(await del()).toBe(404);
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
     expect(server.Trash.get(42)).toBe('MAIL-OLD');

@@ -75,9 +75,10 @@ globalThis.fetch = async (url, opts = {}) => {
   let sent = null;
   try { sent = typeof opts.body === 'string' ? JSON.parse(opts.body) : null; } catch { /* not JSON */ }
   CALLS.push({ path, method: opts.method || 'GET', body: sent });
-  const [status, body] = Object.entries(ROUTES).find(([p]) => path.endsWith(p))?.[1]
+  // A route may carry response headers as a third element.
+  const [status, body, headers = {}] = Object.entries(ROUTES).find(([p]) => path.endsWith(p))?.[1]
     ?? [200, path.includes('/mail/messages?') ? { messages: SERVED, total: SERVED.length } : {}];
-  return { ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
+  return { ok: status < 400, status, headers: { get: name => headers[name] ?? (/content-type/i.test(name) ? 'application/json' : null) }, json: async () => body, text: async () => JSON.stringify(body) };
 };
 
 const React = await import('react');
@@ -1123,5 +1124,217 @@ describe('MessageList: manual read state over a read in flight', () => {
       hold.restore();
       await settle();
     }
+  });
+});
+
+const { bodyCache } = await import('../utils/bodyCache.js');
+
+// #677: a row's body loads while the mouse rests on it. A body request marked as a prefetch and
+// nothing else: prefetching must not mark the message read, nor ask for its remote images.
+describe('MessageList: a row\'s body loads while the mouse rests on it', () => {
+  const row = (id, extra = {}) => ({ ...MESSAGE, id, uid: id.length, message_id: `<${id}@example.com>`, subject: id, ...extra });
+  const PointerEvent = dom.window.PointerEvent || class extends dom.window.MouseEvent {
+    constructor(type, init = {}) { super(type, init); this.pointerType = init.pointerType; }
+  };
+  let x = 10;
+  const move = async (msgid, { pointerType = 'mouse', same = false } = {}) => {
+    const target = container.querySelector(`[data-msgid="${msgid}"]`).querySelector('[draggable]');
+    if (!same) x += 1;
+    await React.act(async () => {
+      target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerType, clientX: x, clientY: 20 }));
+    });
+  };
+  const list = () => container.querySelector('[data-msgid]').closest('[tabindex]');
+  const settle = ms => React.act(async () => { await new Promise(r => setTimeout(r, ms)); });
+  const bodyCalls = () => CALLS.filter(c => c.path.includes('/body')).map(c => `${c.method} ${c.path.replace(/^.*\/api/, '')}`);
+  // Every test uses an account of its own: the prefetch budget is kept per account.
+  let n = 0;
+  const mountRows = async (rows, acct = { ...ACCOUNT, id: `acct-hover-${++n}` }) => {
+    bodyCache.clear();
+    await mount({ rows: rows.map(r => ({ ...r, account_id: acct.id })), threadedView: false, accounts: [acct], accountId: acct.id });
+    useStore.setState({ folders: { [acct.id]: [{ path: 'INBOX', name: 'INBOX' }, { path: 'Drafts', name: 'Drafts', special_use: '\\Drafts' }] } });
+    CALLS = [];
+  };
+
+  test('fetches only the body, as a prefetch, marking nothing read and asking for no remote images', async () => {
+    await mountRows([MESSAGE, row('msg-hover')]);
+    await move('msg-hover');
+    await settle(450);
+    assert.deepEqual(CALLS.map(c => `${c.method} ${c.path.replace(/^.*\/api/, '')}`), ['GET /mail/messages/msg-hover/body?prefetch=1']);
+    assert.equal(useStore.getState().selectedMessageId, null, 'nothing opened');
+    assert.equal(useStore.getState().messages.find(m => m.id === 'msg-hover').is_read, false);
+  });
+
+  test('not for a touch, nor for a row the pointer only passed over', async () => {
+    await mountRows([MESSAGE, row('msg-hover')]);
+    await move('msg-hover', { pointerType: 'touch' });
+    await settle(450);
+    assert.deepEqual(bodyCalls(), [], 'a touch is not a hover');
+    await move('msg-hover');
+    await settle(100);
+    // React derives its leave from pointerout toward nothing.
+    await React.act(async () => { list().dispatchEvent(new PointerEvent('pointerout', { bubbles: true, pointerType: 'mouse', relatedTarget: null })); });
+    await settle(450);
+    assert.deepEqual(bodyCalls(), [], 'left before the delay');
+  });
+
+  test('scrolling rows under a parked pointer does not count as resting on them', async () => {
+    await mountRows([MESSAGE, row('msg-a'), row('msg-b')]);
+    await move('msg-a');
+    await settle(100);
+    await React.act(async () => { list().dispatchEvent(new dom.window.Event('scroll')); });
+    // What a browser reports as the list scrolls under the pointer: the same place, another row.
+    await move('msg-b', { same: true });
+    await settle(450);
+    assert.deepEqual(bodyCalls(), [], 'neither the row it was on nor the one scrolled under it');
+    await move('msg-b');
+    await settle(450);
+    assert.deepEqual(bodyCalls(), ['GET /mail/messages/msg-b/body?prefetch=1'], 'a real move counts again');
+  });
+
+  test('skips a draft', async () => {
+    await mountRows([MESSAGE, row('msg-draft', { folder: 'Drafts' })]);
+    await move('msg-draft');
+    await settle(450);
+    assert.deepEqual(bodyCalls(), []);
+  });
+
+  test('never for Yahoo or PurelyMail, which the server never prefetches for', async () => {
+    for (const host of ['imap.mail.yahoo.com', 'imap.purelymail.com']) {
+      await mountRows([MESSAGE, row('msg-a')], { ...ACCOUNT, id: `acct-hover-${++n}`, imap_host: host });
+      await move('msg-a');
+      await settle(450);
+      assert.deepEqual(bodyCalls(), [], host);
+    }
+  });
+
+  test('a server that never prefetches for the account stops it for the session', async () => {
+    ROUTES = { '/mail/messages/msg-a/body?prefetch=1': [204, null, { 'X-Prefetch': 'never' }] };
+    try {
+      await mountRows([MESSAGE, row('msg-a'), row('msg-b')]);
+      await move('msg-a');
+      await settle(450);
+      await move('msg-b');
+      await settle(450);
+      assert.deepEqual(bodyCalls(), ['GET /mail/messages/msg-a/body?prefetch=1']);
+    } finally {
+      ROUTES = {};
+    }
+  });
+
+  test('a throttle pause outlasts the list being mounted again', async () => {
+    const acct = { ...ACCOUNT, id: `acct-hover-${++n}` };
+    ROUTES = { '/mail/messages/msg-a/body?prefetch=1': [503, { error: 'busy', busy: true }] };
+    try {
+      await mountRows([MESSAGE, row('msg-a'), row('msg-b')], acct);
+      await move('msg-a');
+      await settle(450);
+      await mountRows([MESSAGE, row('msg-a'), row('msg-b')], acct); // unmounts and mounts afresh
+      await move('msg-b');
+      await settle(450);
+      assert.deepEqual(bodyCalls(), [], 'still paused');
+    } finally {
+      ROUTES = {};
+    }
+  });
+
+  test('the pauses are forgotten when the app locks or the user changes', async () => {
+    for (const reset of [{ isLocked: true }, { user: { id: `someone-${n}` } }]) {
+      const acct = { ...ACCOUNT, id: `acct-hover-${++n}` };
+      ROUTES = { '/mail/messages/msg-a/body?prefetch=1': [503, { error: 'busy', busy: true }] };
+      try {
+        await mountRows([MESSAGE, row('msg-a'), row('msg-b')], acct);
+        await move('msg-a');
+        await settle(450);
+        await React.act(async () => { useStore.setState(reset); useStore.setState({ isLocked: false }); });
+        CALLS = [];
+        await move('msg-b');
+        await settle(450);
+        assert.deepEqual(bodyCalls(), ['GET /mail/messages/msg-b/body?prefetch=1'], JSON.stringify(reset));
+      } finally {
+        ROUTES = {};
+      }
+    }
+  });
+
+  test('a 503 pauses prefetching for that account', async () => {
+    ROUTES = { '/mail/messages/msg-a/body?prefetch=1': [503, { error: 'busy', busy: true }] };
+    try {
+      await mountRows([MESSAGE, row('msg-a'), row('msg-b')]);
+      await move('msg-a');
+      await settle(450);
+      await move('msg-b');
+      await settle(450);
+      assert.deepEqual(bodyCalls(), ['GET /mail/messages/msg-a/body?prefetch=1']);
+    } finally {
+      ROUTES = {};
+    }
+  });
+});
+
+
+test('mobile sent swipe replies to external To using the delivery alias without a body fetch', async () => {
+  const width = window.innerWidth;
+  const openCompose = useStore.getState().openCompose;
+  let draft;
+  window.innerWidth = 375;
+  try {
+    const account = { ...ACCOUNT, email_address: 'owner@example.test', aliases: [{ id: 'delivered', email: 'alias@example.test' }] };
+    const to = [{ email: 'external@example.test' }];
+    const cc = [{ email: 'extra@example.test' }];
+    useStore.setState({ swipeActions: { left: 'reply', right: 'replyAll' }, openCompose: p => { draft = p; } });
+    for (const threadedView of [false, true]) {
+      const target = threadedView ? [{ email: 'reply@example.test' }] : to;
+      await mount({ rows: [{ ...MESSAGE, from_email: account.email_address, reply_from_email: threadedView ? 'sender@example.test' : account.email_address, reply_from_name: 'Latest', reply_to: threadedView ? target : [{ email: account.email_address }], to_addresses: threadedView ? [{ email: account.email_address }] : to, cc_addresses: cc, delivery_addresses: ['alias@example.test'], thread_id: 'synthetic-thread', message_count: threadedView ? 2 : 1 }], accounts: [account], threadedView });
+      for (const replyAll of [false, true]) {
+        draft = null;
+        CALLS = [];
+        const row = container.querySelector('[data-msgid="msg-1"] .no-callout');
+        assert.ok(row);
+        await React.act(async () => {
+          for (const [type, x] of [['touchstart', 200], ['touchmove', replyAll ? 300 : 100], ['touchend', 100]]) {
+            const event = new window.Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperty(event, 'touches', { value: [{ clientX: x, clientY: 100 }] });
+            row.dispatchEvent(event);
+          }
+        });
+        assert.ok(draft, 'swipe opens compose');
+        assert.deepEqual(draft.to, target);
+        assert.deepEqual(draft.cc, replyAll ? cc : []);
+        assert.deepEqual(draft.originalFrom, target);
+        assert.deepEqual(draft.allRecipients, cc);
+        assert.equal(draft.aliasId, 'delivered');
+        assert.equal(draft.threadId, 'synthetic-thread');
+        assert.equal(CALLS.some(c => c.path.includes('/body')), false);
+      }
+    }
+  } finally {
+    window.innerWidth = width;
+    await React.act(async () => { root.unmount(); root = null; useStore.setState({ composing: false, composeData: null, openCompose, swipeActions: { left: 'archive', right: 'markRead' } }); });
+  }
+});
+
+// #701: a delete reaches the server only when its undo window closes, so a count the server
+// reports in the meantime still includes the message. It must not put it back on the badge.
+describe('MessageList — the badge after deleting the last unread message (#701)', () => {
+  const counts = (n, revision) => ({ byAccount: { 'acct-1': n }, snapshots: { 'acct-1': { revision, known: true, stale: false, observedAt: new Date().toISOString() } } });
+
+  test('a count observed before the delete was sent does not bring the badge back to 1', async (t) => {
+    const row = { ...MESSAGE, id: 'last-unread-701', uid: 701, message_id: '<last-701@example.com>' };
+    await mount({ rows: [row], threadedView: false });
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(async () => {
+      // Cancel the delete still waiting out its undo window rather than send it.
+      useStore.getState().notifications.find(n => typeof n.onUndo === 'function')?.onUndo();
+      await React.act(async () => { useStore.setState({ notifications: [], selectedMessageId: null }); });
+    });
+    useStore.getState().setUnreadCounts(counts(1, '7010'));
+    await React.act(async () => { useStore.getState().setSelectedMessage(row.id); });
+    await React.act(async () => { shortcutBus.emit('delete'); await new Promise(r => setTimeout(r, 30)); });
+    assert.equal(useStore.getState().unreadCounts.byAccount['acct-1'], 0);
+    // Past the settle floor of a change sent at the keypress, before this one is even sent.
+    t.mock.timers.tick(8000);
+    useStore.getState().setUnreadCounts(counts(1, '7011'));
+    assert.equal(useStore.getState().unreadCounts.byAccount['acct-1'], 0);
   });
 });
