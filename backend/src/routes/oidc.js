@@ -12,10 +12,13 @@ import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { logAuthEvent } from '../services/authEvents.js';
 import { aiEnabledForNewUser } from '../services/aiNewUsers.js';
 import { recordOidcConfirmation } from '../services/oidcConfirmation.js';
+import { revokedTokensNote } from '../services/apiTokens.js';
 
 // In-memory OIDC discovery cache keyed by issuerUrl
 const discoveryCache = new Map();
 const DISCOVERY_TTL_MS = 5 * 60 * 1000;
+// How far before a reauth flow began its id_token's auth_time may lie: clock skew, nothing more.
+const REAUTH_CLOCK_SKEW_MS = 60 * 1000;
 
 // Fetch that skips TLS certificate verification — only used when allow_insecure is set.
 function makeInsecureFetch(signal) {
@@ -163,12 +166,11 @@ async function maybeBackfillDisplayName(client, userId, payload) {
 // Record how the user signed in so logout can offer RP-initiated (end-session) logout.
 // The raw id_token is kept for use as id_token_hint; the provider id lets logout look up
 // its issuer and the rp_initiated_logout toggle. Both are cleared when the session is
-// destroyed at logout. The sign-in also confirms the user for creating an API token for a
-// few minutes, as the reauth action below does.
+// destroyed at logout. A sign-in does not confirm the user for creating an API token: only the
+// reauth action below does, which makes the provider ask for credentials again.
 function rememberOidcSession(req, providerId, idToken) {
   req.session.oidcProviderId = providerId;
   if (idToken) req.session.oidcIdToken = idToken;
-  recordOidcConfirmation(req.session, providerId);
 }
 
 // Build the OIDC RP-initiated logout (end-session) URL for a session that signed in via
@@ -236,14 +238,17 @@ oidcApiRouter.get('/identities', requireAuth, async (req, res) => {
   }
 });
 
-// Unlink an identity from the current user
+// Unlink an identity from the current user. The API tokens confirmed through its provider go
+// with the user's last identity there (#617): with none left, that provider no longer vouches
+// for them.
 oidcApiRouter.delete('/identities/:id', requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
     // Prevent removing the last login method when no password is set
-    const userResult = await query('SELECT password_hash FROM users WHERE id = $1', [req.session.userId]);
+    const userResult = await client.query('SELECT password_hash FROM users WHERE id = $1', [req.session.userId]);
     const hasPassword = !!userResult.rows[0]?.password_hash;
     if (!hasPassword) {
-      const countResult = await query(
+      const countResult = await client.query(
         'SELECT COUNT(*) AS count FROM user_identities WHERE user_id = $1',
         [req.session.userId]
       );
@@ -251,13 +256,33 @@ oidcApiRouter.delete('/identities/:id', requireAuth, async (req, res) => {
         return res.status(400).json({ error: 'Cannot unlink your only login method. Set a password first.' });
       }
     }
-    await query(
-      'DELETE FROM user_identities WHERE id = $1 AND user_id = $2',
+    await client.query('BEGIN');
+    const { rows: [unlinked] } = await client.query(
+      'DELETE FROM user_identities WHERE id = $1 AND user_id = $2 RETURNING provider_id',
       [req.params.id, req.session.userId]
     );
+    let revoked = 0;
+    if (unlinked) {
+      const { rows: [{ count }] } = await client.query(
+        'SELECT COUNT(*)::int AS count FROM user_identities WHERE user_id = $1 AND provider_id = $2',
+        [req.session.userId, unlinked.provider_id]
+      );
+      if (count === 0) {
+        ({ rowCount: revoked } = await client.query(
+          'DELETE FROM api_tokens WHERE user_id = $1 AND oidc_provider_id = $2',
+          [req.session.userId, unlinked.provider_id]
+        ));
+      }
+    }
+    await client.query('COMMIT');
+    if (revoked) console.log(`[oidc] user ${req.session.userId} unlinked their last identity at provider ${unlinked.provider_id}${revokedTokensNote(revoked)}`);
     res.json({ ok: true });
-  } catch {
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Unlink identity failed:', err.message);
     res.status(500).json({ error: 'Failed to unlink identity' });
+  } finally {
+    client.release();
   }
 });
 
@@ -316,6 +341,8 @@ oidcBrowserRouter.get('/:slug/start', async (req, res) => {
       action,
       linkUserId: isLink ? req.session.userId : undefined,
       reauthUserId: action === 'reauth' ? req.session.userId : undefined,
+      // The callback checks the id_token's auth_time against this.
+      startedAt: action === 'reauth' ? Date.now() : undefined,
       expiresAt: Date.now() + 10 * 60 * 1000,
     };
 
@@ -329,6 +356,13 @@ oidcBrowserRouter.get('/:slug/start', async (req, res) => {
       code_challenge: challenge,
       code_challenge_method: 'S256',
     });
+    // A reauth has to be a sign-in just made, not a session the provider still holds: prompt=login
+    // and max_age=0 make it ask for credentials again, and max_age also makes auth_time required
+    // in the id_token, which the callback checks, since not every provider honours either.
+    if (action === 'reauth') {
+      params.set('prompt', 'login');
+      params.set('max_age', '0');
+    }
 
     // Save session before redirecting so the PKCE verifier and state nonce are
     // committed to the store before the provider redirects back with the code.
@@ -486,6 +520,13 @@ oidcBrowserRouter.get('/:slug/callback', async (req, res) => {
       if (!pending.reauthUserId || identity?.user_id !== pending.reauthUserId
           || req.session.userId !== pending.reauthUserId) {
         return oidcError(res, 'reauth', 'That sign-in is not linked to your account');
+      }
+      // The provider must have asked for credentials again: auth_time has to be there (max_age was
+      // requested) and from after this flow began. A session the provider kept would carry an
+      // older one, or none.
+      const authTime = Number.isFinite(payload.auth_time) ? payload.auth_time * 1000 : null;
+      if (!Number.isFinite(pending.startedAt) || authTime === null || authTime < pending.startedAt - REAUTH_CLOCK_SKEW_MS) {
+        return oidcError(res, 'reauth', 'Sign in again at your provider to confirm');
       }
       await client.query(
         'UPDATE user_identities SET last_used_at = NOW() WHERE issuer = $1 AND subject = $2',
