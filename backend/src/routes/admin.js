@@ -766,7 +766,7 @@ router.patch('/oidc/:id', async (req, res) => {
   const { id } = req.params;
   const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim } = req.body;
 
-  const existingResult = await query('SELECT allow_insecure FROM oidc_providers WHERE id = $1', [id]);
+  const existingResult = await query('SELECT allow_insecure, issuer_url, client_id FROM oidc_providers WHERE id = $1', [id]);
   if (!existingResult.rows.length) return res.status(404).json({ error: 'Provider not found' });
   const existing = existingResult.rows[0];
 
@@ -809,8 +809,11 @@ router.patch('/oidc/:id', async (req, res) => {
     ? encrypt(client_secret)
     : undefined;
   try {
-    // A provider turned off no longer vouches for anyone, so the API tokens confirmed through it go
-    // with it (#617). Deleting the provider deletes them by the foreign key.
+    // A provider turned off, or pointed at another issuer or client, no longer vouches for the
+    // users it did, so the API tokens confirmed through it go with the change (#617). Deleting the
+    // provider deletes them by the foreign key.
+    const identityChanged = (!!issuer_url?.trim() && issuer_url.trim() !== existing.issuer_url)
+      || (!!client_id?.trim() && client_id.trim() !== existing.client_id);
     let revoked = 0;
     const result = await withTransaction(async client => {
       const updated = await client.query(
@@ -852,11 +855,11 @@ router.patch('/oidc/:id', async (req, res) => {
           loginMatchClaimParam,
         ]
       );
-      if (updated.rows.length && enabled === false) revoked = await revokeProviderTokens(client, id);
+      if (updated.rows.length && (enabled === false || identityChanged)) revoked = await revokeProviderTokens(client, id);
       return updated;
     });
     if (!result.rows.length) return res.status(404).json({ error: 'Provider not found' });
-    if (revoked) console.log(`[admin] ${req.session.username} turned off SSO provider ${result.rows[0].slug}${revokedTokensNote(revoked)}`);
+    if (revoked) console.log(`[admin] ${req.session.username} ${enabled === false ? 'turned off' : 'changed the issuer or client of'} SSO provider ${result.rows[0].slug}${revokedTokensNote(revoked)}`);
     res.json({ provider: result.rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'A provider with this slug already exists' });
