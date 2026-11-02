@@ -186,7 +186,7 @@ describe('reply', () => {
       draft.quotedBody,
       `\n\n---\nOn ${DATE_STR}, Sam Sender <sender@out.example> wrote:\n> Original & body\n> second line`,
     );
-    assert.match(draft.quotedBodyHtml, /On .*, Sam Sender &lt;sender@out\.example&gt; wrote:|On .*, Sam Sender <sender@out\.example> wrote:/);
+    assert.match(draft.quotedBodyHtml, /On .*, Sam Sender &lt;sender@out\.example&gt; wrote:/);
     assert.match(draft.quotedBodyHtml, /<p>Original &amp; body<\/p>/);
     assert.equal(draft.body, '', 'the cursor starts in an empty draft above the quote');
   });
