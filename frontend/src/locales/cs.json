@@ -396,6 +396,7 @@
     "noSearchResults": "Nebyly nalezeny žádné výsledky",
     "searching": "Hledání…",
     "noSearchResultsDesc": "Žádné výsledky pro {{query}}",
+    "searchScopeNote": "Hledání pouze ve složce „{{folder}}“",
     "searchFailed": "Hledání se nezdařilo",
     "clearSearch": "Vymazat hledání",
     "searchHelp": {

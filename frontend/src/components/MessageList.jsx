@@ -154,7 +154,7 @@ function MailboxList() {
     folders, favoriteFolders, recentFolders, addFavoriteFolder, removeFavoriteFolder, setSelectedAccount,
     categorizationEnabled, categoryCounts, setCategoryCounts, adjustCategoryCount,
     markReadBehavior, markReadDelay,
-    searchAllFolders,
+    searchAllFolders, setSearchAllFolders,
     activeGtdTab, setActiveGtdTab, gtdSections, enabledPlugins,
     openMessageWindow,
   } = useStore();
@@ -3617,6 +3617,29 @@ function MailboxList() {
                 <div className="skeleton-line" style={{ width: 36, height: 11, flexShrink: 0, borderRadius: 4 }} />
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Scope reminder while a folder-scoped search is active — recent matches
+            often live in other folders, which otherwise reads as broken search. */}
+        {searchQuery.trim() && searchFolder && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            padding: '6px 14px', fontSize: 12, color: 'var(--text-tertiary)',
+            borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
+          }}>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {t('messageList.searchScopeNote', { folder: searchFolder })}
+            </span>
+            <button
+              onClick={() => setSearchAllFolders(true)}
+              style={{
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                color: 'var(--accent)', fontSize: 12, flexShrink: 0,
+              }}
+            >
+              {t('sidebar.searchAllFolders')}
+            </button>
           </div>
         )}
 
