@@ -20,6 +20,7 @@ import { TableRow } from '@tiptap/extension-table-row';
 import { TableHeader } from '@tiptap/extension-table-header';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
+import { editorTextForAi, sharedTextStyle, aiTextToDoc } from '../utils/aiComposeText.js';
 import { PasteWithoutPageColors } from '../utils/editorPaste.js';
 import { pasteWithoutPageColors } from '../utils/contentEditablePaste.js';
 import { copyToClipboard } from '../utils/clipboard.js';
@@ -34,7 +35,6 @@ import { aiReplyAvailable, loadReplyConversation, buildReplyPrompt, MAX_INSTRUCT
 import { frameGeometry } from '../utils/frameGeometry.js';
 import { AI_MESSAGE_MAX_CHARS } from '../aiActions.js';
 import { stripTags } from '../utils/stripTags.js';
-import { aiTextToHtml } from '../utils/aiText.js';
 import { browserTimeZone, checkSendAt, formatSendAt } from '../utils/scheduleTimes.js';
 import {
   DUE_MARGIN_MS, SCHEDULE_UNDO_MS, UNDO_FOR, createEditHold, isScheduledEdit, needsConfirmation, newClientKey, once,
@@ -914,11 +914,11 @@ export default function ComposeModal() {
     const controller = new AbortController();
     aiAbortRef.current = controller;
 
-    // One newline per paragraph, as the composer draws them: getText's default separator is a
-    // blank line, so a single Enter reached the model as one and came back from Apply as a new
-    // empty paragraph. This way a blank line from the model is one the user typed.
+    // One line per paragraph, as the composer draws them, and an empty line only for an empty
+    // paragraph: getText's default separator is a blank line, so a single Enter reached the model
+    // as one and came back from Apply as a new empty paragraph. See utils/aiComposeText.js.
     const currentText = plaintextEmail ? body
-      : (htmlMode ? stripTags(htmlSource) : (editor?.getText({ blockSeparator: '\n' }) ?? ''));
+      : (htmlMode ? stripTags(htmlSource) : (editor ? editorTextForAi(editor.state.doc) : ''));
 
     const toStr = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])].join(', ');
     const PROMPTS = {
@@ -1035,7 +1035,10 @@ export default function ComposeModal() {
 
   const applyAiText = () => {
     if (!aiPanel?.text || !editor) return;
-    editor.commands.setContent(aiTextToHtml(aiPanel.text));
+    // Line for line, as a document rather than HTML, so blank lines, the font and text such as
+    // "<jane@example.com>" all survive. See utils/aiComposeText.js.
+    const { doc, storedMarks } = editor.state;
+    editor.commands.setContent(aiTextToDoc(aiPanel.text, sharedTextStyle(doc, storedMarks)));
     setAiPanel(null);
   };
 
