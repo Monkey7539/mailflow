@@ -34,7 +34,9 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('thread route in_trash 
         subject text, from_name text, from_email text, to_addresses jsonb, cc_addresses jsonb,
         reply_to jsonb, snippet text, is_read boolean DEFAULT false, is_starred boolean DEFAULT false,
         has_attachments boolean DEFAULT false, category text, list_unsubscribe text,
-        list_unsubscribe_post text, delivery_addresses jsonb, flags jsonb, unsubscribed_at timestamptz)`);
+        list_unsubscribe_post text, delivery_addresses jsonb, flags jsonb, unsubscribed_at timestamptz);
+      CREATE TEMP TABLE snoozed_messages (account_id uuid, message_id_header text,
+        original_folder text, snoozed_folder text, snooze_until timestamptz)`);
     query.mockImplementation((sql, values) => database.query(sql, values));
     const app = express();
     app.use('/api/mail', mailRoutes);
@@ -46,7 +48,7 @@ describe.skipIf(!process.env.MAILFLOW_TEST_DATABASE_URL)('thread route in_trash 
     await database?.end();
   });
   beforeEach(async () => {
-    await database.query('TRUNCATE messages, folders, email_accounts');
+    await database.query('TRUNCATE messages, folders, email_accounts, snoozed_messages');
   });
 
   // An account with these folders, `name` the last segment as syncFolders stores it, and a copy of
