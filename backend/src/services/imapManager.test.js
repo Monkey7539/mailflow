@@ -21,6 +21,7 @@ import { clearRefreshFailure, noteFreshToken, noteRefreshFailure, refreshFailure
 import { refreshMicrosoftToken } from '../routes/oauth.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
+import { searchCompiler } from 'imapflow/lib/search-compiler.js';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -171,6 +172,41 @@ describe('live reply draft lookup', () => {
     await expect(manager._ingestDraftUidWithClient({ id: 'account-a' }, 'Drafts', 1, client))
       .rejects.toThrow('Incomplete reply draft');
     expect(release).toHaveBeenCalledOnce();
+  });
+});
+
+// The Sent copy a server saves itself is found by this search, and the Bcc is written only
+// once it is. The fake server runs the criteria through imapflow's own compiler and matches
+// HEADER keys as RFC 3501 6.4.4 does, so a query imapflow compiles into something no server
+// matches fails here.
+describe('findUidByMessageId', () => {
+  it('finds the Sent copy by its Message-ID', async () => {
+    const account = { ...baseAccount, id: 'sent-copy-search' };
+    const sentFolder = [
+      { uid: 41, headers: { 'message-id': '<older@example.test>' } },
+      { uid: 42, headers: { 'message-id': '<3f9a1c@example.test>' } },
+      { uid: 43, headers: { 'message-id': '<newer@example.test>' } },
+    ];
+    const client = Object.assign(new EventEmitter(), {
+      connect: vi.fn().mockResolvedValue(), close: vi.fn(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      // Without { uid: true } a server answers with sequence numbers.
+      search: vi.fn(async (criteria, options) => {
+        const words = searchCompiler(client, criteria).map(a => a.value);
+        const keys = [];
+        for (let i = 0; i < words.length; i += 3) {
+          if (words[i] !== 'HEADER') throw new Error(`unexpected search key ${words[i]}`);
+          keys.push([words[i + 1].toLowerCase(), words[i + 2].toLowerCase()]);
+        }
+        return sentFolder.flatMap((m, i) => keys.every(([name, text]) => m.headers[name]?.toLowerCase().includes(text))
+          ? [options?.uid ? m.uid : i + 1] : []);
+      }) });
+    ImapFlow.mockImplementation(function () { return client; });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    const manager = Object.create(ImapManager.prototype);
+    expect(await manager.findUidByMessageId(account, 'Sent', '<3f9a1c@example.test>')).toBe(42);
+    expect(client.getMailboxLock).toHaveBeenCalledWith('Sent');
   });
 });
 
@@ -1510,6 +1546,41 @@ describe('_syncSpamFolder — periodic spam poll guards', () => {
   });
 });
 
+// Shaped like imapflow's parse of "Forward as attachment" (Outlook, Thunderbird, Gmail) of an
+// email that has files of its own: the message/rfc822 part keeps its own disposition and also
+// carries the enclosed email's structure as childNodes, whose root reuses the wrapper's part
+// number. The enclosed email has an attached PDF and a named text file sent inline.
+const forwardedAsAttachment = (dispositionParameters) => ({
+  type: 'multipart/mixed',
+  childNodes: [
+    { part: '1', type: 'text/plain', encoding: '7bit', parameters: { charset: 'utf-8' } },
+    {
+      part: '2', type: 'message/rfc822', encoding: '7bit', size: 2000,
+      disposition: 'attachment', dispositionParameters,
+      childNodes: [{
+        part: '2', type: 'multipart/mixed',
+        childNodes: [
+          {
+            part: '2.1', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.1.2', type: 'text/html', encoding: '7bit' },
+            ],
+          },
+          {
+            part: '2.2', type: 'application/pdf', encoding: 'base64', size: 900,
+            disposition: 'attachment', dispositionParameters: { filename: 'invoice.pdf' },
+          },
+          {
+            part: '2.3', type: 'text/plain', encoding: '7bit', size: 300,
+            disposition: 'inline', dispositionParameters: { filename: 'notes.txt' },
+          },
+        ],
+      }],
+    },
+  ],
+});
+
 // A plain-text message with a photo that is disposed inline and has a Content-ID:
 // there is no HTML body to reference it.
 const textWithInlinePhoto = {
@@ -1656,6 +1727,102 @@ describe('walkStructure attachment classification', () => {
     });
     expect(results.textParts.map(p => p.type)).toEqual(['text/plain', 'text/html']);
     expect(results.attachments).toHaveLength(0);
+  });
+
+  it('lists an attached email as one .eml that records the files inside it, not as body text', () => {
+    // The named text file sent inline is one of the enclosed email's files (walkStructure's
+    // post-pass finds it next to the unnamed body), so it is recorded on the .eml like the PDF.
+    const results = walk(forwardedAsAttachment({ filename: 'fwd.eml' }));
+    expect(results.textParts.map(p => p.part)).toEqual(['1']);
+    expect(results.attachments).toEqual([{
+      part: '2', filename: 'fwd.eml', type: 'message/rfc822', encoding: '7bit', size: 2000, disposition: 'attachment',
+      contains: [{ filename: 'invoice.pdf', type: 'application/pdf' }, { filename: 'notes.txt', type: 'text/plain' }],
+    }]);
+  });
+
+  it('names an attached email message.eml when it has neither a filename nor a subject', () => {
+    // Outlook can attach a message with Content-Disposition: attachment and no filename. With a
+    // subject it is named after that (see "walkStructure attached messages"); this one has no
+    // envelope to name it from.
+    const results = walk(forwardedAsAttachment({ 'creation-date': 'Tue, 01 Sep 2026 10:00:00 GMT' }));
+    expect(results.attachments.map(a => a.filename)).toEqual(['message.eml']);
+  });
+
+  it('treats a named message/rfc822 without a disposition as an attached email', () => {
+    const results = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 2000, parameters: { name: 'fwd.eml' },
+          childNodes: [{
+            part: '2', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.2', type: 'text/html', encoding: '7bit' },
+            ],
+          }],
+        },
+      ],
+    });
+    expect(results.textParts.map(p => p.part)).toEqual(['1']);
+    expect(results.attachments.map(a => [a.part, a.filename])).toEqual([['2', 'fwd.eml']]);
+  });
+
+  it('lists a single-part attached email once, with its only part recorded on it', () => {
+    // imapflow numbers a single-part email's body like its wrapper, and fetching that part
+    // number returns the whole .eml.
+    const results = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 5000,
+          disposition: 'attachment', dispositionParameters: { filename: 'scan.eml' },
+          childNodes: [{ part: '2', type: 'application/pdf', encoding: 'base64', parameters: { name: 'scan.pdf' } }],
+        },
+      ],
+    });
+    expect(results.attachments).toEqual([{
+      part: '2', filename: 'scan.eml', type: 'message/rfc822', encoding: '7bit', size: 5000, disposition: 'attachment',
+      contains: [{ filename: 'scan.pdf', type: 'application/pdf' }],
+    }]);
+  });
+
+  it('still reads a wrapped post, an unnamed inline or undisposed message/rfc822, as the body', () => {
+    // A mailing list's DMARC "wrap message" sends the post as an unnamed message/rfc822, as
+    // the whole message or after a note from the list, disposed inline or not at all.
+    const inline = walk({
+      type: 'message/rfc822', encoding: '7bit', size: 900, disposition: 'inline',
+      childNodes: [{
+        type: 'multipart/alternative',
+        childNodes: [
+          { part: '1', type: 'text/plain', encoding: '7bit' },
+          { part: '2', type: 'text/html', encoding: '7bit' },
+        ],
+      }],
+    });
+    expect(inline.textParts.map(p => p.part)).toEqual(['1', '2']);
+    expect(inline.attachments).toHaveLength(0);
+
+    const undisposed = walk({
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', encoding: '7bit' },
+        {
+          part: '2', type: 'message/rfc822', encoding: '7bit', size: 900,
+          childNodes: [{
+            part: '2', type: 'multipart/alternative',
+            childNodes: [
+              { part: '2.1', type: 'text/plain', encoding: '7bit' },
+              { part: '2.2', type: 'text/html', encoding: '7bit' },
+            ],
+          }],
+        },
+      ],
+    });
+    expect(undisposed.textParts.map(p => p.part)).toEqual(['1', '2.1', '2.2']);
+    expect(undisposed.attachments).toHaveLength(0);
   });
 });
 
@@ -2637,6 +2804,55 @@ describe('inline images the body never shows are listed as attachments', () => {
   });
 });
 
+// An email forwarded as an attachment, through the real fetchMessageBody and fetchAttachment:
+// one .eml in the list, the note it came with as the body, and the whole enclosed message on
+// download. The walkStructure tests above cover the listing on its own.
+describe('an email attached to another is fetched as one .eml', () => {
+  let seq = 800;
+  function serve(structure, parts) {
+    const account = { id: `acct-fwd-${++seq}`, user_id: 'u1', imap_host: 'imap.example.test', email_address: 'p@example.test', auth_user: 'p', auth_pass: 'enc' };
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.getMailboxLock = vi.fn(async () => ({ release() {} }));
+      client.fetch = vi.fn(async function* (range, fetchQuery) {
+        yield {
+          uid: 42,
+          bodyStructure: fetchQuery.bodyStructure ? structure : undefined,
+          bodyParts: fetchQuery.bodyParts
+            ? new Map(fetchQuery.bodyParts.filter(p => p in parts).map(p => [p, Buffer.from(parts[p])]))
+            : undefined,
+        };
+      });
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    return { mgr: new ImapManager({ clients: new Set() }), account };
+  }
+
+  it('lists an attached email as one .eml and keeps the note it came with as the body', async () => {
+    const { mgr, account } = serve(forwardedAsAttachment({ filename: 'fwd.eml' }), {
+      '1': 'see attached', '2.1.1': 'newsletter', '2.1.2': '<h1>Newsletter</h1>',
+    });
+    const body = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(body.html).toBeNull();
+    expect(body.text).toBe('see attached');
+    expect(body.attachments.map(a => a.filename)).toEqual(['fwd.eml']);
+    expect(body.attachments[0].contains.map(f => f.filename)).toEqual(['invoice.pdf', 'notes.txt']);
+  });
+
+  it('downloads an attached email as the whole enclosed message', async () => {
+    const eml = 'From: news@example.com\r\nSubject: Newsletter\r\nMIME-Version: 1.0\r\n\r\nhello\r\n';
+    const { mgr, account } = serve(forwardedAsAttachment({ filename: 'fwd.eml' }), { '2': eml });
+    const buf = await mgr.fetchAttachment(account, 42, 'INBOX', '2');
+    expect(buf.toString()).toBe(eml);
+  });
+});
+
 // ── _shouldAutoBackfillOnConnect — auto-backfill gate (#354) ──────────────────
 // The gate itself was always correct; #354 was the connect flow evaluating it
 // AFTER the initial INBOX sync inserted rows. These lock the gate contract:
@@ -2784,6 +3000,83 @@ describe('connectAccount when the host is refused', () => {
     // Not "Already connecting": the second attempt reaches the host check again.
     expect(await mgr.connectAccount(acct)).toBe(false);
     expect(resolveForConnection).toHaveBeenCalledTimes(2);
+  });
+});
+
+// A throw from connectAccount's setup (the connection policy's DB lookup, or a host the policy
+// rejects) used to escape before the try whose finally releases connectingAccounts. The account
+// then showed no error, and every later attempt (health check, Reconnect, a settings change) was
+// skipped as "Already connecting" until the process restarted.
+describe('connectAccount releases its lock when setup throws', () => {
+  const blockedHost = 'Host resolves to a private or reserved IP address';
+  const dbDown = 'timeout exceeded when trying to connect';
+  const acct = { id: 'acct-lock-1', user_id: 1, imap_host: 'mail.example.test', imap_port: 993, imap_tls: true, auth_user: 'u', auth_pass: 'enc' };
+  const manager = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const mgr = new ImapManager(null);
+    clearInterval(mgr._healthCheckTimer);
+    clearInterval(mgr._snippetSchedulerTimer);
+    mgr.disconnectAccount = vi.fn(() => Promise.resolve());
+    mgr.broadcast = vi.fn();
+    return mgr;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockReset();
+    query.mockResolvedValue({ rows: [] });
+  });
+  // vi.clearAllMocks() keeps queued *Once values. Drop them so a regression that skips the retry
+  // fails here, not in whichever later test would consume the leftovers.
+  afterEach(() => {
+    vi.restoreAllMocks();
+    getConnectionPolicy.mockReset();
+    resolveForConnection.mockReset();
+  });
+
+  it.each([
+    ['the connection policy rejects the host', blockedHost, resolveForConnection, () => {
+      getConnectionPolicy.mockResolvedValueOnce({ allowPrivateHosts: false, allowInsecureTls: false });
+      resolveForConnection.mockRejectedValueOnce(new Error(blockedHost));
+    }],
+    ['the policy lookup fails', dbDown, getConnectionPolicy, () => {
+      getConnectionPolicy.mockRejectedValueOnce(new Error(dbDown));
+    }],
+  ])('%s', async (_label, detail, step, fail) => {
+    const mgr = manager();
+
+    fail();
+    const result = await mgr.connectAccount(acct).catch(err => err);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
+    expect(result).toBe(false);
+    expect(ImapFlow).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET sync_error = $1, sync_error_code = $3 WHERE id = $2', [detail, acct.id, 'connection']);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_error', accountId: acct.id, error: detail, code: 'connection' }, acct.user_id);
+
+    // The next health-check tick or Reconnect click tries again rather than being skipped.
+    fail();
+    await expect(mgr.connectAccount(acct)).resolves.toBe(false);
+    expect(step).toHaveBeenCalledTimes(2);
+  });
+
+  // Taking the lock only after setup would also stop the leak, but would let a second caller start
+  // a parallel connect while the first is still resolving the host.
+  it('still holds it while setup is pending, so a concurrent call is skipped', async () => {
+    const mgr = manager();
+    let failPolicy;
+    getConnectionPolicy.mockReturnValueOnce(new Promise((_, reject) => { failPolicy = reject; }));
+
+    const first = mgr.connectAccount(acct).catch(err => err);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(getConnectionPolicy).toHaveBeenCalledTimes(1);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(true);
+    await expect(mgr.connectAccount(acct)).resolves.toBe(false);
+    expect(getConnectionPolicy).toHaveBeenCalledTimes(1);
+
+    failPolicy(new Error(dbDown));
+    expect(await first).toBe(false);
+    expect(mgr.connectingAccounts.has(acct.id)).toBe(false);
   });
 });
 

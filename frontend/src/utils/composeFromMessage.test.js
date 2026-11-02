@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import createDOMPurify from 'dompurify';
 import * as compose from './composeFromMessage.js';
 const { openReplyFromMessage, openForwardFromMessage } = compose;
 
@@ -484,6 +486,118 @@ describe('quote headers escape what the sender wrote', () => {
     assert.match(html, /Subject: Hi &lt;b&gt;there&lt;\/b&gt;/);
     assert.match(html, /To: Bo &lt;i&gt;/);
     assert.doesNotMatch(html, /<img|<b>|<i>/);
+  });
+});
+
+describe('quoted html header as the composer shows and sends it', () => {
+  const { window } = new JSDOM('');
+  const DOMPurify = createDOMPurify(window);
+  const date = '2026-07-13T10:00:00Z';
+  const when = new Date(date).toLocaleString();
+
+  // ComposeModal loads quotedBodyHtml through this sanitize call and sends what it rendered.
+  // It makes the call through sanitizeEmailForApp, which adds only a rule for image URLs.
+  const headerOf = (html) => {
+    const div = window.document.createElement('div');
+    div.innerHTML = DOMPurify.sanitize(html, { FORBID_TAGS: ['style'] });
+    return div.querySelector('p');
+  };
+  const linesOf = (header) => [...header.childNodes].filter(n => n.nodeName !== 'BR').map(n => n.textContent);
+
+  it('keeps the sender address in a reply', async () => {
+    const h = harness({ text: 'hi', html: '<p>Hi</p>' });
+    await openReplyFromMessage(
+      { account_id: 'a', date, from_name: 'Jane Doe', from_email: 'jane@example.com' },
+      { accounts: [], openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.deepEqual(linesOf(headerOf(h.payload().quotedBodyHtml)), [`On ${when}, Jane Doe <jane@example.com> wrote:`]);
+  });
+
+  it('keeps every address and the subject in a forward', async () => {
+    const h = harness({ text: 'body', html: '<p>body</p>' });
+    await openForwardFromMessage(
+      {
+        id: 'm1', date, from_name: 'Ann', from_email: 'ann@example.com', subject: '<Action Required> invoice',
+        to_addresses: [{ name: 'Bob', email: 'bob@example.com' }, { name: 'Carl', email: 'carl@example.com' }],
+        cc_addresses: [{ name: 'Dee', email: 'dee@example.com' }],
+      },
+      { openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.deepEqual(linesOf(headerOf(h.payload().quotedBodyHtml)), [
+      '---------- Forwarded message ----------',
+      'From: Ann <ann@example.com>',
+      `Date: ${when}`,
+      'Subject: <Action Required> invoice',
+      'To: Bob <bob@example.com>, Carl <carl@example.com>',
+      'Cc: Dee <dee@example.com>',
+    ]);
+  });
+
+  it('shows markup in the sender name as text, not as an image', async () => {
+    const name = 'Alice<img src="https://tracker.example/px">';
+    const h = harness({ text: 'hi', html: '<p>Hi</p>' });
+    await openReplyFromMessage(
+      { account_id: 'a', date, from_name: name, from_email: 'alice@example.com' },
+      { accounts: [], openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    const header = headerOf(h.payload().quotedBodyHtml);
+    assert.equal(header.querySelector('img'), null);
+    assert.deepEqual(linesOf(header), [`On ${when}, ${name} <alice@example.com> wrote:`]);
+  });
+
+  it('shows markup in the subject as text, not as a link', async () => {
+    const subject = 'Pay <a href="https://phish.example">here</a>';
+    const h = harness({ text: 'body', html: '<p>body</p>' });
+    await openForwardFromMessage(
+      { id: 'm1', date, from_email: 'x@example.com', subject },
+      { openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    const header = headerOf(h.payload().quotedBodyHtml);
+    assert.equal(header.querySelector('a'), null);
+    assert.deepEqual(linesOf(header), [
+      '---------- Forwarded message ----------',
+      'From: x@example.com',
+      `Date: ${when}`,
+      `Subject: ${subject}`,
+    ]);
+  });
+
+  it('shows markup in the forwarded From, To and Cc names as text, not as images', async () => {
+    const img = '<img src="https://tracker.example/px">';
+    const h = harness({ text: 'body', html: '<p>body</p>' });
+    await openForwardFromMessage(
+      {
+        id: 'm1', date, from_name: `Ann${img}`, from_email: 'ann@example.com', subject: 'Hello',
+        to_addresses: [{ name: `Bob${img}`, email: 'bob@example.com' }],
+        cc_addresses: [{ name: `Dee${img}`, email: 'dee@example.com' }],
+      },
+      { openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    const header = headerOf(h.payload().quotedBodyHtml);
+    assert.equal(header.querySelector('img'), null);
+    assert.deepEqual(linesOf(header), [
+      '---------- Forwarded message ----------',
+      `From: Ann${img} <ann@example.com>`,
+      `Date: ${when}`,
+      'Subject: Hello',
+      `To: Bob${img} <bob@example.com>`,
+      `Cc: Dee${img} <dee@example.com>`,
+    ]);
+  });
+
+  it('shows an entity in the subject as written, not decoded', async () => {
+    const subject = 'Q&A &amp; notes';
+    const h = harness({ text: 'body', html: '<p>body</p>' });
+    await openForwardFromMessage(
+      { id: 'm1', date, from_email: 'x@example.com', subject },
+      { openCompose: h.openCompose, getMessageBody: h.getMessageBody },
+    );
+    assert.deepEqual(linesOf(headerOf(h.payload().quotedBodyHtml)), [
+      '---------- Forwarded message ----------',
+      'From: x@example.com',
+      `Date: ${when}`,
+      `Subject: ${subject}`,
+    ]);
   });
 });
 
