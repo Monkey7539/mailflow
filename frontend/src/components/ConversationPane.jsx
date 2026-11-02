@@ -12,6 +12,8 @@ import {
   newestConversationMessage,
 } from '../utils/conversation.js';
 import { archiveThread, deleteThread, spamThread, moveThread, snoozeThread, inAccount, otherAccountsDraft } from '../utils/threadActions.js';
+import { conversationSnoozeTarget } from '../utils/conversationActions.js';
+import { changeSnooze } from '../utils/snoozeActions.js';
 import { advanceSelectionAfterRemoval, adjacentRow, openAdjacentRow } from '../utils/listSelection.js';
 import { useSwipeBack } from '../hooks/useSwipeBack.js';
 import SwipePager from './SwipePager.jsx';
@@ -258,13 +260,20 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
     printInWindow(win, buildPrintDocument(entries));
   };
 
-  // Both pickers open on the newest of accountId's copies (of any account's in the unified inbox):
-  // the move picker lists that copy's account's folders, and the snooze picker's Back row leads
-  // to the full menu, whose plugin items (GTD classify) act on that copy. With no copy of
+  // What Snooze acts on, of accountId's copies (of any account's in the unified inbox): the newest
+  // inbox copy, which snoozeThread snoozes, else a snoozed copy, whose time the picker changes. With
+  // neither there is no Snooze button.
+  const snoozeTarget = conversationSnoozeTarget(inAccount(messages, accountId), selectedMessageId);
+
+  // The move picker opens on the newest of accountId's copies (of any account's in the unified
+  // inbox) and lists that copy's account's folders. The snooze picker opens on the snooze target,
+  // so its title and action are that message's: Snooze, or Change snooze time. With no copy of
   // accountId on screen there is nothing to open either on. With the other account's draft picked
   // under the row Move takes nothing (moveThread), and the reader is told before picking a folder.
   const openPicker = (event, view) => {
-    const pickerMessage = newestConversationMessage(inAccount(messages, accountId));
+    const pickerMessage = view === 'snooze'
+      ? snoozeTarget
+      : newestConversationMessage(inAccount(messages, accountId));
     if (!pickerMessage || (view === 'move' && otherAccountsDraft(messages, selectedMessageId, accountId))) {
       sayNothingTaken(view);
       return;
@@ -354,9 +363,11 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
         <ActionBtn onClick={e => openPicker(e, 'move')} label={t('contextMenu.moveToFolder')} touch={isMobile} popup expanded={picker?.view === 'move'}>
           <MoveIcon />
         </ActionBtn>
-        <ActionBtn onClick={e => openPicker(e, 'snooze')} label={t('contextMenu.snooze.label')} touch={isMobile} popup expanded={picker?.view === 'snooze'}>
-          <SnoozeIcon />
-        </ActionBtn>
+        {snoozeTarget && (
+          <ActionBtn onClick={e => openPicker(e, 'snooze')} label={t('contextMenu.snooze.label')} touch={isMobile} popup expanded={picker?.view === 'snooze'}>
+            <SnoozeIcon />
+          </ActionBtn>
+        )}
         {!hasBackBar && headerMessage && <PluginSlot name="message-header-meta" ctx={headerContext} />}
         <div style={{ flex: 1 }} />
         <ActionBtn onClick={() => runAction('spam', spamThread)} label={t('contextMenu.markAsSpam')} touch={isMobile}>
@@ -382,6 +393,8 @@ export default function ConversationPane({ threadId, folder, unified = false, ac
           onAction={(action, data) => {
             if (action === 'moveTo') runAction('move', (list, opts) => moveThread(list, data, opts));
             else if (action === 'snooze') runAction('snooze', (list, opts) => snoozeThread(list, data, opts));
+            // Not runAction: nothing leaves the list, the snoozed message only comes back at another time.
+            else if (action === 'changeSnooze') changeSnooze(picker.message, data, { t });
             setPicker(null);
           }}
         />
