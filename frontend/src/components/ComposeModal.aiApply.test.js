@@ -1,5 +1,5 @@
-// Render test for Apply on an AI suggestion. utils/aiText.test.js covers the conversion; this checks
-// the composer's Apply goes through it, in the real editor, which rewrites what it is given.
+// Render test for Apply on an AI suggestion. utils/aiComposeText.test.js covers the conversion; this
+// checks the composer's Apply goes through it, in the real editor, which rewrites what it is given.
 
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
