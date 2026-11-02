@@ -75,6 +75,32 @@ describe('GET /api/mail/thread/:threadId account scoping (#476)', () => {
   });
 });
 
+// Where a server keeps snoozed mail in INBOX.Snoozed, a copy is known as snoozed by its own snooze
+// record naming that folder (isSnoozed in the frontend's snoozeActions.js), which the route gives it.
+// The rule itself runs against PostgreSQL in mail.threadSnoozed.postgres.test.js.
+describe('GET /api/mail/thread gives each copy its own snooze record\'s folder', () => {
+  let server;
+  let base;
+  beforeAll(async () => {
+    await new Promise(resolve => { server = buildApp().listen(0, resolve); });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(async () => { await new Promise(resolve => server.close(resolve)); });
+  beforeEach(() => { query.mockReset(); });
+
+  it('selects snoozed_folder from a record for the same account, Message-ID and folder, one per copy', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 'acct-1', include_in_unified_inbox: true }] });
+    query.mockResolvedValueOnce({ rows: [] });
+    const response = await fetch(`${base}/api/mail/thread?id=${encodeURIComponent('<m1@example.com>')}`);
+    expect(response.status).toBe(200);
+    expect(query.mock.calls[1][0].replace(/\s+/g, ' ')).toContain(
+      '(SELECT sm.snoozed_folder FROM snoozed_messages sm'
+      + ' WHERE sm.account_id = m.account_id AND sm.message_id_header = m.message_id'
+      + ' AND sm.snoozed_folder = m.folder LIMIT 1) AS snoozed_folder',
+    );
+  });
+});
+
 // GitHub's Message-IDs contain slashes, and some reverse proxies reject or decode an encoded
 // slash in a path, so the client sends the thread id as a query parameter (#509).
 describe('GET /api/mail/thread?id=', () => {
